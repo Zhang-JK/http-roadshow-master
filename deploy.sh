@@ -1151,7 +1151,11 @@ do_rollback() { # target release, db backup to restore (optional)
 }
 
 # ---------------------------------------------------------------- commands
-require_installed() { [ -f "$CONF" ] && [ -L "$CURRENT" ] || die "尚未安装，请先执行：sudo bash deploy.sh install"; }
+require_installed() {
+  [ -f "$CONF" ] && [ -L "$CURRENT" ] && return 0
+  [ -f "$CONF" ] && die "$BASE_DIR 中的上次安装没有完成（没有可运行的版本），请重新安装：sudo bash deploy.sh install（会沿用已保存的设置）"
+  die "尚未安装，请先执行：sudo bash deploy.sh install"
+}
 
 cmd_install() {
   [ "$(uname -s)" = Linux ] || die "仅支持 Linux"

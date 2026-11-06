@@ -167,8 +167,10 @@ APP="$WORK/roadshow-studio"
 [ -f "$APP/PREBUILT" ] && [ -f "$APP/deploy.sh" ] || die "这不是预编译安装包：$PKG"
 [ "$(cat "$APP/PREBUILT")" = "linux-$ARCH" ] || die "安装包适用于 $(cat "$APP/PREBUILT")，本机是 linux-$ARCH"
 
-if [ -f "$(readlink -m "$BASE")/shared/deploy.conf" ]; then CMD=update; EXTRA=(--yes); else CMD=install; EXTRA=(); fi
-log "执行 deploy.sh $CMD（预编译模式：不安装 npm 依赖，不下载 Node.js）"
+# "auto" updates a working installation and (re)installs anything else, including one left half-done
+# by an earlier failed attempt.
+if [ -L "$(readlink -m "$BASE")/current" ]; then log "检测到已有安装，执行更新（预编译模式：不安装 npm 依赖，不下载 Node.js）"
+else log "执行安装（预编译模式：不安装 npm 依赖，不下载 Node.js）"; fi
 rc=0
-bash "$APP/deploy.sh" "$CMD" --source archive --manifest "$MANIFEST_URL" --prebuilt --from "$PKG" ${EXTRA[@]+"${EXTRA[@]}"} ${PASS[@]+"${PASS[@]}"} || rc=$?
+bash "$APP/deploy.sh" auto --source archive --manifest "$MANIFEST_URL" --prebuilt --from "$PKG" ${PASS[@]+"${PASS[@]}"} || rc=$?
 exit "$rc"
