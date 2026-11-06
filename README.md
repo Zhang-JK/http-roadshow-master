@@ -33,6 +33,21 @@
 - **工具调用**：`llm.ts` 的 `chatWithTools` 实现 OpenAI 风格的函数调用循环（流式合并 `tool_calls`，工具返回的图片以紧随其后的 user 消息转发，最后一轮 `tool_choice: none` 强制作答）；文件工具在 `fileTools.ts`，草稿工具在 `draft.ts`。自检阶段不再重发初稿 HTML（模型用 `read_draft` 按需读取），并只保留原提示中的前 6 张图片，以控制上下文（DeepSeek 在线版上下文 200k）。
 - **扩展点**：新增导出格式在 `routes/projects.ts` 的 export 中添加；新增模型协议在 `llm.ts` 中扩展 `chatWithEndpoint`；新增项目类型只需扩展 `projects.type` 与 `prompts.ts`。
 
+## 从 GitHub Actions 预编译包部署（服务器无需 npm）
+
+每次推送到 `main`，GitHub Actions（`.github/workflows/release.yml`）会编译前后端并发布一个 Release：每种 CPU（x64 / arm64）一个安装包，内含编译好的程序、生产依赖 `node_modules` 和 Node.js 运行时，约 75MB。服务器只需下载这一个文件，**不访问 npm、不下载 Node.js**，适合公司代理拦截 npm 的环境：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Zhang-JK/http-roadshow-master/main/deploy_from_action.sh
+sudo -E bash deploy_from_action.sh                          # 安装；已安装时更新到最新预编译版本
+sudo -E bash deploy_from_action.sh --proxy http://proxy:8080 --ca-cert corp-root.crt --port 9090
+```
+
+- 先测试能否访问 GitHub 发布清单，再下载安装包并校验 SHA256，然后交给包内的 `deploy.sh` 完成安装（系统用户、systemd、开机自启等与下文相同）。代理、证书参数与 `deploy.sh` 一致（`--proxy`、`--ca-cert 文件|auto`、`--insecure`），其他参数（`--port`、`--base`、`--user` 等）原样传给 `deploy.sh`。
+- 之后网页「系统更新」和 `roadshow-studio update` 都从 GitHub Release 获取新的预编译包（配置中 `PREBUILT=1`，不会再走 npm）。
+- 服务器连 GitHub 也访问不了时：在能上网的电脑上从 Release 页面下载对应的 `roadshow-studio-…-linux-x64.tar.gz`，复制到服务器后执行 `sudo bash deploy_from_action.sh --file 安装包.tar.gz`。也可以把 Release 中的文件放到内网服务器上，用 `--manifest http://内网地址/latest-linux-x64.json` 安装和更新。
+- `--tag r1.1.0-abc1234` 安装指定版本；`--repo 用户/仓库` 使用 fork。也可在本地执行 `bash scripts/package-prebuilt.sh x64 输出目录` 生成同样的安装包（需先编译并 `npm prune --omit=dev`）。
+
 ## 部署到 Linux 服务器（推荐）
 
 支持 Ubuntu/Debian、CentOS/RHEL/Rocky、openSUSE 等（x86_64 / arm64）。脚本自动安装 Node.js 22、中文字体、浏览器（用于 PDF/PPT 导出），以独立系统用户 `roadshow` 运行，有 systemd 时注册为 `roadshow-studio` 服务（开机自启、崩溃自动重启），否则使用内置守护进程。

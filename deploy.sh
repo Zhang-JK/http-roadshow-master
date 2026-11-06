@@ -31,6 +31,7 @@
 #                                auto = 从代理返回的证书链中取根证书并信任（会打印指纹供核对）
 #   --insecure / --secure        关闭 / 恢复 HTTPS 证书校验（仅在无法获得公司根证书时使用）
 #   --skip-nettest               跳过安装/更新前的网络连接检测
+#   --prebuilt                   只使用 GitHub Actions 发布的预编译包（不运行 npm、不下载 Node.js；deploy_from_action.sh 自动设置）
 set -Eeuo pipefail
 
 APP_NAME="roadshow-studio"
@@ -60,7 +61,7 @@ CMD="${1:-auto}"; [ $# -gt 0 ] && shift
 OPT_SOURCE=""; OPT_REPO=""; OPT_BRANCH=""; OPT_MANIFEST=""; OPT_FROM=""; OPT_PORT=""; OPT_HOST=""
 OPT_BASE=""; OPT_USER=""; OPT_NO_SYSTEMD=0; OPT_ADMIN_PWD=""; OPT_NPM_REGISTRY=""; OPT_NODE_MIRROR=""
 OPT_JSON=0; OPT_YES=0; OPT_FORCE=0; OPT_FOLLOW=0; OPT_PURGE=0
-OPT_PROXY=""; OPT_NO_PROXY=""; OPT_CA_CERT=""; OPT_INSECURE=""; OPT_SKIP_NETTEST=0
+OPT_PROXY=""; OPT_NO_PROXY=""; OPT_CA_CERT=""; OPT_INSECURE=""; OPT_SKIP_NETTEST=0; OPT_PREBUILT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) OPT_SOURCE="$2"; shift ;;
@@ -82,6 +83,7 @@ while [ $# -gt 0 ]; do
     --insecure) OPT_INSECURE=1 ;;
     --secure) OPT_INSECURE=0 ;;
     --skip-nettest) OPT_SKIP_NETTEST=1 ;;
+    --prebuilt) OPT_PREBUILT=1 ;;
     --json) OPT_JSON=1 ;;
     --yes|-y) OPT_YES=1 ;;
     --force) OPT_FORCE=1 ;;
@@ -114,7 +116,7 @@ UNIT_FILE="/etc/systemd/system/$APP_NAME.service"
 # Defaults, overridden by deploy.conf, then by command-line options.
 PORT=9090; HOST=0.0.0.0; UPDATE_SOURCE=local; REPO_URL=""; BRANCH=main; MANIFEST_URL=""; LOCAL_SOURCE=""
 SERVICE_USER=""; USE_SYSTEMD=0; NODE_BIN=""; KEEP_RELEASES=3; NPM_REGISTRY=""; NODE_MIRROR="https://nodejs.org/dist"
-ADMIN_PASSWORD=""; PROXY_URL=""; NO_PROXY_LIST=""; CA_CERT=""; TLS_INSECURE=0
+ADMIN_PASSWORD=""; PROXY_URL=""; NO_PROXY_LIST=""; CA_CERT=""; TLS_INSECURE=0; PREBUILT=0
 if [ -f "$CONF" ] && [ ! -r "$CONF" ]; then
   if have sudo; then exec sudo bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}"; fi
   echo "无权读取 $CONF，请使用 root 或服务用户执行" >&2; exit 1
@@ -132,6 +134,7 @@ fi
 [ -n "$OPT_PROXY" ] && PROXY_URL="$OPT_PROXY"
 [ -n "$OPT_NO_PROXY" ] && NO_PROXY_LIST="$OPT_NO_PROXY"
 [ -n "$OPT_INSECURE" ] && TLS_INSECURE="$OPT_INSECURE"
+[ -n "$OPT_PREBUILT" ] && PREBUILT="$OPT_PREBUILT"
 [ "$OPT_CA_CERT" = none ] && CA_CERT=""
 if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
@@ -159,6 +162,7 @@ PROXY_URL=$(printf %q "$PROXY_URL")
 NO_PROXY_LIST=$(printf %q "$NO_PROXY_LIST")
 CA_CERT=$(printf %q "$CA_CERT")
 TLS_INSECURE=$(printf %q "$TLS_INSECURE")
+PREBUILT=$(printf %q "$PREBUILT")
 EOF
   mv -f "$CONF.tmp" "$CONF"
   chmod 600 "$CONF"
@@ -461,11 +465,12 @@ probe_npm_tarball() {
   rm -f "$tmp" "$err"
 }
 
-probe_url() { # label url required(1|0)
-  local label="$1" url="$2" req="$3" code rc=0 err why
+probe_url() { # label url required(1|0) [file: follow redirects and require 2xx]
+  local label="$1" url="$2" req="$3" mode="${4:-}" code rc=0 err why follow=()
   err="$(mktemp)"
-  code="$(net_curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$url" 2>"$err")" || rc=$?
-  if [ "$rc" = 0 ] && [ "$code" != 407 ] && [ "${code:0:1}" != 5 ]; then
+  [ "$mode" = file ] && follow=(-L)
+  code="$(net_curl -sS ${follow[@]+"${follow[@]}"} -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$url" 2>"$err")" || rc=$?
+  if [ "$rc" = 0 ] && [ "$code" != 407 ] && [ "${code:0:1}" != 5 ] && { [ "$mode" != file ] || [ "${code:0:1}" = 2 ]; }; then
     ok "  $label：可访问（HTTP $code）"
   else
     if [ "$rc" = 0 ]; then
@@ -520,13 +525,18 @@ net_preflight() {
   else log "  HTTPS 证书校验：系统根证书"; fi
 
   if find_node >/dev/null; then ok "  Node.js：已有可用的 Node.js $NODE_MAJOR+，无需下载"
+  elif node_ok "$SCRIPT_DIR/node/bin/node" || [ "$PREBUILT" = 1 ]; then ok "  Node.js：使用发布包自带的版本，无需下载"
   else probe_url "Node.js 下载源（$NODE_MIRROR）" "$NODE_MIRROR/latest-v$NODE_MAJOR.x/SHASUMS256.txt" 1; fi
-  probe_url "npm 仓库（${NPM_REGISTRY:-https://registry.npmjs.org}）" "${NPM_REGISTRY:-https://registry.npmjs.org}/-/ping" 1
-  probe_npm_tarball
+  if [ "$PREBUILT" = 1 ]; then
+    ok "  npm：使用预编译发布包，无需访问 npm 仓库"
+  else
+    probe_url "npm 仓库（${NPM_REGISTRY:-https://registry.npmjs.org}）" "${NPM_REGISTRY:-https://registry.npmjs.org}/-/ping" 1
+    probe_npm_tarball
+  fi
   if [ -z "$OPT_FROM" ]; then
     case "$UPDATE_SOURCE" in
       git) case "$REPO_URL" in /*|file://*) ;; *) [ -n "$REPO_URL" ] && probe_git "$REPO_URL" "$BRANCH" ;; esac ;;
-      archive) case "$MANIFEST_URL" in http://*|https://*) probe_url "发布清单（$MANIFEST_URL）" "$MANIFEST_URL" 1 ;; esac ;;
+      archive) case "$MANIFEST_URL" in http://*|https://*) probe_url "发布清单（$MANIFEST_URL）" "$MANIFEST_URL" 1 file ;; esac ;;
     esac
   fi
   if is_root && [ "$(detect_pkg)" = apt ]; then
@@ -606,6 +616,16 @@ ensure_node() {
     [ "$found" = "$BASE_DIR/node/bin/node" ] || ok "使用系统 Node.js $("$NODE_BIN" -v)（$NODE_BIN）"
     return 0
   fi
+  local bundled
+  for bundled in "$SCRIPT_DIR/node" "${OPT_FROM:-/nonexistent}/node"; do
+    if node_ok "$bundled/bin/node"; then
+      rm -rf "$BASE_DIR/node.new" && mkdir -p "$BASE_DIR/node.new" && cp -a "$bundled/." "$BASE_DIR/node.new/"
+      rm -rf "$BASE_DIR/node" && mv "$BASE_DIR/node.new" "$BASE_DIR/node"
+      NODE_BIN="$BASE_DIR/node/bin/node"
+      ok "使用发布包自带的 Node.js $("$NODE_BIN" -v)（已复制到 $BASE_DIR/node）"
+      return 0
+    fi
+  done
   local arch
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) die "不支持的 CPU 架构：$(uname -m)" ;; esac
   log "下载 Node.js $NODE_MAJOR（$arch，镜像 $NODE_MIRROR）"
@@ -716,7 +736,11 @@ current_commit() { version_field "$CURRENT/VERSION.json" commit; }
 fetch_manifest() { # -> prints manifest json
   [ -n "$MANIFEST_URL" ] || die "未配置发布清单地址（MANIFEST_URL）"
   case "$MANIFEST_URL" in
-    http://*|https://*) net_curl -fsSL --max-time 30 "$MANIFEST_URL" ;;
+    http://*|https://*)
+      local err rc=0; err="$(mktemp)"
+      net_curl -fsSL --connect-timeout 15 --max-time 60 "$MANIFEST_URL" 2>"$err" || rc=$?
+      [ "$rc" = 0 ] || { warn "获取发布清单失败：$(explain_curl_error "$rc" "$err" "$MANIFEST_URL")"; rm -f "$err"; return 1; }
+      rm -f "$err" ;;
     *) cat "${MANIFEST_URL#file://}" ;;
   esac
 }
@@ -764,6 +788,10 @@ current_id() {
 
 copy_tree() { # src dst
   mkdir -p "$2"
+  if [ -f "$1/PREBUILT" ]; then
+    tar -C "$1" --exclude=./node --exclude='./server/data' -cf - . | tar -C "$2" -xf -
+    return
+  fi
   tar -C "$1" --exclude=node_modules --exclude=dist --exclude=.git --exclude='server/data' \
       --exclude='web/test-results' --exclude='web/playwright-report' -cf - . | tar -C "$2" -xf -
 }
@@ -819,7 +847,13 @@ fetch_source() {
         tmp="$(mktemp -d)"
         local fname="$tmp/release.${url##*.}"
         case "$url" in *.tar.gz) fname="$tmp/release.tar.gz" ;; esac
-        case "$url" in http://*|https://*) net_curl -fsSL "$url" -o "$fname" || die "发布包下载失败" ;; *) cp "${url#file://}" "$fname" ;; esac
+        case "$url" in
+          http://*|https://*)
+            local rc=0
+            net_curl -fSL --connect-timeout 15 --retry 2 "$url" -o "$fname" 2>"$tmp/err" || rc=$?
+            [ "$rc" = 0 ] || die "发布包下载失败：$(explain_curl_error "$rc" "$tmp/err" "$url")" ;;
+          *) cp "${url#file://}" "$fname" ;;
+        esac
         if [ -n "$sum" ]; then
           echo "$sum  $fname" | sha256sum -c - >/dev/null || die "发布包 SHA256 校验失败"
           ok "发布包校验通过"
@@ -835,6 +869,10 @@ fetch_source() {
     esac
   fi
   [ -f "$dst/server/package.json" ] && [ -f "$dst/web/package.json" ] || die "代码结构不正确（缺少 server/ 或 web/）"
+  if [ -f "$dst/PREBUILT" ] && [ -f "$dst/VERSION.json" ]; then
+    SRC_VERSION="$(version_field "$dst/VERSION.json" version)"
+    SRC_COMMIT="$(version_field "$dst/VERSION.json" commit)"
+  fi
   if [ -z "$SRC_VERSION" ]; then
     SRC_VERSION="$("$NODE_BIN" -p "require('$dst/package.json').version || '0.0.0'" 2>/dev/null || echo 0.0.0)"
     if [ -n "$SRC_COMMIT" ]; then SRC_VERSION="$SRC_VERSION+${SRC_COMMIT:0:7}"; fi
@@ -842,6 +880,23 @@ fetch_source() {
 }
 
 build_release() { # dir
+  local dir="$1"
+  if [ -f "$dir/PREBUILT" ]; then
+    [ -f "$dir/server/dist/main.js" ] && [ -d "$dir/server/node_modules" ] && [ -f "$dir/web/dist/index.html" ] || die "预编译发布包不完整（缺少 server/dist、server/node_modules 或 web/dist）"
+    (cd "$dir/server" && "$NODE_BIN" -e "new (require('better-sqlite3'))(':memory:').close()") \
+      || die "预编译发布包中的 SQLite 模块无法在本机加载（$(uname -sm)，$(ldd --version 2>&1 | head -1)）"
+    ok "使用预编译版本（无需安装 npm 依赖）"
+  else
+    [ "$PREBUILT" = 1 ] && die "已设置只使用预编译发布包（PREBUILT=1），但获取到的是源码；请检查 --manifest 地址，或用 --prebuilt 以外的方式安装"
+    build_from_source "$dir"
+  fi
+  cat > "$dir/VERSION.json" <<EOF
+{"version":"$(json_escape "$SRC_VERSION")","commit":"$(json_escape "$SRC_COMMIT")","source":"$(json_escape "${OPT_FROM:+local}${OPT_FROM:-$UPDATE_SOURCE}")","ref":"$(json_escape "$SRC_REF")","builtAt":"$(date -u +%FT%TZ)"}
+EOF
+  ok "构建完成：$SRC_VERSION"
+}
+
+build_from_source() { # dir
   local dir="$1"
   log "安装后端依赖并编译"
   npm_install "$dir/server" 后端
@@ -852,10 +907,6 @@ build_release() { # dir
   (cd "$dir/web" && PATH="$(dirname "$NODE_BIN"):$PATH" npm_cmd run build) || die "前端构建失败（报错见上方）"
   rm -rf "$dir/web/node_modules"
   [ -f "$dir/server/dist/main.js" ] && [ -f "$dir/web/dist/index.html" ] || die "构建产物缺失"
-  cat > "$dir/VERSION.json" <<EOF
-{"version":"$(json_escape "$SRC_VERSION")","commit":"$(json_escape "$SRC_COMMIT")","source":"$(json_escape "${OPT_FROM:+local}${OPT_FROM:-$UPDATE_SOURCE}")","ref":"$(json_escape "$SRC_REF")","builtAt":"$(date -u +%FT%TZ)"}
-EOF
-  ok "构建完成：$SRC_VERSION"
 }
 
 backup_db() { # release dir -> prints backup path
@@ -1273,5 +1324,5 @@ case "$CMD" in
   uninstall) cmd_uninstall ;;
   run) cmd_run ;;
   supervise) cmd_supervise ;;
-  help|*) sed -n '2,37p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//' ;;
+  help|*) sed -n '2,34p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//' ;;
 esac
