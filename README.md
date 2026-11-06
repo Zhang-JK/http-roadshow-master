@@ -85,7 +85,7 @@ sudo roadshow-studio uninstall   # 卸载程序（保留数据；--purge 连同�
 
 **更新流程**：获取新代码 → 在新的 `releases/<时间>` 目录中安装依赖并构建（不影响正在运行的服务）→ 备份 SQLite 数据库 → 切换 `current` 软链接并重启 → 健康检查（确认 `/api/health` 返回新版本号）。构建失败时服务不受影响；新版本无法启动或反复崩溃时自动切回旧版本并恢复数据库。默认保留最近 3 个版本与 7 份数据库备份。
 
-**安装选项**：`--port`（默认 9090）、`--host`（默认 0.0.0.0）、`--base`（默认 `/opt/roadshow-studio`）、`--user`、`--no-systemd`、`--npm-registry https://registry.npmmirror.com`、`--node-mirror https://npmmirror.com/mirrors/node`（国内网络）。非 root 用户也可安装到自己有权限的目录（如 `--base ~/roadshow`），此时跳过系统依赖安装并使用内置守护进程。
+**安装选项**：`--port`（默认 9090）、`--host`（默认 0.0.0.0）、`--base`（默认 `/opt/roadshow-studio`）、`--user`、`--no-systemd`、`--npm-registry https://registry.npmmirror.com`、`--node-mirror https://npmmirror.com/mirrors/node`（国内网络）。非 root 用户也可安装到自己有权限的目录（如 `--base ~/roadshow`），此时跳过系统依赖安装并使用内置守护进程。下载的安装包、解压和 Chromium 下载等临时文件都放在 `<安装目录>/tmp`（不占用 /tmp），应用运行时的转换临时文件也在这里。用 sudo 安装到家目录（如 `--base ~/deploy`）而默认服务用户 `roadshow` 无权进入时，会自动改用执行 sudo 的用户运行服务（或用 `--user` 指定）。
 
 ### 公司代理 / HTTPS 证书
 

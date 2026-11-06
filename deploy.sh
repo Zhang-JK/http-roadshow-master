@@ -138,6 +138,18 @@ fi
 [ -n "$OPT_PREBUILT" ] && PREBUILT="$OPT_PREBUILT"
 SERVICE_NAME="${SERVICE_NAME:-$APP_NAME}"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+
+# Downloads, unpacked packages and the Chromium download go under the installation instead of /tmp,
+# which is often small (or full) on servers. The app uses the same directory for its conversions.
+TMP_DIR="$BASE_DIR/tmp"
+use_base_tmp() {
+  mkdir -p "$TMP_DIR" 2>/dev/null || return 0
+  if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && id "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER": "$TMP_DIR"; fi
+  [ -w "$TMP_DIR" ] || return 0
+  find "$TMP_DIR" -mindepth 1 -maxdepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+  export TMPDIR="$TMP_DIR"
+}
+case "$CMD" in install|update|auto|check|nettest|doctor) use_base_tmp ;; esac
 [ "$OPT_CA_CERT" = none ] && CA_CERT=""
 if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
@@ -177,6 +189,7 @@ EOF
 own_file() { if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && id "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER": "$@"; fi; }
 
 write_app_env() {
+  mkdir -p "$TMP_DIR" && own_file "$TMP_DIR"
   cat > "$APP_ENV.tmp" <<EOF
 NODE_ENV=production
 PORT=$PORT
@@ -188,6 +201,7 @@ RS_RUN_DIR=$RUN_DIR
 PLAYWRIGHT_BROWSERS_PATH=$SHARED/ms-playwright
 HOME=$BASE_DIR
 npm_config_cache=$SHARED/npm-cache
+TMPDIR=$TMP_DIR
 PATH=$(dirname "${NODE_BIN:-/usr/bin/node}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
   [ -n "$ADMIN_PASSWORD" ] && echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$APP_ENV.tmp"
@@ -208,6 +222,21 @@ EOF
   mv -f "$APP_ENV.tmp" "$APP_ENV"
   chmod 600 "$APP_ENV"
   own_file "$APP_ENV"
+}
+
+# First directory on the way to $2 that user $1 cannot enter (prints nothing when all are accessible).
+blocked_dir() {
+  local user="$1" path="" part IFS=/
+  for part in $2; do
+    [ -n "$part" ] || continue
+    path="$path/$part"
+    [ -d "$path" ] || break
+    if id "$user" >/dev/null 2>&1; then
+      runuser -u "$user" -- test -x "$path" 2>/dev/null || { echo "$path"; return; }
+    else
+      case "$(stat -c %A "$path")" in ?????????[xt]) ;; *) echo "$path"; return ;; esac
+    fi
+  done
 }
 
 as_service_user() {
@@ -857,7 +886,7 @@ fetch_source() {
   SRC_COMMIT=""; SRC_VERSION=""; SRC_REF=""
   if [ -n "$OPT_FROM" ]; then
     [ -e "$OPT_FROM" ] || die "源路径不存在，或用户 $(id -un) 无权访问：$OPT_FROM"
-    [ -r "$OPT_FROM" ] || die "用户 $(id -un) 无权读取 $OPT_FROM，请把它放到该用户可读的位置（如 /tmp）"
+    [ -r "$OPT_FROM" ] || die "用户 $(id -un) 无权读取 $OPT_FROM，请把它放到该用户可读的位置（如 $TMP_DIR）"
     log "从本地获取代码：$OPT_FROM"
     if [ -d "$OPT_FROM" ]; then
       copy_tree "$OPT_FROM" "$dst"
@@ -1235,6 +1264,14 @@ cmd_install() {
   net_preflight
   if is_root; then
     SERVICE_USER="${OPT_USER:-${SERVICE_USER:-roadshow}}"
+    local blocked=""
+    [ "$SERVICE_USER" = root ] || blocked="$(blocked_dir "$SERVICE_USER" "$BASE_DIR")"
+    # e.g. --base ~/deploy under sudo: a home directory other users cannot enter.
+    if [ -n "$blocked" ] && [ -z "$OPT_USER" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && [ -z "$(blocked_dir "$SUDO_USER" "$BASE_DIR")" ]; then
+      warn "服务用户 $SERVICE_USER 无法进入 $blocked，改用 $SUDO_USER 运行服务（可用 --user 指定其他用户）"
+      SERVICE_USER="$SUDO_USER"; blocked=""
+    fi
+    [ -z "$blocked" ] || die "服务用户 $SERVICE_USER 无法进入 $blocked：请用 --user 指定能访问 $BASE_DIR 的用户，或把 --base 放到 /opt 等目录"
     if [ "$SERVICE_USER" != root ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
       useradd --system --home-dir "$BASE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER" 2>/dev/null \
         || useradd -r -d "$BASE_DIR" -s /sbin/nologin "$SERVICE_USER"

@@ -15,6 +15,7 @@
 #   --proxy URL|none      HTTP(S) proxy; default: https_proxy/http_proxy (also read through sudo)
 #   --ca-cert FILE|auto   trust the company root certificate (auto: take it from the proxy's certificate chain)
 #   --insecure            skip HTTPS certificate checks
+# The package is downloaded and unpacked under <base>/tmp (--base, default /opt/roadshow-studio), not /tmp.
 # Any other option (--port, --base, --user, --no-systemd, --admin-password, ...) is passed to deploy.sh.
 set -Eeuo pipefail
 
@@ -31,7 +32,7 @@ while [ $# -gt 0 ]; do
     --ca-cert) CA="$2"; shift ;;
     --insecure) INSECURE=1; PASS+=("$1") ;;
     --base) BASE="$2"; PASS+=("$1" "$2"); shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     --*) if [ $# -gt 1 ] && [ "${2#--}" = "$2" ]; then PASS+=("$1" "$2"); shift; else PASS+=("$1"); fi ;;
     *) PASS+=("$1") ;;
   esac
@@ -50,7 +51,16 @@ case "$(uname -m)" in x86_64|amd64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; *) 
 have curl || [ -n "$FILE" ] || die "需要 curl（或用 --file 指定已下载的安装包）"
 have tar || die "需要 tar"
 
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+# Download and unpack inside the installation directory (same disk as the releases) rather than /tmp,
+# which is often small or full on servers.
+BASE="$(readlink -m "$BASE")"
+if mkdir -p "$BASE/tmp" 2>/dev/null && [ -w "$BASE/tmp" ]; then
+  WORK="$(mktemp -d -p "$BASE/tmp" deploy.XXXXXX)"
+else
+  WORK="$(mktemp -d)"
+  printf '%s\n' "无法写入 $BASE/tmp，临时文件改放在 $(dirname "$WORK")" >&2
+fi
+trap 'rm -rf "$WORK"' EXIT
 chmod 755 "$WORK"   # deploy.sh re-runs itself as the service user from here
 
 # sudo's env_reset drops proxy variables; the sudo process itself still has the caller's environment.
