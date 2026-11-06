@@ -174,7 +174,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
           <div className="spacer" />
           <button className="btn" onClick={onClose}>取消</button>
           <button className="btn btn-primary" disabled={!canSubmit} onClick={submit} data-testid="submit-create">
-            {busy ? (files.some((x) => isSlidesFile(x.file)) ? '上传并转换 PPT…' : '提交中…') : '开始生成'}
+            {busy ? (files.some((x) => isSlidesFile(x.file)) ? '上传并转换参考文件…' : '提交中…') : '开始生成'}
           </button>
         </>
       }
@@ -258,7 +258,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
           <textarea name="notes" rows={2} value={f.notes} onChange={(e) => set('notes')(e.target.value)} placeholder="例如：每页都要有公司 logo；避免使用红色；语言用英文……" />
         </label>
         <div className="field full">
-          <span>{type === 'template' ? '参考图片 / 参考 PPT / Logo（可选）' : '支持材料与参考（可选）'}</span>
+          <span>{type === 'template' ? '参考图片 / PPT / HTML / Logo（可选）' : '支持材料与参考（可选）'}</span>
           <FilePicker
             files={files}
             setFiles={setFiles}
@@ -266,8 +266,8 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
             accept={`image/*,${SLIDES_ACCEPT}${type === 'deck' ? `,${TEXT_ACCEPT}` : ''}`}
             hint={
               type === 'template'
-                ? '参考图或 PPT/PDF 会逐页转成图片交给 AI 模仿风格；Logo 等可切换为“嵌入页面”（最多 12 个）'
-                : '图片可嵌入页面或仅作参考；PPT/PDF 会逐页转成图片并提取文字供 AI 参考；文本 / CSV 提取文字作为依据'
+                ? '参考图或 PPT/PDF/HTML 会逐页转成图片交给 AI 模仿风格，AI 还可只读查阅原始文件；Logo 等可切换为“嵌入页面”（最多 12 个）'
+                : '图片可嵌入页面或仅作参考；PPT/PDF/HTML 会逐页转成图片并提取文字；大文件由 AI 用只读工具按需查阅'
             }
           />
         </div>

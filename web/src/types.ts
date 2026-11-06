@@ -42,6 +42,24 @@ export interface Project {
   doc?: DeckDoc;
 }
 
+export interface JobReview {
+  before: { errors: number; warnings: number };
+  after: { errors: number; warnings: number };
+  passes: number;
+  toolCalls: number;
+  edits: number;
+  summary?: string;
+  error?: string;
+}
+
+/** One-line description of what the self-check did. */
+export function reviewText(r: JobReview): string {
+  if (r.error) return `自检未完成（${r.error.slice(0, 60)}），已保存初稿`;
+  const fixed = r.edits ? `修改 ${r.edits} 处` : '未修改';
+  const issues = r.before.errors || r.after.errors ? `，布局错误 ${r.before.errors} → ${r.after.errors}` : '';
+  return `自检：${fixed}${issues}`;
+}
+
 export interface Job {
   id: string;
   projectId: string;
@@ -52,6 +70,7 @@ export interface Job {
   request: { prompt?: string; scope?: string; pageId?: string; elementIds?: string[] };
   progress: { chars: number; stage: string } | null;
   cost: number | null;
+  review?: JobReview | null;
   userId: number | null;
   userName?: string | null;
   createdAt: number;

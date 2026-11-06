@@ -40,7 +40,7 @@ export function ModelsPage() {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [assignments, setAssignments] = useState<{ userId: number; username: string; endpointName: string | null }[]>([]);
   const [usage, setUsage] = useState<Usage[]>([]);
-  const [settings, setSettings] = useState<{ attachScreenshots: boolean; maxTokens: number; temperature: number } | null>(null);
+  const [settings, setSettings] = useState<{ attachScreenshots: boolean; selfCheck: boolean; selfCheckRounds: number; maxTokens: number; temperature: number } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
   const [formTest, setFormTest] = useState<TestResult | null>(null);
@@ -189,6 +189,14 @@ export function ModelsPage() {
               <label className="switch">
                 <input type="checkbox" checked={settings.attachScreenshots} onChange={(e) => saveSettings({ attachScreenshots: e.target.checked })} />
                 <span>修改单页/元素时附带页面截图（红框标出选中元素，利用多模态能力）</span>
+              </label>
+              <label className="switch">
+                <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
+                <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存</span>
+              </label>
+              <label className="field inline">
+                <span>自检最多工具轮数</span>
+                <input type="number" min="1" max="20" defaultValue={settings.selfCheckRounds} onBlur={(e) => saveSettings({ selfCheckRounds: Number(e.target.value) })} />
               </label>
               <label className="field inline">
                 <span>最大输出 tokens</span>

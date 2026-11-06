@@ -6,16 +6,15 @@ import {
   diffDocs,
   emptyDoc,
   findElements,
-  parseFragment,
-  parseFullHtml,
-  replacePage,
   type DeckDoc,
   type DiffSummary,
 } from './deck.js';
-import { chat, type ChatMessage } from './llm.js';
+import { chat, chatWithTools, type ChatMessage } from './llm.js';
 import { buildDeckPrompt, buildEditPrompt, buildTemplatePrompt, type DeckBrief, type EditScope, type TemplateBrief } from './prompts.js';
-import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs } from './assets.js';
+import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
+import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
+import { DRAFT_TOOL_NAMES, Draft, reviewDraft, type ReviewLog } from './draft.js';
 
 export interface ProjectRow {
   id: string;
@@ -46,6 +45,7 @@ export interface JobRow {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cost: number | null;
+  review: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -144,6 +144,7 @@ function createJob(db: DB, projectId: string, userId: number, kind: JobRow['kind
     prompt_tokens: null,
     completion_tokens: null,
     cost: null,
+    review: null,
     created_at: now,
     updated_at: now,
   };
@@ -164,21 +165,115 @@ function updateJob(db: DB, id: string, patch: Partial<JobRow>) {
   });
 }
 
-async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessage[]) {
+function describeTool(name: string, args: Record<string, unknown>): string {
+  const f = String(args.file_id ?? '');
+  const pages = Array.isArray(args.pages) ? args.pages.join('、') : String(args.pages ?? '');
+  switch (name) {
+    case 'render_pages':
+      return `渲染草稿第 ${pages} 页`;
+    case 'check_layout':
+      return '检查草稿布局';
+    case 'read_draft':
+      return args.page === undefined ? '查看草稿目录' : Number(args.page) === 0 ? '查看草稿 CSS' : `查看草稿第 ${args.page} 页源码`;
+    case 'replace_in_draft':
+      return Number(args.page) === 0 ? '修改草稿 CSS' : `修改草稿第 ${args.page} 页`;
+    case 'rewrite_page':
+      return `重写草稿第 ${args.page} 页`;
+    case 'delete_page':
+      return `删除草稿第 ${args.page} 页`;
+    case 'list_files':
+      return '列出参考文件';
+    case 'read_text':
+      return `读取 ${f}${args.page ? ` 第 ${args.page} 页` : ''} 文字`;
+    case 'read_raw':
+      return `读取 ${f} 源码`;
+    case 'search_files':
+      return `搜索“${String(args.query ?? '').slice(0, 20)}”`;
+    case 'view_page':
+      return `查看 ${f} 第 ${args.page} 页`;
+    case 'list_archive':
+      return `查看 ${f} 内部结构`;
+    case 'read_archive_entry':
+      return `读取 ${f} 的 ${String(args.path ?? '')}`;
+    default:
+      return name;
+  }
+}
+
+/** Sets up the read-only file tools over the given uploads; returns undefined when there are none. */
+function fileToolsFor(db: DB, rows: AssetRow[]): { tools: FileTools; ids: Map<string, string> } | undefined {
+  if (!rows.length) return undefined;
+  const files = assignFileIds(rows);
+  return { tools: createFileTools(db, files), ids: new Map([...files].map(([fid, r]) => [r.id, fid])) };
+}
+
+const toolStage = (name: string, args: Record<string, unknown>) =>
+  `${DRAFT_TOOL_NAMES.has(name) ? '自检' : '读取参考文件'}：${describeTool(name, args)}`;
+
+/** Adds one model call's usage to the job's running totals. */
+function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptTokens?: number; completionTokens?: number; cost?: number }) {
+  db.prepare(
+    `UPDATE jobs SET endpoint_id = ?,
+       prompt_tokens = CASE WHEN ? IS NULL THEN prompt_tokens ELSE COALESCE(prompt_tokens, 0) + ? END,
+       completion_tokens = CASE WHEN ? IS NULL THEN completion_tokens ELSE COALESCE(completion_tokens, 0) + ? END,
+       cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END,
+       updated_at = ? WHERE id = ?`,
+  ).run(
+    r.endpointId,
+    r.promptTokens ?? null,
+    r.promptTokens ?? null,
+    r.completionTokens ?? null,
+    r.completionTokens ?? null,
+    r.cost ?? null,
+    r.cost ?? null,
+    Date.now(),
+    jobId,
+  );
+}
+
+/**
+ * Self-check loop: render the draft in headless Chrome, inspect its layout and let the model fix it
+ * with the draft tools. Skipped when disabled in the settings.
+ */
+async function selfReview(db: DB, jobId: string, userId: number, draft: Draft, prompt: ChatMessage[], fileTools?: FileTools): Promise<ReviewLog | null> {
   const settings = getSettings(db);
-  jobProgress.set(jobId, { chars: 0, stage: '模型生成中' });
-  const result = await chat(db, userId, messages, {
+  if (!settings.selfCheck) return null;
+  const log = await reviewDraft(db, userId, {
+    draft,
+    resolver: makeAssetResolver(db),
+    prompt,
+    fileTools,
+    maxRounds: Number(settings.selfCheckRounds) || 10,
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
-    onDelta: (_c, total) => jobProgress.set(jobId, { chars: total, stage: '模型生成中' }),
-    onReasoning: (total) => jobProgress.set(jobId, { chars: total, stage: '模型思考中' }),
+    onDelta: (_c, total) => jobProgress.set(jobId, { chars: total, stage: '自检：模型检查草稿' }),
+    onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
+    onStage: (stage) => jobProgress.set(jobId, { chars: 0, stage }),
+    onUsage: (u) => recordUsage(db, jobId, u),
   });
-  updateJob(db, jobId, {
-    endpoint_id: result.endpointId,
-    prompt_tokens: result.promptTokens ?? null,
-    completion_tokens: result.completionTokens ?? null,
-    cost: result.cost ?? null,
-  });
+  updateJob(db, jobId, { review: JSON.stringify(log) });
+  return log;
+}
+
+async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessage[], tools?: FileTools) {
+  const settings = getSettings(db);
+  jobProgress.set(jobId, { chars: 0, stage: '模型生成中' });
+  const opts = {
+    maxTokens: Number(settings.maxTokens) || undefined,
+    temperature: Number(settings.temperature),
+    onDelta: (_c: string, total: number) => jobProgress.set(jobId, { chars: total, stage: '模型生成中' }),
+    onReasoning: (total: number) => jobProgress.set(jobId, { chars: total, stage: '模型思考中' }),
+  };
+  const result = tools
+    ? await chatWithTools(db, userId, messages, {
+        ...opts,
+        tools: tools.defs,
+        execute: tools.execute,
+        onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
+        onRound: (r) => recordUsage(db, jobId, r),
+      })
+    : await chat(db, userId, messages, opts);
+  if (!tools) recordUsage(db, jobId, result);
   if (result.finishReason === 'length') {
     throw new Error('模型输出达到长度上限被截断，请提高「最大输出 tokens」设置或减少页数后重试');
   }
@@ -226,7 +321,9 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       updateJob(db, job.id, { status: 'running' });
       db.prepare(`UPDATE projects SET status='generating', error=NULL WHERE id=?`).run(projectId);
       const base = projectDoc(project)!;
-      const assets = toAssetRefs(db, projectAssets(db, projectId), true);
+      const rows = projectAssets(db, projectId);
+      const ft = fileToolsFor(db, rows);
+      const assets = toAssetRefs(db, rows, true, ft?.ids);
       let messages: ChatMessage[];
       if (project.type === 'template') {
         messages = buildTemplatePrompt(base, meta.brief, assets);
@@ -234,9 +331,11 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
         const tpl = project.template_id ? getProject(db, project.template_id) : undefined;
         messages = buildDeckPrompt(base, tpl ? projectDoc(tpl) : null, meta.brief, assets);
       }
-      const text = await runLlm(db, job.id, userId, messages);
+      const text = await runLlm(db, job.id, userId, messages, ft?.tools);
+      const draft = Draft.fromDocument(text, { width: base.width, height: base.height, title: project.name });
+      await selfReview(db, job.id, userId, draft, messages, ft?.tools);
       jobProgress.set(job.id, { chars: text.length, stage: '解析与保存' });
-      const doc = parseFullHtml(text, { width: base.width, height: base.height, title: project.name });
+      const doc = draft.result();
       doc.title = project.name;
       const { versionId } = await withProjectLock(projectId, () =>
         commitVersion(db, projectId, userId, doc, { action: 'create', scope: 'global', prompt: describeBrief(meta.brief) }),
@@ -280,12 +379,11 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
       const settings = getSettings(db);
       const snapshot = projectDoc(getProject(db, projectId)!)!;
       const attachmentIds = input.attachmentIds ?? [];
-      const attachments = toAssetRefs(db, assetsByIds(db, projectId, attachmentIds), true);
-      const assets = toAssetRefs(
-        db,
-        projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id)),
-        false,
-      );
+      const attachedRows = assetsByIds(db, projectId, attachmentIds);
+      const otherRows = projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id));
+      const ft = fileToolsFor(db, [...otherRows, ...attachedRows]);
+      const attachments = toAssetRefs(db, attachedRows, true, ft?.ids);
+      const assets = toAssetRefs(db, otherRows, false, ft?.ids);
       const resolver = makeAssetResolver(db);
       let pageIndex: number | undefined;
       let elements: ReturnType<typeof findElements> = [];
@@ -326,17 +424,21 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
         assets,
         project.type,
       );
-      const text = await runLlm(db, job.id, userId, messages);
+      const text = await runLlm(db, job.id, userId, messages, ft?.tools);
+      const draft =
+        scope === 'global'
+          ? Draft.fromDocument(text, { width: snapshot.width, height: snapshot.height, title: snapshot.title })
+          : Draft.fromFragment(text, snapshot, input.pageId!);
+      await selfReview(db, job.id, userId, draft, messages, ft?.tools);
       jobProgress.set(job.id, { chars: text.length, stage: '解析与保存' });
       const { versionId } = await withProjectLock(projectId, () => {
         const latest = projectDoc(getProject(db, projectId)!)!;
         let next: DeckDoc;
         if (scope === 'global') {
-          next = parseFullHtml(text, { width: latest.width, height: latest.height, title: latest.title });
+          next = draft.result();
           next.title = latest.title;
         } else {
-          const frag = parseFragment(text);
-          next = replacePage(latest, input.pageId!, frag.pages, frag.css);
+          next = draft.result(latest);
         }
         const idx = latest.pages.findIndex((p) => p.id === input.pageId);
         return commitVersion(db, projectId, userId, next, {

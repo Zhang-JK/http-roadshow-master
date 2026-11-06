@@ -64,6 +64,7 @@ function publicJob(j: JobRow) {
     cost: j.cost,
     promptTokens: j.prompt_tokens,
     completionTokens: j.completion_tokens,
+    review: j.review ? JSON.parse(j.review) : null,
     userId: j.user_id,
     createdAt: j.created_at,
     updatedAt: j.updated_at,

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, download } from '../api';
 import { useAuth } from '../auth';
 import type { Asset, DeckDoc, Job, Project, SelectedElement, Version } from '../types';
+import { reviewText } from '../types';
 import { SlideFrame } from '../components/SlideFrame';
 import { useToast } from '../components/Toast';
 import { HistoryPanel } from '../components/HistoryPanel';
@@ -76,7 +77,8 @@ export function EditorPage() {
       if (active.has(jid)) continue;
       myJobs.current.delete(jid);
       const { job } = await api.get<{ job: Job }>(`/api/jobs/${jid}`);
-      if (job.status === 'done') toast(job.kind === 'create' ? '生成完成' : '修改已应用', 'success');
+      if (job.status === 'done')
+        toast(`${job.kind === 'create' ? '生成完成' : '修改已应用'}${job.review ? `（${reviewText(job.review)}）` : ''}`, 'success');
       else if (job.status === 'error') toast(`${job.kind === 'create' ? '生成' : '修改'}失败：${job.error}`, 'error');
       loadProject();
     }
@@ -434,7 +436,7 @@ export function EditorPage() {
                 </div>
                 <RefFileList files={attachments} onChange={setAttachments} />
                 <div className="composer-row">
-                  <label className="attach-btn" title="附加参考图片 / PPT / PDF：图片可嵌入页面或仅作参考，PPT/PDF 逐页转成图片交给 AI">
+                  <label className="attach-btn" title="附加参考图片 / PPT / PDF / HTML：图片可嵌入页面或仅作参考，PPT/PDF/HTML 逐页转成图片交给 AI，并可只读查阅原文件">
                     <input
                       type="file"
                       multiple

@@ -4,7 +4,8 @@
 #   bash slides-to-images.sh INPUT OUT_DIR [MAX_PAGES=30] [WIDTH=1280]
 #
 # INPUT: .ppt .pptx .pps .ppsx .odp .key .pdf (and .doc/.docx/.odt via LibreOffice)
-# Writes OUT_DIR/document.pdf and OUT_DIR/slide-001.jpg, slide-002.jpg, ...; prints the image count.
+# Writes OUT_DIR/document.pdf, OUT_DIR/slide-001.jpg, slide-002.jpg, ... and OUT_DIR/text.txt (page texts separated
+# by form feeds, when pdftotext is available); prints the image count.
 # Requires LibreOffice (soffice) for non-PDF input and poppler-utils (pdftoppm).
 set -euo pipefail
 
@@ -43,4 +44,7 @@ while IFS= read -r f; do
   target="$(printf '%s/slide-%03d.jpg' "$out" "$n")"
   [ "$f" = "$target" ] || mv "$f" "$target"
 done < <(find "$out" -maxdepth 1 -name 'slide-*.jpg' | sort -V)
+if command -v pdftotext >/dev/null; then
+  pdftotext -layout -enc UTF-8 -f 1 -l "$max" "$out/document.pdf" "$out/text.txt" 2>/dev/null || true
+fi
 echo "$n"

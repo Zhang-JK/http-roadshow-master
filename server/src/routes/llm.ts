@@ -178,6 +178,8 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const patch: Record<string, unknown> = {};
     if (body.attachScreenshots !== undefined) patch.attachScreenshots = !!body.attachScreenshots;
+    if (body.selfCheck !== undefined) patch.selfCheck = !!body.selfCheck;
+    if (body.selfCheckRounds !== undefined) patch.selfCheckRounds = Math.max(1, Math.min(20, Math.floor(Number(body.selfCheckRounds)) || 10));
     if (body.maxTokens !== undefined) patch.maxTokens = Math.max(1000, Math.min(200000, Number(body.maxTokens) || 32000));
     if (body.temperature !== undefined) patch.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
     setSettings(db, patch);

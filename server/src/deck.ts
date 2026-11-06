@@ -119,6 +119,11 @@ export function extractHtmlBlock(text: string): string {
 
 /** Parse a full HTML document produced by the model into a DeckDoc. */
 export function parseFullHtml(raw: string, base: Pick<DeckDoc, 'width' | 'height' | 'title'>): DeckDoc {
+  return assignIds(parseFullHtmlRaw(raw, base));
+}
+
+/** Like parseFullHtml, but keeps the markup exactly as written (no ids added, nothing sanitized). */
+export function parseFullHtmlRaw(raw: string, base: Pick<DeckDoc, 'width' | 'height' | 'title'>): DeckDoc {
   const html = extractHtmlBlock(raw);
   const $ = cheerio.load(html);
   const css = $('style')
@@ -142,7 +147,7 @@ export function parseFullHtml(raw: string, base: Pick<DeckDoc, 'width' | 'height
   });
   if (!pages.length) throw new Error('模型输出中没有找到 <section class="slide"> 页面');
   const title = $('title').first().text().trim() || base.title;
-  return assignIds({ title, width: base.width, height: base.height, head, css, pages });
+  return { title, width: base.width, height: base.height, head, css, pages };
 }
 
 /** Parse a fragment response (one or more sections and optional extra CSS). */

@@ -7,12 +7,12 @@ export interface RefFile {
   role: AssetRole;
 }
 
-export const SLIDES_ACCEPT = '.ppt,.pptx,.pps,.ppsx,.odp,.key,.pdf';
-export const TEXT_ACCEPT = '.txt,.md,.csv,.json,.html,.xml,.yaml,.yml,.doc,.docx';
+export const SLIDES_ACCEPT = '.ppt,.pptx,.pps,.ppsx,.odp,.key,.pdf,.html,.htm';
+export const TEXT_ACCEPT = '.txt,.md,.csv,.json,.xml,.yaml,.yml,.doc,.docx';
 export const MAX_REF_FILES = 12;
 
 export const isImageFile = (f: File) => f.type.startsWith('image/');
-export const isSlidesFile = (f: File) => /\.(pptx?|ppsx?|potx?|odp|key|pdf|docx?|odt)$/i.test(f.name);
+export const isSlidesFile = (f: File) => /\.(pptx?|ppsx?|potx?|odp|key|pdf|docx?|odt|html?)$/i.test(f.name);
 
 export function addFiles(list: RefFile[], picked: FileList | null, defaultRole: AssetRole): RefFile[] {
   const added = Array.from(picked ?? []).map((file) => ({ file, role: isImageFile(file) ? defaultRole : ('reference' as AssetRole) }));
@@ -63,7 +63,7 @@ export function RefFileList({ files, onChange }: { files: RefFile[]; onChange: (
               ))}
             </span>
           ) : isSlidesFile(f.file) ? (
-            <span className="tag" title="每一页会被导出为图片交给模型参考，同时提取文字">逐页转图片参考</span>
+            <span className="tag" title="每一页会被导出为图片交给模型参考，同时提取文字；原始文件可由模型按需只读查阅">逐页转图片参考</span>
           ) : (
             <span className="tag">提取文字</span>
           )}

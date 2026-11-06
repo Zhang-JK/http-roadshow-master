@@ -103,6 +103,9 @@ const MIGRATIONS: string[] = [
   ALTER TABLE assets ADD COLUMN role TEXT NOT NULL DEFAULT 'embed';
   CREATE INDEX idx_assets_parent ON assets(parent_id, page_no);
   `,
+  `
+  ALTER TABLE jobs ADD COLUMN review TEXT;
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {
@@ -137,6 +140,8 @@ function ensureAdmin(db: DB) {
 
 export const DEFAULT_SETTINGS: Record<string, unknown> = {
   attachScreenshots: true,
+  selfCheck: true,
+  selfCheckRounds: 10,
   maxTokens: 32000,
   temperature: 0.7,
 };

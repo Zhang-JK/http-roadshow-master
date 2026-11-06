@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import type { DB } from './db.js';
 import { config } from './config.js';
+import type { ToolDef, ToolOutput } from './fileTools.js';
 
 export interface Endpoint {
   id: number;
@@ -22,9 +23,17 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } };
 
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string | ContentPart[];
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ContentPart[] | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
 }
 
 export interface ChatOptions {
@@ -33,6 +42,10 @@ export interface ChatOptions {
   onDelta?: (chunk: string, totalChars: number) => void;
   onReasoning?: (totalChars: number) => void;
   signal?: AbortSignal;
+  tools?: ToolDef[];
+  toolChoice?: 'auto' | 'none';
+  /** Treat an empty reply as a valid answer instead of an endpoint failure. */
+  allowEmpty?: boolean;
 }
 
 export interface ChatResult {
@@ -43,6 +56,7 @@ export interface ChatResult {
   completionTokens?: number;
   cost?: number;
   finishReason?: string;
+  toolCalls?: ToolCall[];
 }
 
 export class LlmError extends Error {
@@ -103,6 +117,10 @@ export async function chatWithEndpoint(
     ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
     ...parseExtra(ep),
   };
+  if (opts.tools?.length) {
+    body.tools = opts.tools;
+    body.tool_choice = opts.toolChoice ?? 'auto';
+  }
   if (stream) body.stream_options = { include_usage: true };
   const timeout = AbortSignal.timeout(config.llmTimeoutMs);
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
@@ -132,6 +150,8 @@ export async function chatWithEndpoint(
     const data = (await res.json()) as any;
     if (data.error) throw new LlmError(`接入点 ${ep.name} 错误: ${JSON.stringify(data.error).slice(0, 500)}`, true);
     result.text = data.choices?.[0]?.message?.content ?? '';
+    const calls = data.choices?.[0]?.message?.tool_calls;
+    if (Array.isArray(calls) && calls.length) result.toolCalls = calls;
     result.finishReason = data.choices?.[0]?.finish_reason;
     applyUsage(result, data.usage);
     return result;
@@ -140,6 +160,7 @@ export async function chatWithEndpoint(
   const decoder = new TextDecoder();
   let buf = '';
   let reasoningChars = 0;
+  const calls: ToolCall[] = [];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -168,12 +189,25 @@ export async function chatWithEndpoint(
         result.text += delta;
         opts.onDelta!(delta, result.text.length);
       }
+      for (const tc of data.choices?.[0]?.delta?.tool_calls ?? []) {
+        const i = typeof tc.index === 'number' ? tc.index : calls.length;
+        const c = (calls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+        if (tc.id) c.id = tc.id;
+        if (tc.function?.name) c.function.name += tc.function.name;
+        if (tc.function?.arguments) c.function.arguments += tc.function.arguments;
+      }
       const fr = data.choices?.[0]?.finish_reason;
       if (fr) result.finishReason = fr;
       if (data.usage) applyUsage(result, data.usage);
     }
   }
-  if (!result.text) throw new LlmError(`接入点 ${ep.name} 返回了空内容`, true);
+  const toolCalls = calls.filter((c) => c && c.function.name);
+  if (toolCalls.length) {
+    toolCalls.forEach((c, i) => (c.id ||= `call_${i}_${Date.now()}`));
+    result.toolCalls = toolCalls;
+    return result;
+  }
+  if (!result.text && !opts.allowEmpty) throw new LlmError(`接入点 ${ep.name} 返回了空内容`, true);
   return result;
 }
 
@@ -200,6 +234,90 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
     }
   }
   throw new LlmError(errors.join('\n'), false);
+}
+
+export interface ToolLoopOptions extends ChatOptions {
+  tools: ToolDef[];
+  execute: (name: string, args: Record<string, unknown>) => Promise<ToolOutput>;
+  /** Called before each tool runs (for progress display). */
+  onTool?: (name: string, args: Record<string, unknown>, round: number) => void;
+  maxRounds?: number;
+  maxImages?: number;
+  /** Accept an empty final answer (when the tools themselves produce the result). */
+  allowEmptyFinal?: boolean;
+  /** Called with every round's result, so usage is accounted even if a later round fails. */
+  onRound?: (r: ChatResult) => void;
+}
+
+export interface ToolLoopResult extends ChatResult {
+  toolRounds: number;
+  toolCallCount: number;
+  /** The conversation including every tool round and the final assistant message. */
+  history: ChatMessage[];
+}
+
+/**
+ * Lets the model call (read-only) tools until it produces a final answer. Images returned by tools
+ * are forwarded in a user message right after the tool results, since tool messages are text-only.
+ * The last round disables tools so the model has to answer.
+ */
+export async function chatWithTools(db: DB, userId: number, messages: ChatMessage[], opts: ToolLoopOptions): Promise<ToolLoopResult> {
+  const { tools, execute, onTool, maxRounds = 10, maxImages = 24, allowEmptyFinal, onRound, ...chatOpts } = opts;
+  const history = [...messages];
+  const total = { promptTokens: 0, completionTokens: 0, cost: 0, hasCost: false };
+  let imagesLeft = maxImages;
+  let toolCallCount = 0;
+  for (let round = 0; ; round++) {
+    const last = round >= maxRounds;
+    if (last && round > 0) {
+      history.push({ role: 'user', content: '（工具调用次数已用完：不要再调用或模拟调用任何工具，请直接给出最终答复。）' });
+    }
+    const r = await chat(db, userId, history, { ...chatOpts, tools, toolChoice: last ? 'none' : 'auto', allowEmpty: allowEmptyFinal });
+    onRound?.(r);
+    total.promptTokens += r.promptTokens ?? 0;
+    total.completionTokens += r.completionTokens ?? 0;
+    if (typeof r.cost === 'number') {
+      total.cost += r.cost;
+      total.hasCost = true;
+    }
+    const sum = {
+      promptTokens: total.promptTokens || undefined,
+      completionTokens: total.completionTokens || undefined,
+      cost: total.hasCost ? total.cost : undefined,
+      toolRounds: round,
+      toolCallCount,
+    };
+    if (!r.toolCalls?.length || last) {
+      if (!r.text && !allowEmptyFinal) throw new LlmError('模型在调用工具后没有给出最终结果', true);
+      history.push({ role: 'assistant', content: r.text });
+      return { ...r, ...sum, history };
+    }
+    history.push({ role: 'assistant', content: r.text || null, tool_calls: r.toolCalls });
+    const images: ContentPart[] = [];
+    for (const tc of r.toolCalls) {
+      toolCallCount++;
+      let args: Record<string, unknown> = {};
+      let out: ToolOutput;
+      try {
+        args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+        onTool?.(tc.function.name, args, round + 1);
+        out = await execute(tc.function.name, args);
+      } catch (e) {
+        out = { content: `错误：工具参数无法解析（${(e as Error).message}），请传入合法的 JSON 参数` };
+      }
+      let content = out.content;
+      for (const img of out.images ?? []) {
+        if (imagesLeft <= 0) {
+          content += '\n（本次任务可查看的图片数量已达上限，请根据已有信息完成任务）';
+          break;
+        }
+        imagesLeft--;
+        images.push({ type: 'text', text: `${img.label}：` }, { type: 'image_url', image_url: { url: img.url } });
+      }
+      history.push({ role: 'tool', tool_call_id: tc.id, content });
+    }
+    if (images.length) history.push({ role: 'user', content: [{ type: 'text', text: '以下是上述工具调用返回的图片：' }, ...images] });
+  }
 }
 
 function solidPng(w: number, h: number, rgb: [number, number, number]): Buffer {

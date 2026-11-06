@@ -3,6 +3,7 @@ import { api } from '../api';
 import type { Asset } from '../types';
 import { fileSize } from '../lib/format';
 import { useToast } from './Toast';
+import { SLIDES_ACCEPT, TEXT_ACCEPT } from './RefFiles';
 
 export function AssetsPanel({ projectId, assets, onChange }: { projectId: string; assets: Asset[]; onChange: () => void }) {
   const toast = useToast();
@@ -32,9 +33,9 @@ export function AssetsPanel({ projectId, assets, onChange }: { projectId: string
   return (
     <div className="assets">
       <label className="file-drop compact">
-        <input type="file" multiple accept="image/*,.ppt,.pptx,.pps,.ppsx,.odp,.key,.pdf,.txt,.md,.csv,.json,.doc,.docx" onChange={(e) => { upload(e.target.files); e.target.value = ''; }} disabled={busy} />
+        <input type="file" multiple accept={`image/*,${SLIDES_ACCEPT},${TEXT_ACCEPT}`} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} disabled={busy} />
         <span>{busy ? '上传并处理中…' : '＋ 上传素材'}</span>
-        <small>PPT/PDF 逐页转图片并提取文字；文档提取文字供 AI 参考</small>
+        <small>PPT/PDF/HTML 逐页转图片并提取文字；大文件由 AI 按需只读查阅原文</small>
       </label>
       <div className="row gap small asset-role">
         <span className="muted">图片用途：</span>

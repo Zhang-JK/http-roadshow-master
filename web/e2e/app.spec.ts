@@ -308,3 +308,19 @@ test('attach a PPT to an edit from the prompt bar', async () => {
   await page.click('.tabs button:has-text("素材")');
   await expect(page.locator('.asset-list li:has-text("competitor.pptx")')).toContainText('2 页图片');
 });
+
+test('attach an HTML deck as a page-by-page reference', async () => {
+  await page.goto(deckUrl);
+  const html = `<html><head><style>.slide{width:1280px;height:720px}</style></head><body>${[1, 2, 3]
+    .map((i) => `<section class="slide"><h1>网页参考 ${i}</h1></section>`)
+    .join('')}</body></html>`;
+  await page.locator('[data-testid=attach-input]').setInputFiles({ name: 'old-site.html', mimeType: 'text/html', buffer: Buffer.from(html) });
+  await expect(page.locator('.composer [data-testid=ref-file-list] li:has-text("old-site.html")')).toContainText('逐页转图片参考');
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await page.fill('[data-testid=prompt-input]', '参考网页调整');
+  await page.click('[data-testid=send-btn]');
+  await expect(historyItems()).toHaveCount(4, { timeout: 30_000 });
+  await expect(page.locator('.toast-success')).toContainText('修改已应用（自检：未修改）');
+  await page.click('.tabs button:has-text("素材")');
+  await expect(page.locator('.asset-list li:has-text("old-site.html")')).toContainText('3 页图片');
+});

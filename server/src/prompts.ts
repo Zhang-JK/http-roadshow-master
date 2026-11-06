@@ -10,9 +10,17 @@ export interface AssetRef {
   role?: 'embed' | 'reference';
   text?: string | null;
   dataUrl?: string;
-  /** Page images exported from a presentation / PDF upload. */
+  /** Page images exported from a presentation / PDF / HTML upload. */
   slides?: { page: number; dataUrl?: string }[];
+  /** Id the read-only file tools know this file by (F1, F2, …); set when tools are available. */
+  fileId?: string;
+  fileType?: string;
 }
+
+/** Documents longer than this are only previewed inline; the model reads the rest through the file tools. */
+const INLINE_CHARS = 6000;
+const PREVIEW_CHARS = 1200;
+const INLINE_TOTAL = 40_000;
 
 export interface ImageBudget {
   embed: number;
@@ -50,24 +58,44 @@ function planImages(assets: AssetRef[], budget: ImageBudget): ImagePlan {
 
 function assetsBlock(assets: AssetRef[], plan?: ImagePlan): string {
   if (!assets.length) return '（无）';
+  let inlineLeft = INLINE_TOTAL;
   return assets
     .map((a, i) => {
       const attached = plan?.images.has(a.id);
+      const idTag = a.fileId ? `［file_id=${a.fileId}］` : '';
       if (a.kind === 'image') {
         if (a.role === 'reference') {
-          return `${i + 1}. 参考图「${a.filename}」：仅供参考（借鉴其版式、风格、配色或内容），不要把它嵌入页面${attached ? '（附图见后）' : ''}`;
+          return `${i + 1}. 参考图「${a.filename}」${idTag}：仅供参考（借鉴其版式、风格、配色或内容），不要把它嵌入页面${attached ? '（附图见后）' : ''}`;
         }
-        return `${i + 1}. 图片「${a.filename}」，可在页面中通过 <img src="${a.url}"> 使用${attached ? '（附图见后）' : ''}`;
+        return `${i + 1}. 图片「${a.filename}」${idTag}，可在页面中通过 <img src="${a.url}"> 使用${attached ? '（附图见后）' : ''}`;
       }
       const text = (a.text ?? '').trim();
       const shown = plan?.slides.get(a.id) ?? 0;
       const pages = a.slides?.length
-        ? `共导出 ${a.slides.length} 页图片${shown ? `，${shown < a.slides.length ? `其中前 ${shown} 页` : '全部'}已附在后面` : ''}。这些页面图片仅供参考（借鉴其版式、风格与内容结构），不要嵌入页面。\n`
+        ? `共导出 ${a.slides.length} 页图片${shown ? `，${shown < a.slides.length ? `其中前 ${shown} 页` : '全部'}已附在后面` : ''}${
+            a.fileId && shown < a.slides.length ? '，其余页面可用 view_page 查看' : ''
+          }。这些页面图片仅供参考（借鉴其版式、风格与内容结构），不要嵌入页面。\n`
         : '';
-      return `${i + 1}. 文件「${a.filename}」${pages ? '，' : ''}${pages}文字内容如下：\n<<<\n${text || '（无法提取文字）'}\n>>>`;
+      let body: string;
+      if (!text) body = '（无法提取文字）';
+      else if (text.length <= Math.min(INLINE_CHARS, inlineLeft) || !a.fileId) {
+        body = text.slice(0, a.fileId ? text.length : 40_000);
+        inlineLeft -= body.length;
+      } else {
+        body = `${text.slice(0, PREVIEW_CHARS)}\n……（全文共 ${text.length} 字符，这里只显示开头；请用 read_text / search_files${a.fileType === 'html' ? ' / read_raw' : ''} 等工具按需读取）`;
+      }
+      return `${i + 1}. 文件「${a.filename}」${idTag}${pages ? '，' : ''}${pages}文字内容如下：\n<<<\n${body}\n>>>`;
     })
     .join('\n\n');
 }
+
+const TOOLS_NOTE = `
+
+【只读文件工具】你可以调用工具读取上面列出的参考文件（全部只读，无法修改）：list_files 列出文件；read_text 分段或按页读取文字；read_raw 读取 HTML 等文本文件源码；search_files 搜索关键词；view_page 查看某一页的图片；list_archive / read_archive_entry 查看原始 PPTX/DOCX 内部（幻灯片 XML、演讲者备注、主题配色与字体、媒体图片）。
+- 文件较大时请先搜索或按页读取关键内容，不要逐段读完整个文件；每次可并行调用多个工具。
+- 信息足够后直接输出最终结果，最终回答仍然只包含一个 \`\`\`html 代码块。`;
+
+const toolsNote = (assets: AssetRef[]) => (assets.some((a) => a.fileId) ? TOOLS_NOTE : '');
 
 function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
   const parts: ContentPart[] = [];
@@ -138,7 +166,7 @@ export function buildTemplatePrompt(doc: DeckDoc, brief: TemplateBrief, assets: 
   }
 
 【可用素材】
-${assetsBlock(assets, plan)}`;
+${assetsBlock(assets, plan)}${toolsNote(assets)}`;
   return [
     { role: 'system', content: SYSTEM(doc) },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
@@ -185,7 +213,7 @@ ${templateBlock}
     hasReferences(assets)
       ? '\n- 用户上传了参考图片/参考 PPT 页面：请从中提取内容要点、数据和页面结构作为依据（例如沿用其章节顺序和关键信息），视觉样式仍以所选模板为准；不要直接嵌入这些参考截图。'
       : ''
-  }`;
+  }${toolsNote(assets)}`;
   return [
     { role: 'system', content: SYSTEM(doc) },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
@@ -228,7 +256,7 @@ ${assembleHtml(doc)}
 【可用素材】
 ${assetsBlock(assets)}
 
-请输出修改后的【完整 HTML 文档】（包含全部页面，未涉及修改的页面保持原样，所有已有 data-eid / data-page-id 属性保留）。如用户要求增删页面，可以增删 <section class="slide">。`;
+请输出修改后的【完整 HTML 文档】（包含全部页面，未涉及修改的页面保持原样，所有已有 data-eid / data-page-id 属性保留）。如用户要求增删页面，可以增删 <section class="slide">。${toolsNote([...assets, ...attachments])}`;
   } else {
     const n = req.pageIndex! + 1;
     const target =
@@ -266,7 +294,7 @@ ${req.pageHtml}
 ${assetsBlock(assets)}
 
 【输出格式】
-只输出修改后的第 ${n} 页 <section class="slide" ...> 完整元素（保留 data-page-id 与所有已有 data-eid）。如果用户明确要求把这一页拆分成多页，可以连续输出多个 <section>。如需新增 CSS 规则，可在 section 之前附加一个 <style> 块，其中只写新增规则，它会被追加到全局样式中；不要重复输出已有的全局样式。全部放在一个 \`\`\`html 代码块中。`;
+只输出修改后的第 ${n} 页 <section class="slide" ...> 完整元素（保留 data-page-id 与所有已有 data-eid）。如果用户明确要求把这一页拆分成多页，可以连续输出多个 <section>。如需新增 CSS 规则，可在 section 之前附加一个 <style> 块，其中只写新增规则，它会被追加到全局样式中；不要重复输出已有的全局样式。全部放在一个 \`\`\`html 代码块中。${toolsNote([...assets, ...attachments])}`;
     if (req.screenshot) {
       parts.push({ type: 'text', text: `第 ${n} 页当前渲染截图${req.scope === 'element' ? '（红框为选中元素）' : ''}：` });
       parts.push({ type: 'image_url', image_url: { url: req.screenshot } });
