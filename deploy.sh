@@ -144,7 +144,11 @@ ADMIN_PASSWORD=$(printf %q "$ADMIN_PASSWORD")
 EOF
   mv -f "$CONF.tmp" "$CONF"
   chmod 600 "$CONF"
+  own_file "$CONF"
 }
+
+# Files rewritten by root must stay readable by the service user that runs the app.
+own_file() { if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && id "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER": "$@"; fi; }
 
 write_app_env() {
   cat > "$APP_ENV.tmp" <<EOF
@@ -164,6 +168,7 @@ EOF
   [ -f "$SHARED/extra.env" ] && cat "$SHARED/extra.env" >> "$APP_ENV.tmp"
   mv -f "$APP_ENV.tmp" "$APP_ENV"
   chmod 600 "$APP_ENV"
+  own_file "$APP_ENV"
 }
 
 as_service_user() {
@@ -794,7 +799,7 @@ cmd_uninstall() {
   is_root || [ "$USE_SYSTEMD" = 0 ] || die "请使用 root 执行"
   stop_app || true
   if [ -f "$UNIT_FILE" ]; then systemctl disable "$APP_NAME" >/dev/null 2>&1 || true; rm -f "$UNIT_FILE"; systemctl daemon-reload || true; fi
-  rm -f "/usr/local/bin/$APP_NAME"
+  if [ "$(readlink -f "/usr/local/bin/$APP_NAME" 2>/dev/null)" = "$BASE_DIR/deploy.sh" ]; then rm -f "/usr/local/bin/$APP_NAME"; fi
   if [ "$OPT_PURGE" = 1 ]; then rm -rf "$BASE_DIR"; ok "已删除 $BASE_DIR（含数据）"
   else rm -rf "$RELEASES" "$CURRENT" "$BASE_DIR/node"; ok "已卸载程序，数据保留在 $SHARED（使用 --purge 彻底删除）"; fi
 }
