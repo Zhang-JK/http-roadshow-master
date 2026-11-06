@@ -312,7 +312,9 @@ export function EditorPage() {
               <div className="spinner big" />
               <h2>AI 正在生成{TYPE_LABELS[project.type]}…</h2>
               <p className="muted">
-                {createJob?.progress ? `${createJob.progress.stage} · 已生成 ${createJob.progress.chars.toLocaleString()} 字符` : '正在准备请求…'}
+                {createJob?.progress
+                  ? `${createJob.progress.stage}${createJob.progress.chars ? ` · ${createJob.progress.chars.toLocaleString()} 字符` : ''}`
+                  : '正在准备请求…'}
               </p>
               <p className="muted small">生成完整材料通常需要 1–3 分钟，你可以离开此页面，稍后回来查看。</p>
             </>

@@ -169,6 +169,7 @@ async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessa
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
     onDelta: (_c, total) => jobProgress.set(jobId, { chars: total, stage: '模型生成中' }),
+    onReasoning: (total) => jobProgress.set(jobId, { chars: total, stage: '模型思考中' }),
   });
   updateJob(db, jobId, {
     endpoint_id: result.endpointId,

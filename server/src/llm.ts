@@ -31,6 +31,7 @@ export interface ChatOptions {
   maxTokens?: number;
   temperature?: number;
   onDelta?: (chunk: string, totalChars: number) => void;
+  onReasoning?: (totalChars: number) => void;
   signal?: AbortSignal;
 }
 
@@ -138,6 +139,7 @@ export async function chatWithEndpoint(
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let reasoningChars = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -156,6 +158,11 @@ export async function chatWithEndpoint(
         continue;
       }
       if (data.error) throw new LlmError(`接入点 ${ep.name} 流式错误: ${JSON.stringify(data.error).slice(0, 500)}`, true);
+      const reasoning = data.choices?.[0]?.delta?.reasoning ?? data.choices?.[0]?.delta?.reasoning_content;
+      if (reasoning && opts.onReasoning) {
+        reasoningChars += reasoning.length;
+        opts.onReasoning(reasoningChars);
+      }
       const delta = data.choices?.[0]?.delta?.content;
       if (delta) {
         result.text += delta;
