@@ -115,14 +115,6 @@ if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
 elif [ -n "$OPT_MANIFEST" ]; then UPDATE_SOURCE=archive; fi
 
-# Day-to-day commands run as the service user so files under $BASE_DIR keep a single owner
-# (and match what an in-app update, which already runs as that user, produces).
-if [ "$(id -u)" -eq 0 ] && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && [ -L "$CURRENT" ]; then
-  case "$CMD" in
-    check|update|rollback|auto) exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
-  esac
-fi
-
 save_conf() {
   mkdir -p "$SHARED"
   cat > "$CONF.tmp" <<EOF
@@ -811,6 +803,16 @@ cmd_uninstall() {
   if [ "$OPT_PURGE" = 1 ]; then rm -rf "$BASE_DIR"; ok "已删除 $BASE_DIR（含数据）"
   else rm -rf "$RELEASES" "$CURRENT" "$BASE_DIR/node"; ok "已卸载程序，数据保留在 $SHARED（使用 --purge 彻底删除）"; fi
 }
+
+# Day-to-day commands run as the service user so files under $BASE_DIR keep a single owner
+# (and match what an in-app update, which already runs as that user, produces).
+# Root-run updates first refresh system packages, which new versions may depend on.
+if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && [ -L "$CURRENT" ]; then
+  case "$CMD" in
+    update|auto) ensure_system_deps; exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
+    check|rollback) exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
+  esac
+fi
 
 case "$CMD" in
   auto) if [ -f "$CONF" ] && [ -L "$CURRENT" ]; then OPT_YES=1; cmd_update; else cmd_install; fi ;;
