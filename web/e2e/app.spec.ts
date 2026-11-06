@@ -197,7 +197,8 @@ test('preview and revert a historical version', async () => {
 test('export HTML, PDF and PPTX downloads', async () => {
   for (const [label, ext, magic] of [
     ['下载 HTML', 'html', '<!DOCTYPE'],
-    ['导出 PDF', 'pdf', '%PDF'],
+    ['导出 PDF（矢量', 'pdf', '%PDF'],
+    ['导出 PDF（图片', 'pdf', '%PDF'],
     ['导出 PPT', 'pptx', 'PK'],
   ] as const) {
     await page.click('[data-testid=export-btn]');

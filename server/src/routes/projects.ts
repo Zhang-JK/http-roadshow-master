@@ -17,7 +17,7 @@ import {
   type JobRow,
   type ProjectRow,
 } from '../projects.js';
-import { renderPdf, renderPptx } from '../render.js';
+import { renderImagePdf, renderPdf, renderPptx } from '../render.js';
 
 const MAX_UPLOAD_FILES = 12;
 
@@ -409,6 +409,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       return sendFile(reply, assembleHtml(doc, { presenter: true, assetResolver: resolver }), 'text/html; charset=utf-8', `${base}.html`);
     }
     if (format === 'pdf') return sendFile(reply, await renderPdf(doc, resolver), 'application/pdf', `${base}.pdf`);
+    if (format === 'pdf-image') return sendFile(reply, await renderImagePdf(doc, resolver), 'application/pdf', `${base}.pdf`);
     if (format === 'pptx') {
       return sendFile(
         reply,

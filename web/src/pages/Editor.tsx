@@ -188,13 +188,14 @@ export function EditorPage() {
     }
   };
 
-  const doExport = async (format: 'html' | 'pdf' | 'pptx') => {
+  const doExport = async (format: 'html' | 'pdf' | 'pdf-image' | 'pptx') => {
     if (!project) return;
     setExportMenu(false);
-    setExporting(format);
+    setExporting(format === 'pdf-image' ? 'pdf' : format);
     try {
       const v = preview ? `&version=${preview.version.id}` : '';
-      await download(`/api/projects/${project.id}/export?format=${format}${v}`, `${project.name}.${format}`);
+      const ext = format === 'pdf-image' ? 'pdf' : format;
+      await download(`/api/projects/${project.id}/export?format=${format}${v}`, `${project.name}.${ext}`);
     } catch (e) {
       toast((e as Error).message, 'error');
     } finally {
@@ -277,7 +278,8 @@ export function EditorPage() {
           {exportMenu && (
             <div className="dropdown right" onMouseLeave={() => setExportMenu(false)}>
               <button onClick={() => doExport('html')}>下载 HTML（可直接演示）</button>
-              <button onClick={() => doExport('pdf')}>导出 PDF</button>
+              <button onClick={() => doExport('pdf')}>导出 PDF（矢量，可选中文字）</button>
+              <button onClick={() => doExport('pdf-image')}>导出 PDF（图片，与预览完全一致）</button>
               <button onClick={() => doExport('pptx')}>导出 PPT（.pptx）</button>
             </div>
           )}

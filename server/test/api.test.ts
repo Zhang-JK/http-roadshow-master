@@ -391,6 +391,12 @@ describe('templates, decks, edits, history and export', () => {
     const pageCount = (pdfBuf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length;
     expect(pageCount).toBe(d.pages.length);
 
+    const imgPdf = await req('GET', `/api/projects/${deckId}/export?format=pdf-image`, adminCookie);
+    expect(imgPdf.status).toBe(200);
+    const imgPdfText = imgPdf.res.rawPayload.toString('latin1');
+    expect(imgPdfText.startsWith('%PDF')).toBe(true);
+    expect((imgPdfText.match(/\/Type\s*\/Page[^s]/g) ?? []).length).toBe(d.pages.length);
+
     const pptx = await req('GET', `/api/projects/${deckId}/export?format=pptx`, adminCookie);
     expect(pptx.status).toBe(200);
     const pbuf = pptx.res.rawPayload;

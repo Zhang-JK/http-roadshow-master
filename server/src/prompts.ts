@@ -19,7 +19,7 @@ const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>) => `
 5. 禁止使用 <script>、<iframe>、外部 JS。图表请用内联 <svg> 或纯 CSS 实现。
 6. 字体使用系统字体栈，例如 "PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",Arial,sans-serif；如确需网络字体，只能通过 <link rel="stylesheet"> 引入 Google Fonts。
 7. 图片：只能使用用户提供的素材 URL（见素材列表），或使用 CSS 渐变、内联 SVG 图形、emoji/图标字符做装饰。禁止编造外部图片链接。
-8. 不要使用 position:fixed，不要依赖视口单位（vw/vh），一律使用 px 或 %。
+8. 不要使用 position:fixed，不要依赖视口单位（vw/vh），一律使用 px 或 %。材料需要导出为 PDF/PPT，因此不要使用 background-clip:text 渐变文字和 mix-blend-mode（导出时会出现瑕疵），强调文字请用纯色、text-shadow 或色块背景。
 9. 已有元素上的 data-eid 与 data-page-id 属性是系统用于追踪修改历史的标识，修改时必须原样保留在对应元素上；新增元素不需要添加 data-eid。
 10. 输出内容只包含一个 \`\`\`html 代码块，不要输出任何解释文字。`;
 

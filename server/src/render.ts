@@ -114,6 +114,18 @@ async function downscale(page: import('playwright-core').Page, img: Buffer, scal
   return Buffer.from(dataUrl.split(',')[1], 'base64');
 }
 
+/** PDF built from page screenshots: pixel-identical to the preview, but text is not selectable. */
+export async function renderImagePdf(doc: DeckDoc, resolveAssets: (html: string) => string): Promise<Buffer> {
+  const images = await renderPageImages(doc, resolveAssets, { type: 'png' });
+  const html = `<!DOCTYPE html><html><head><style>@page{size:${doc.width}px ${doc.height}px;margin:0}html,body{margin:0}
+img{display:block;width:${doc.width}px;height:${doc.height}px;break-after:page}</style></head><body>${images
+    .map(({ image }) => `<img src="data:image/png;base64,${image.toString('base64')}">`)
+    .join('')}</body></html>`;
+  return withPage(doc, html, (page) =>
+    page.pdf({ width: `${doc.width}px`, height: `${doc.height}px`, printBackground: true, margin: { top: '0', right: '0', bottom: '0', left: '0' } }),
+  );
+}
+
 export async function renderPptx(doc: DeckDoc, resolveAssets: (html: string) => string): Promise<Buffer> {
   const images = await renderPageImages(doc, resolveAssets, { type: 'png' });
   const Ctor = PptxGenJS as unknown as new () => import('pptxgenjs').default;
