@@ -86,7 +86,7 @@ describe('layout inspection', () => {
     expect(kinds[5]).toEqual(['empty']);
   });
 
-  it('works under tsx, which production uses to run the server', () => {
+  it('works under tsx, which `npm start` uses to run the server', () => {
     const script = `import { inspectLayout, closeBrowser } from './src/render.ts';
 const r = await inspectLayout({ title: 't', width: 1920, height: 1080, head: '', css: '', pages: [{ id: 'p0', html: '<section class="slide" data-page-id="p0"><p style="position:absolute;left:1900px">OUT</p></section>' }] }, (h) => h);
 console.log(JSON.stringify(r[0].issues.map((i) => i.kind)));
