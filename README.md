@@ -69,6 +69,33 @@ sudo roadshow-studio uninstall   # 卸载程序（保留数据；--purge 连同�
 
 **安装选项**：`--port`（默认 9090）、`--host`（默认 0.0.0.0）、`--base`（默认 `/opt/roadshow-studio`）、`--user`、`--no-systemd`、`--npm-registry https://registry.npmmirror.com`、`--node-mirror https://npmmirror.com/mirrors/node`（国内网络）。非 root 用户也可安装到自己有权限的目录（如 `--base ~/roadshow`），此时跳过系统依赖安装并使用内置守护进程。
 
+### 公司代理 / HTTPS 证书
+
+安装和更新前会先做**网络连接检测**（不安装任何东西）：代理端口是否可连、Node.js 下载源、npm 仓库、git 仓库或发布清单、系统软件源、Chrome 下载源、模型接口。任何必需项不通时直接停止，并说明原因（DNS 失败、连不上、超时、代理要求认证、证书不受信任及其签发者等）和建议的参数。也可单独运行：
+
+```bash
+sudo -E bash deploy.sh nettest                                   # 用当前环境变量里的 https_proxy
+sudo bash deploy.sh nettest --proxy http://proxy.corp:8080
+```
+
+公司代理会解密 HTTPS 并用自己的根证书重新签名，因此常见的「无法获取 Node.js 版本列表」实际是证书校验失败。按推荐顺序：
+
+```bash
+# 1. 推荐：信任公司根证书（从 IT 获取，PEM 或 DER 均可）
+sudo bash deploy.sh install --proxy http://proxy.corp:8080 --ca-cert /path/corp-root-ca.crt
+
+# 2. 让脚本从代理返回的证书链中取根证书（会打印主题与 SHA256 指纹，请与 IT 核对）
+sudo bash deploy.sh install --proxy http://proxy.corp:8080 --ca-cert auto
+
+# 3. 拿不到证书时：关闭证书校验（不安全，仅限可信内网）
+sudo bash deploy.sh install --proxy http://proxy.corp:8080 --insecure
+```
+
+- 不加 `--proxy` 时依次读取 `https_proxy`/`http_proxy` 环境变量（`sudo` 默认会丢掉它们，请用 `sudo -E`）、`/etc/environment`、apt 代理配置；`--proxy none` 表示直连。需要认证的代理写成 `http://用户:密码@proxy:8080`（日志中密码会被隐藏）；`--no-proxy .corp.local,10.0.0.0/8` 指定直连地址（本机总是直连）。
+- 证书会复制到 `shared/certs/`，与系统根证书合并后用于 curl、git、npm、apt/dnf、Node.js 下载与 Chrome 下载。
+- 有些代理只返回服务器证书而不带根证书，此时 `--ca-cert auto` 会尝试按证书中的「颁发者地址」下载；仍失败时会提示改用文件或 `--insecure`。
+- 这些设置保存在 `shared/deploy.conf`，之后的命令行更新和网页一键更新都会沿用，应用本身调用模型接口也走同一代理与证书（`NODE_USE_ENV_PROXY`、`NODE_EXTRA_CA_CERTS`，或 `--insecure` 时的 `NODE_TLS_REJECT_UNAUTHORIZED=0`）。修改时可执行 `sudo roadshow-studio update --force --proxy ... --ca-cert ...`，或用 `--secure` 恢复证书校验。
+
 **目录结构**（`/opt/roadshow-studio`）：`releases/` 各版本、`current` 当前版本、`shared/data` 数据库与素材、`shared/backups` 数据库备份、`shared/logs` 应用与部署日志、`shared/deploy.conf` 部署配置（可修改端口、更新源等后执行 `roadshow-studio restart`）、`shared/extra.env` 额外环境变量（如 `CHROME_PATH`、`LLM_TIMEOUT_MS`）。
 
 **发布新版本（发布包方式）**：在仓库中执行 `bash scripts/package-release.sh [输出目录] [下载地址前缀]`，生成 `roadshow-studio-<版本>.tar.gz` 与 `latest.json`（含版本、提交、SHA256），上传到任意静态文件服务即可；服务器端会校验 SHA256。git 方式只需推送到所跟踪的分支。版本号 = 根目录 `package.json` 的 `version` + 提交短哈希。
@@ -122,7 +149,7 @@ npm --prefix web run test:e2e   # 浏览器端到端测试（Playwright，自动
 - `server/test/reference.test.ts`：PPTX/PDF/HTML 逐页转图片、参考图与可嵌入图片的角色、模板/材料创建时页面图送入模型、修改时附带参考文件、长文档只预览并通过只读工具读取（列表、分页图片、搜索、PPTX 内部 XML、HTML 源码、拒绝未知文件与不存在的写工具）、删除素材连带删除页面图。
 - `server/test/selfcheck.test.ts`：布局检查（溢出/裁切/重叠/坏图/小字/空页）、缩略图总览、草稿工具（只读页保护、精确替换、拆页、应用到最新文档）、完整自检循环（发现溢出 → 渲染 → 读源码 → 修复 → 保存）、单页修改的自检、未修复时自动复查、关闭自检。
 - `server/test/system.test.ts`：版本信息、系统更新接口（检查/启动更新/日志/并发保护/权限）、回滚后的数据库恢复。
-- `deploy.sh`：在本机实际验证了 git 源与发布包源的安装、网页一键更新、命令行更新、构建失败不影响服务、新版本崩溃自动回滚并恢复数据库、手动回滚、非 root 安装、卸载。
+- `deploy.sh`：在本机实际验证了 git 源与发布包源的安装、网页一键更新、命令行更新、构建失败不影响服务、新版本崩溃自动回滚并恢复数据库、手动回滚、非 root 安装、卸载；并在隔离网络（只能经 HTTPS 解密代理上网）中验证了连接检测的各类报错、`--ca-cert 文件/auto`、`--insecure`、完整安装、root 与服务用户两种更新方式，以及应用经代理调用模型接口。
 - `web/e2e/app.spec.ts`：完整 UI 流程，包括单击/多选/选择上级/框选、三种修改范围、历史预览与恢复、导出下载、多用户协作归属。
 
 推荐模型：OpenRouter 的 `deepseek/deepseek-v4.1-flash-1017`（支持图像输入），附加参数 `{"reasoning":{"effort":"low"}}` 可缩短等待。实测生成 8 页材料约 60–70 秒、约 $0.01；单元素修改约 8 秒、约 $0.003。

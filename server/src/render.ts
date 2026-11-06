@@ -2,6 +2,7 @@ import { chromium, type Browser } from 'playwright-core';
 import PptxGenJS from 'pptxgenjs';
 import { config } from './config.js';
 import { assembleHtml, pageText, type DeckDoc } from './deck.js';
+import { chromeProxy } from './proxy.js';
 
 let browserPromise: Promise<Browser> | null = null;
 
@@ -12,6 +13,7 @@ async function getBrowser(): Promise<Browser> {
   }
   browserPromise = chromium.launch({
     executablePath: config.chromePath,
+    proxy: chromeProxy(),
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'],
   });
   return browserPromise;
@@ -32,7 +34,12 @@ const NAME_SHIM = 'globalThis.__name = globalThis.__name || function (f) { retur
 
 async function withPage<T>(doc: DeckDoc, html: string, fn: (page: import('playwright-core').Page) => Promise<T>): Promise<T> {
   const browser = await getBrowser();
-  const context = await browser.newContext({ viewport: { width: doc.width, height: doc.height }, deviceScaleFactor: 1 });
+  // Behind a TLS-inspecting proxy Chrome would reject web-font requests (it does not use NODE_EXTRA_CA_CERTS).
+  const context = await browser.newContext({
+    viewport: { width: doc.width, height: doc.height },
+    deviceScaleFactor: 1,
+    ignoreHTTPSErrors: !!chromeProxy(),
+  });
   await context.addInitScript(NAME_SHIM);
   const page = await context.newPage();
   try {

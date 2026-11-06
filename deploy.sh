@@ -6,6 +6,7 @@
 #   bash deploy.sh check [--json]            # 检查是否有新版本
 #   bash deploy.sh update [--yes] [--force] [--from PATH]
 #   bash deploy.sh rollback                  # 回滚到上一个版本（同时恢复更新前的数据库备份）
+#   bash deploy.sh nettest [options]         # 只做网络连接检测（代理、证书、下载源），不安装任何东西
 #   bash deploy.sh start|stop|restart|status|logs [-f]|uninstall [--purge]
 #
 # Install options:
@@ -20,6 +21,16 @@
 #   --admin-password PWD         首次启动时 admin 的初始密码
 #   --npm-registry URL           npm 镜像（如 https://registry.npmmirror.com）
 #   --node-mirror URL            Node.js 下载镜像（如 https://npmmirror.com/mirrors/node）
+#
+# Network options (install/update/nettest; saved and reused by later updates and by the app itself):
+#   --proxy URL                  HTTP(S) 代理，如 http://proxy.corp:8080 或 http://用户:密码@proxy:8080；
+#                                未指定时依次读取 https_proxy/http_proxy 环境变量、/etc/environment、apt 代理配置；
+#                                --proxy none 表示不使用代理
+#   --no-proxy LIST              不走代理的地址（逗号分隔，如 .corp.local,10.0.0.0/8；本机地址总是直连）
+#   --ca-cert FILE|auto|none     额外信任的根证书（公司代理解密 HTTPS 时使用，PEM 或 DER）；
+#                                auto = 从代理返回的证书链中取根证书并信任（会打印指纹供核对）
+#   --insecure / --secure        关闭 / 恢复 HTTPS 证书校验（仅在无法获得公司根证书时使用）
+#   --skip-nettest               跳过安装/更新前的网络连接检测
 set -Eeuo pipefail
 
 APP_NAME="roadshow-studio"
@@ -49,6 +60,7 @@ CMD="${1:-auto}"; [ $# -gt 0 ] && shift
 OPT_SOURCE=""; OPT_REPO=""; OPT_BRANCH=""; OPT_MANIFEST=""; OPT_FROM=""; OPT_PORT=""; OPT_HOST=""
 OPT_BASE=""; OPT_USER=""; OPT_NO_SYSTEMD=0; OPT_ADMIN_PWD=""; OPT_NPM_REGISTRY=""; OPT_NODE_MIRROR=""
 OPT_JSON=0; OPT_YES=0; OPT_FORCE=0; OPT_FOLLOW=0; OPT_PURGE=0
+OPT_PROXY=""; OPT_NO_PROXY=""; OPT_CA_CERT=""; OPT_INSECURE=""; OPT_SKIP_NETTEST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) OPT_SOURCE="$2"; shift ;;
@@ -64,6 +76,12 @@ while [ $# -gt 0 ]; do
     --admin-password) OPT_ADMIN_PWD="$2"; shift ;;
     --npm-registry) OPT_NPM_REGISTRY="$2"; shift ;;
     --node-mirror) OPT_NODE_MIRROR="$2"; shift ;;
+    --proxy) OPT_PROXY="$2"; shift ;;
+    --no-proxy) OPT_NO_PROXY="$2"; shift ;;
+    --ca-cert) case "$2" in auto|none) OPT_CA_CERT="$2" ;; *) OPT_CA_CERT="$(readlink -f "$2")" ;; esac; shift ;;
+    --insecure) OPT_INSECURE=1 ;;
+    --secure) OPT_INSECURE=0 ;;
+    --skip-nettest) OPT_SKIP_NETTEST=1 ;;
     --json) OPT_JSON=1 ;;
     --yes|-y) OPT_YES=1 ;;
     --force) OPT_FORCE=1 ;;
@@ -96,7 +114,7 @@ UNIT_FILE="/etc/systemd/system/$APP_NAME.service"
 # Defaults, overridden by deploy.conf, then by command-line options.
 PORT=9090; HOST=0.0.0.0; UPDATE_SOURCE=local; REPO_URL=""; BRANCH=main; MANIFEST_URL=""; LOCAL_SOURCE=""
 SERVICE_USER=""; USE_SYSTEMD=0; NODE_BIN=""; KEEP_RELEASES=3; NPM_REGISTRY=""; NODE_MIRROR="https://nodejs.org/dist"
-ADMIN_PASSWORD=""
+ADMIN_PASSWORD=""; PROXY_URL=""; NO_PROXY_LIST=""; CA_CERT=""; TLS_INSECURE=0
 if [ -f "$CONF" ] && [ ! -r "$CONF" ]; then
   if have sudo; then exec sudo bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}"; fi
   echo "无权读取 $CONF，请使用 root 或服务用户执行" >&2; exit 1
@@ -111,6 +129,10 @@ fi
 [ -n "$OPT_NPM_REGISTRY" ] && NPM_REGISTRY="$OPT_NPM_REGISTRY"
 [ -n "$OPT_NODE_MIRROR" ] && NODE_MIRROR="$OPT_NODE_MIRROR"
 [ -n "$OPT_ADMIN_PWD" ] && ADMIN_PASSWORD="$OPT_ADMIN_PWD"
+[ -n "$OPT_PROXY" ] && PROXY_URL="$OPT_PROXY"
+[ -n "$OPT_NO_PROXY" ] && NO_PROXY_LIST="$OPT_NO_PROXY"
+[ -n "$OPT_INSECURE" ] && TLS_INSECURE="$OPT_INSECURE"
+[ "$OPT_CA_CERT" = none ] && CA_CERT=""
 if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
 elif [ -n "$OPT_MANIFEST" ]; then UPDATE_SOURCE=archive; fi
@@ -133,6 +155,10 @@ KEEP_RELEASES=$(printf %q "$KEEP_RELEASES")
 NPM_REGISTRY=$(printf %q "$NPM_REGISTRY")
 NODE_MIRROR=$(printf %q "$NODE_MIRROR")
 ADMIN_PASSWORD=$(printf %q "$ADMIN_PASSWORD")
+PROXY_URL=$(printf %q "$PROXY_URL")
+NO_PROXY_LIST=$(printf %q "$NO_PROXY_LIST")
+CA_CERT=$(printf %q "$CA_CERT")
+TLS_INSECURE=$(printf %q "$TLS_INSECURE")
 EOF
   mv -f "$CONF.tmp" "$CONF"
   chmod 600 "$CONF"
@@ -157,6 +183,16 @@ npm_config_cache=$SHARED/npm-cache
 PATH=$(dirname "${NODE_BIN:-/usr/bin/node}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
   [ -n "$ADMIN_PASSWORD" ] && echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> "$APP_ENV.tmp"
+  # The app calls model APIs and renders pages with web fonts, so it needs the same proxy / trust settings.
+  {
+    printf 'NO_PROXY=%q\nno_proxy=%q\n' "$NO_PROXY_ALL" "$NO_PROXY_ALL"
+    if proxy_on; then
+      printf '%s=%q\n' HTTPS_PROXY "$PROXY_URL" HTTP_PROXY "$PROXY_URL" https_proxy "$PROXY_URL" http_proxy "$PROXY_URL"
+      echo "NODE_USE_ENV_PROXY=1"
+    fi
+    if [ "$TLS_INSECURE" = 1 ]; then echo "NODE_TLS_REJECT_UNAUTHORIZED=0"
+    elif [ -n "$CA_CERT" ]; then printf 'NODE_EXTRA_CA_CERTS=%q\n' "$CA_CERT"; fi
+  } >> "$APP_ENV.tmp"
   [ -f "$SHARED/extra.env" ] && cat "$SHARED/extra.env" >> "$APP_ENV.tmp"
   mv -f "$APP_ENV.tmp" "$APP_ENV"
   chmod 600 "$APP_ENV"
@@ -199,6 +235,246 @@ start_logging() {
   exec > >(tee -a "$LOG_DIR/deploy.log") 2>&1
 }
 
+# ---------------------------------------------------------------- network: proxy, TLS, connection test
+CERT_DIR="$SHARED/certs"
+PROXY_SOURCE=""
+NO_PROXY_ALL="localhost,127.0.0.1,::1"
+CURL_TLS=(); APT_NET=(); DNF_NET=()
+NET_FAIL=0
+
+mask_url() { printf '%s' "$1" | sed -E 's#(://)[^/@]+@#\1***@#'; }
+proxy_on() { [ -n "$PROXY_URL" ] && [ "$PROXY_URL" != none ]; }
+url_host() { local u="${1#*://}"; u="${u##*@}"; u="${u%%/*}"; printf '%s' "${u%%:*}"; }
+url_port() { local u="${1#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) printf '%s' "${u##*:}" ;; *) case "$1" in http://*) echo 80 ;; *) echo 443 ;; esac ;; esac; }
+proxy_hostport() { local u="${PROXY_URL#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) ;; *) u="$u:80" ;; esac; printf '%s' "$u"; }
+proxy_cred() { local u="${PROXY_URL#*://}"; u="${u%%/*}"; case "$u" in *@*) printf '%s' "${u%@*}" ;; esac; }
+
+# Explicit option > deploy.conf > environment > /etc/environment > apt's proxy (sudo drops the caller's environment).
+detect_proxy() {
+  if [ -n "$PROXY_URL" ]; then PROXY_SOURCE="$([ -n "$OPT_PROXY" ] && echo 命令行参数 || echo "$CONF")"; return 0; fi
+  local v p
+  for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
+    p="${!v:-}"
+    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE="环境变量 $v"; return 0; fi
+  done
+  if [ -r /etc/environment ]; then
+    p="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?(https_proxy|HTTPS_PROXY|http_proxy|HTTP_PROXY)=["'\'']?([^"'\'' ]+).*/\3/p' /etc/environment | head -1)"
+    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE=/etc/environment; return 0; fi
+  fi
+  if have apt-config; then
+    p="$(apt-config dump 2>/dev/null | sed -nE 's/^Acquire::https?::Proxy "([^"]+)";$/\1/p' | grep -viE '^(direct|false)$' | head -1 || true)"
+    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE="apt 配置"; fi
+  fi
+  return 0
+}
+
+system_ca_bundle() {
+  local f
+  for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem; do
+    [ -f "$f" ] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+
+build_ca_bundle() { # system roots + the extra CA: curl, git and npm replace (not extend) their trust store
+  local sys; sys="$(system_ca_bundle || true)"
+  { [ -n "$sys" ] && cat "$sys"; echo; cat "$CA_CERT"; } > "$CERT_DIR/ca-bundle.pem"
+  chmod 644 "$CERT_DIR/ca-bundle.pem"
+}
+
+cert_info() { have openssl && openssl x509 -in "$1" -noout -subject -enddate -fingerprint -sha256 2>/dev/null | tr '\n' ' ' || true; }
+
+import_ca() { # file -> trusted from now on
+  local src="$1"
+  [ -r "$src" ] || die "无法读取证书文件：$src"
+  mkdir -p "$CERT_DIR"
+  if grep -q 'BEGIN CERTIFICATE' "$src"; then cp -f "$src" "$CERT_DIR/proxy-ca.pem"
+  elif have openssl && openssl x509 -inform DER -in "$src" -out "$CERT_DIR/proxy-ca.pem" 2>/dev/null; then :
+  else die "不是有效的证书文件（需要 PEM 或 DER 格式）：$src"; fi
+  chmod 644 "$CERT_DIR/proxy-ca.pem"
+  CA_CERT="$CERT_DIR/proxy-ca.pem"
+  build_ca_bundle
+  ok "已信任根证书：$(cert_info "$CA_CERT")"
+}
+
+# --ca-cert auto: take the top certificate of the chain the proxy presents for a public site.
+fetch_proxy_ca() {
+  have openssl || die "--ca-cert auto 需要 openssl，请安装后重试，或用 --ca-cert 文件 指定证书"
+  local reg="${NPM_REGISTRY:-https://registry.npmjs.org}" host port
+  host="$(url_host "$reg")"; port="$(url_port "$reg")"
+  if curl -sS -o /dev/null --connect-timeout 10 --max-time 20 "https://$host:$port/" 2>/dev/null; then
+    ok "访问 https://$host 的证书可被系统信任，HTTPS 未被代理解密，无需导入证书"; return 0
+  fi
+  local args=(s_client -showcerts -servername "$host" -connect "$host:$port") cred tmp n last aia
+  if proxy_on; then
+    args+=(-proxy "$(proxy_hostport)")
+    cred="$(proxy_cred)"; [ -n "$cred" ] && args+=(-proxy_user "${cred%%:*}" -proxy_pass "pass:${cred#*:}")
+  fi
+  tmp="$(mktemp -d)"
+  timeout 25 openssl "${args[@]}" </dev/null >"$tmp/chain" 2>"$tmp/err" || true
+  awk -v dir="$tmp" '/-----BEGIN CERTIFICATE-----/{n++; f=1} f{print > (dir "/c" n ".pem")} /-----END CERTIFICATE-----/{f=0}' "$tmp/chain"
+  n="$(find "$tmp" -name 'c*.pem' | wc -l)"
+  [ "$n" -gt 0 ] || die "无法从 $host 获取证书链：$(grep -v '^$' "$tmp/err" | tail -1)"
+  last="$tmp/c$n.pem"
+  if [ "$n" = 1 ]; then
+    # Only the site certificate was sent; its "CA Issuers" URL (AIA) may point at the signing CA.
+    aia="$(openssl x509 -in "$last" -noout -ext authorityInfoAccess 2>/dev/null | sed -nE 's/.*CA Issuers - URI:(https?:[^[:space:]]+).*/\1/p' | head -1)"
+    if [ -n "$aia" ] && net_curl -fsSL --max-time 20 "$aia" -o "$tmp/issuer.crt" 2>/dev/null; then
+      log "代理只返回了站点证书，已按其 CA Issuers 地址下载签发证书：$aia"
+      last="$tmp/issuer.crt"
+    else
+      die "代理只返回了站点证书（签发者：$(openssl x509 -in "$last" -noout -issuer 2>/dev/null | sed 's/^issuer=//')），无法自动获得其根证书。请向 IT 索取公司根证书后用 --ca-cert 文件 指定（也可从已信任该代理的电脑上导出浏览器中的根证书），或使用 --insecure"
+    fi
+  fi
+  if [ "$n" -gt 1 ] && [ "$(openssl x509 -in "$last" -noout -subject 2>/dev/null | sed 's/^subject=//')" != "$(openssl x509 -in "$last" -noout -issuer 2>/dev/null | sed 's/^issuer=//')" ]; then
+    warn "代理返回的最上层证书不是自签名根证书，若仍校验失败请向 IT 索取完整的根证书"
+  fi
+  import_ca "$last"
+  warn "该证书是从网络中自动获取的：请向 IT 核对上面的 SHA256 指纹，确认它确实是公司代理的根证书"
+  rm -rf "$tmp"
+}
+
+apply_network() {
+  detect_proxy
+  if proxy_on; then
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export npm_config_proxy="$PROXY_URL" npm_config_https_proxy="$PROXY_URL"
+  elif [ "$PROXY_URL" = none ]; then
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY npm_config_proxy npm_config_https_proxy
+  fi
+  NO_PROXY_ALL="localhost,127.0.0.1,::1${NO_PROXY_LIST:+,$NO_PROXY_LIST}"
+  export no_proxy="$NO_PROXY_ALL" NO_PROXY="$NO_PROXY_ALL" npm_config_noproxy="$NO_PROXY_ALL"
+  CURL_TLS=(); APT_NET=(); DNF_NET=()
+  if proxy_on; then
+    APT_NET+=(-o "Acquire::http::Proxy=$PROXY_URL" -o "Acquire::https::Proxy=$PROXY_URL")
+    DNF_NET+=("--setopt=proxy=$PROXY_URL")
+  fi
+  unset GIT_SSL_NO_VERIFY GIT_SSL_CAINFO npm_config_strict_ssl npm_config_cafile
+  if [ "$TLS_INSECURE" = 1 ]; then
+    CURL_TLS=(-k)
+    export GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false
+    APT_NET+=(-o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false)
+    DNF_NET+=(--setopt=sslverify=False)
+  elif [ -n "$CA_CERT" ] && [ -f "$CA_CERT" ]; then
+    [ -f "$CERT_DIR/ca-bundle.pem" ] || build_ca_bundle 2>/dev/null || true
+    local b="$CERT_DIR/ca-bundle.pem"
+    CURL_TLS=(--cacert "$b")
+    export GIT_SSL_CAINFO="$b" npm_config_cafile="$b" NODE_EXTRA_CA_CERTS="$CA_CERT"
+    APT_NET+=(-o "Acquire::https::CAInfo=$b")
+    DNF_NET+=("--setopt=sslcacert=$b")
+  fi
+}
+
+setup_network() { # handles --ca-cert, then applies everything to this process
+  case "$OPT_CA_CERT" in
+    ""|none) ;;
+    auto) apply_network; fetch_proxy_ca ;;
+    *) import_ca "$OPT_CA_CERT" ;;
+  esac
+  apply_network
+}
+
+net_curl() { curl ${CURL_TLS[@]+"${CURL_TLS[@]}"} "$@"; }
+
+explain_curl_error() { # curl exit code, stderr file, url -> one-line cause and fix
+  local rc="$1" err="$2" url="$3" issuer last
+  last="$(grep -v '^$' "$err" 2>/dev/null | tail -1 | sed 's/^curl: ([0-9]*) //' || true)"
+  case "$rc" in
+    5) echo "无法解析代理服务器地址 $(mask_url "$PROXY_URL")" ;;
+    6) if proxy_on; then echo "无法解析域名 $(url_host "$url")：$last"
+       else echo "无法解析域名 $(url_host "$url")（本机 DNS 无法解析外网域名；公司网络通常需经代理上网，请用 --proxy http://代理:端口 指定）"; fi ;;
+    7) if proxy_on; then echo "无法连接（请确认代理 $(mask_url "$PROXY_URL") 可用）：$last"
+       else echo "无法建立连接（可能需要通过代理上网：--proxy http://代理:端口，或被防火墙拦截）"; fi ;;
+    28) echo "连接超时（可能需要通过代理上网，或代理/下载源响应过慢）" ;;
+    22) echo "服务器返回错误：$last" ;;
+    56|52) if grep -q 407 "$err" 2>/dev/null; then echo "代理要求身份认证（HTTP 407）：请使用 --proxy http://用户名:密码@代理:端口"
+           else echo "连接被代理或服务器中断：$last"; fi ;;
+    35|51|58|60|77|83|90|91)
+      issuer="$(curl -skv --connect-timeout 10 --max-time 20 -o /dev/null "$url" 2>&1 | sed -nE 's/^\*[[:space:]]+issuer: //p' | head -1 || true)"
+      echo "HTTPS 证书校验失败（证书签发者：${issuer:-未知}）。公司代理通常会解密 HTTPS 并用自己的证书重新签名：请用 --ca-cert 公司根证书.pem 信任它（或 --ca-cert auto 自动从代理获取），无法获得证书时可用 --insecure 跳过校验" ;;
+    *) echo "curl 错误 $rc：$last" ;;
+  esac
+}
+
+probe_url() { # label url required(1|0)
+  local label="$1" url="$2" req="$3" code rc=0 err why
+  err="$(mktemp)"
+  code="$(net_curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$url" 2>"$err")" || rc=$?
+  if [ "$rc" = 0 ] && [ "$code" != 407 ] && [ "${code:0:1}" != 5 ]; then
+    ok "  $label：可访问（HTTP $code）"
+  else
+    if [ "$rc" = 0 ]; then
+      why="服务器返回 HTTP $code"
+      [ "$code" = 407 ] && why="代理要求身份认证（HTTP 407）：请使用 --proxy http://用户名:密码@代理:端口"
+    else
+      why="$(explain_curl_error "$rc" "$err" "$url")"
+    fi
+    if [ "$req" = 1 ]; then NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   %s：%s%s\n' "$c_err" "$(date '+%F %T')" "$label" "$why" "$c_off" >&2
+    else warn "  $label：$why（非必需）"; fi
+  fi
+  rm -f "$err"
+}
+
+probe_git() { # repo branch
+  local out rc=0 why
+  out="$(GIT_HTTP_LOW_SPEED_LIMIT=1 GIT_HTTP_LOW_SPEED_TIME=30 git_remote ls-remote --heads "$1" "refs/heads/$2" 2>&1)" || rc=$?
+  if [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE $'^[0-9a-f]{40}\t'; then ok "  代码仓库（$1）：可访问"; return 0; fi
+  case "$out" in
+    *"SSL certificate"*|*"certificate verif"*|*"self-signed certificate"*|*"self signed certificate"*)
+      why="HTTPS 证书校验失败（公司代理可能在解密 HTTPS）：请用 --ca-cert 公司根证书.pem / --ca-cert auto，或 --insecure" ;;
+    *"Could not resolve host"*) why="无法解析域名$(proxy_on || echo '（可能需要 --proxy http://代理:端口）')" ;;
+    *407*) why="代理要求身份认证（HTTP 407）：请使用 --proxy http://用户名:密码@代理:端口" ;;
+    *"could not read Username"*|*"Authentication failed"*) why="需要身份认证（私有仓库）：请在仓库地址中使用访问令牌，或配置 git 凭据" ;;
+    *) why="$(printf '%s' "$out" | grep -v '^$' | tail -1 || true)"; [ -n "$why" ] || why="分支 $2 不存在" ;;
+  esac
+  NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   代码仓库（%s）：%s%s\n' "$c_err" "$(date '+%F %T')" "$1" "$why" "$c_off" >&2
+}
+
+apt_probe_url() { # first http(s) repository apt uses
+  grep -rhoE '^[[:space:]]*(deb[[:space:]]+(\[[^]]*\][[:space:]]+)?|URIs:[[:space:]]+)https?://[^[:space:]]+' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | grep -oE 'https?://[^[:space:]]+' | head -1 || true
+}
+
+# Connection test run before anything is installed; required checks failing aborts the run.
+net_preflight() {
+  if [ "$OPT_SKIP_NETTEST" = 1 ]; then warn "已跳过网络连接检测（--skip-nettest）"; return 0; fi
+  [ "${RS_NETTEST_DONE:-}" = 1 ] && return 0
+  set_status running "检测网络连接"
+  log "网络连接检测"
+  NET_FAIL=0
+  if proxy_on; then
+    log "  代理：$(mask_url "$PROXY_URL")（来源：$PROXY_SOURCE），直连：$NO_PROXY_ALL"
+    local hp; hp="$(proxy_hostport)"
+    if timeout 8 bash -c ': </dev/tcp/"$1"/"$2"' _ "${hp%:*}" "${hp##*:}" 2>/dev/null; then ok "  代理服务器 $hp：可连接"
+    else NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   代理服务器 %s 无法连接，请检查 --proxy 地址与端口%s\n' "$c_err" "$(date '+%F %T')" "$hp" "$c_off" >&2; fi
+  else
+    log "  代理：未使用（公司网络需代理时用 --proxy http://代理:端口；sudo 默认不传递 https_proxy 环境变量，可改用 sudo -E）"
+  fi
+  if [ "$TLS_INSECURE" = 1 ]; then warn "  HTTPS 证书校验：已关闭（--insecure）"
+  elif [ -n "$CA_CERT" ]; then log "  HTTPS 证书校验：系统根证书 + $CA_CERT"
+  else log "  HTTPS 证书校验：系统根证书"; fi
+
+  if find_node >/dev/null; then ok "  Node.js：已有可用的 Node.js $NODE_MAJOR+，无需下载"
+  else probe_url "Node.js 下载源（$NODE_MIRROR）" "$NODE_MIRROR/latest-v$NODE_MAJOR.x/SHASUMS256.txt" 1; fi
+  probe_url "npm 仓库（${NPM_REGISTRY:-https://registry.npmjs.org}）" "${NPM_REGISTRY:-https://registry.npmjs.org}/-/ping" 1
+  if [ -z "$OPT_FROM" ]; then
+    case "$UPDATE_SOURCE" in
+      git) case "$REPO_URL" in /*|file://*) ;; *) [ -n "$REPO_URL" ] && probe_git "$REPO_URL" "$BRANCH" ;; esac ;;
+      archive) case "$MANIFEST_URL" in http://*|https://*) probe_url "发布清单（$MANIFEST_URL）" "$MANIFEST_URL" 1 ;; esac ;;
+    esac
+  fi
+  if is_root && [ "$(detect_pkg)" = apt ]; then
+    local u; u="$(apt_probe_url)"
+    [ -n "$u" ] && probe_url "系统软件源（$u，用于安装字体/LibreOffice 等）" "$u" 0
+  fi
+  find_system_chrome >/dev/null || probe_url "Chromium 下载（PDF/PPT 导出）" "https://cdn.playwright.dev/" 0
+  probe_url "模型接口示例（OpenRouter，应用运行时调用）" "https://openrouter.ai/api/v1/models" 0
+  if [ "$NET_FAIL" -gt 0 ]; then
+    die "网络连接检测未通过（$NET_FAIL 项必需的连接失败），尚未安装任何组件。请按提示调整参数后重试（可先用 \"bash deploy.sh nettest ...\" 反复检测），或用 --skip-nettest 跳过检测"
+  fi
+  ok "网络连接检测通过"
+}
+
 # ---------------------------------------------------------------- environment
 detect_pkg() {
   if have apt-get; then echo apt; elif have dnf; then echo dnf; elif have yum; then echo yum; elif have zypper; then echo zypper; else echo none; fi
@@ -211,16 +487,18 @@ ensure_system_deps() {
   case "$pm" in
     apt)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y -qq || warn "apt-get update 失败"
-      apt-get install -y -qq git curl ca-certificates tar xz-utils unzip fonts-noto-cjk >/dev/null || warn "部分依赖安装失败"
+      local apt=(apt-get ${APT_NET[@]+"${APT_NET[@]}"})
+      "${apt[@]}" update -y -qq || warn "apt-get update 失败"
+      "${apt[@]}" install -y -qq git curl ca-certificates tar xz-utils unzip fonts-noto-cjk >/dev/null || warn "部分依赖安装失败"
       # PPT/PDF reference uploads are exported page by page to images.
-      apt-get install -y -qq --no-install-recommends libreoffice-impress libreoffice-writer poppler-utils >/dev/null \
+      "${apt[@]}" install -y -qq --no-install-recommends libreoffice-impress libreoffice-writer poppler-utils >/dev/null \
         || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
       ;;
     dnf|yum)
-      "$pm" install -y -q git curl ca-certificates tar xz unzip google-noto-sans-cjk-ttc-fonts >/dev/null 2>&1 \
-        || "$pm" install -y -q git curl tar xz unzip >/dev/null || warn "部分依赖安装失败"
-      "$pm" install -y -q libreoffice-impress libreoffice-writer poppler-utils >/dev/null 2>&1 \
+      local dnf=("$pm" ${DNF_NET[@]+"${DNF_NET[@]}"})
+      "${dnf[@]}" install -y -q git curl ca-certificates tar xz unzip google-noto-sans-cjk-ttc-fonts >/dev/null 2>&1 \
+        || "${dnf[@]}" install -y -q git curl tar xz unzip >/dev/null || warn "部分依赖安装失败"
+      "${dnf[@]}" install -y -q libreoffice-impress libreoffice-writer poppler-utils >/dev/null 2>&1 \
         || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
       ;;
     zypper)
@@ -243,23 +521,37 @@ npm_cli_for() { # node binary -> npm-cli.js of the same installation
   done
 }
 
-ensure_node() {
-  if [ -n "$NODE_BIN" ] && node_ok "$NODE_BIN"; then return 0; fi
+find_node() { # prints a usable node binary: configured, on PATH, or previously downloaded
+  if [ -n "$NODE_BIN" ] && node_ok "$NODE_BIN"; then echo "$NODE_BIN"; return 0; fi
   local n
   while read -r n; do
     n="$(readlink -f "$n")"
-    if node_ok "$n"; then NODE_BIN="$n"; ok "使用系统 Node.js $("$NODE_BIN" -v)（$NODE_BIN）"; return 0; fi
+    if node_ok "$n"; then echo "$n"; return 0; fi
   done < <(type -ap node; true)
-  if node_ok "$BASE_DIR/node/bin/node"; then NODE_BIN="$BASE_DIR/node/bin/node"; return 0; fi
+  if node_ok "$BASE_DIR/node/bin/node"; then echo "$BASE_DIR/node/bin/node"; return 0; fi
+  return 1
+}
+
+ensure_node() {
+  if [ -n "$NODE_BIN" ] && node_ok "$NODE_BIN"; then return 0; fi
+  local found
+  if found="$(find_node)"; then
+    NODE_BIN="$found"
+    [ "$found" = "$BASE_DIR/node/bin/node" ] || ok "使用系统 Node.js $("$NODE_BIN" -v)（$NODE_BIN）"
+    return 0
+  fi
   local arch
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) die "不支持的 CPU 架构：$(uname -m)" ;; esac
   log "下载 Node.js $NODE_MAJOR（$arch，镜像 $NODE_MIRROR）"
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "$NODE_MIRROR/latest-v$NODE_MAJOR.x/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt" || die "无法获取 Node.js 版本列表"
+  local url="$NODE_MIRROR/latest-v$NODE_MAJOR.x/SHASUMS256.txt" rc=0
+  net_curl -fsSL --connect-timeout 15 "$url" -o "$tmp/SHASUMS256.txt" 2>"$tmp/err" || rc=$?
+  [ "$rc" = 0 ] || die "无法获取 Node.js 版本列表（$url）：$(explain_curl_error "$rc" "$tmp/err" "$url")。也可用 --node-mirror 指定内网或国内镜像（如 https://npmmirror.com/mirrors/node）"
   local file
   file="$(grep -oE "node-v$NODE_MAJOR\.[0-9]+\.[0-9]+-linux-$arch\.tar\.xz" "$tmp/SHASUMS256.txt" | head -1)"
   [ -n "$file" ] || die "未找到适用的 Node.js 安装包"
-  curl -fsSL "$NODE_MIRROR/latest-v$NODE_MAJOR.x/$file" -o "$tmp/$file" || die "Node.js 下载失败"
+  rc=0; net_curl -fsSL --connect-timeout 15 "$NODE_MIRROR/latest-v$NODE_MAJOR.x/$file" -o "$tmp/$file" 2>"$tmp/err" || rc=$?
+  [ "$rc" = 0 ] || die "Node.js 下载失败：$(explain_curl_error "$rc" "$tmp/err" "$NODE_MIRROR/latest-v$NODE_MAJOR.x/$file")"
   (cd "$tmp" && grep " $file\$" SHASUMS256.txt | sha256sum -c - >/dev/null) || die "Node.js 安装包校验失败"
   rm -rf "$BASE_DIR/node" && mkdir -p "$BASE_DIR/node"
   tar -xJf "$tmp/$file" -C "$BASE_DIR/node" --strip-components=1
@@ -293,7 +585,7 @@ ensure_browser() { # release dir
   if compgen -G "$PLAYWRIGHT_BROWSERS_PATH/chromium*" >/dev/null; then return 0; fi
   log "下载 Chromium（用于 PDF/PPT 导出）"
   if is_root && [ "$(detect_pkg)" = apt ]; then "$NODE_BIN" "$cli" install-deps chromium >/dev/null 2>&1 || warn "Chromium 系统依赖安装失败"; fi
-  "$NODE_BIN" "$cli" install chromium >/dev/null || warn "Chromium 下载失败，PDF/PPT 导出将不可用（可设置 CHROME_PATH 指向已有浏览器）"
+  ( [ "$TLS_INSECURE" = 1 ] && export NODE_TLS_REJECT_UNAUTHORIZED=0; "$NODE_BIN" "$cli" install chromium >/dev/null ) || warn "Chromium 下载失败，PDF/PPT 导出将不可用（可设置 CHROME_PATH 指向已有浏览器）"
 }
 
 # ---------------------------------------------------------------- versions & sources
@@ -310,7 +602,7 @@ current_commit() { version_field "$CURRENT/VERSION.json" commit; }
 fetch_manifest() { # -> prints manifest json
   [ -n "$MANIFEST_URL" ] || die "未配置发布清单地址（MANIFEST_URL）"
   case "$MANIFEST_URL" in
-    http://*|https://*) curl -fsSL --max-time 30 "$MANIFEST_URL" ;;
+    http://*|https://*) net_curl -fsSL --max-time 30 "$MANIFEST_URL" ;;
     *) cat "${MANIFEST_URL#file://}" ;;
   esac
 }
@@ -346,7 +638,9 @@ latest_remote() {
 # so trust them through a dedicated global config instead of touching the user's ~/.gitconfig.
 git_remote() {
   local gc="$SHARED/gitconfig"
-  [ -f "$gc" ] || printf '[safe]\n\tdirectory = *\n' > "$gc"
+  if [ ! -f "$gc" ]; then
+    { mkdir -p "$SHARED" && printf '[safe]\n\tdirectory = *\n' > "$gc"; } 2>/dev/null || { gc="$(mktemp)"; printf '[safe]\n\tdirectory = *\n' > "$gc"; }
+  fi
   GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL="$gc" git "$@"
 }
 
@@ -385,7 +679,7 @@ fetch_source() {
     log "从本地获取代码：$OPT_FROM"
     if [ -d "$OPT_FROM" ]; then
       copy_tree "$OPT_FROM" "$dst"
-      SRC_COMMIT="$(git -C "$OPT_FROM" rev-parse HEAD 2>/dev/null || true)"
+      SRC_COMMIT="$(git_remote -C "$OPT_FROM" rev-parse HEAD 2>/dev/null || true)"
     else
       extract_archive "$OPT_FROM" "$dst"
     fi
@@ -411,7 +705,7 @@ fetch_source() {
         tmp="$(mktemp -d)"
         local fname="$tmp/release.${url##*.}"
         case "$url" in *.tar.gz) fname="$tmp/release.tar.gz" ;; esac
-        case "$url" in http://*|https://*) curl -fsSL "$url" -o "$fname" || die "发布包下载失败" ;; *) cp "${url#file://}" "$fname" ;; esac
+        case "$url" in http://*|https://*) net_curl -fsSL "$url" -o "$fname" || die "发布包下载失败" ;; *) cp "${url#file://}" "$fname" ;; esac
         if [ -n "$sum" ]; then
           echo "$sum  $fname" | sha256sum -c - >/dev/null || die "发布包 SHA256 校验失败"
           ok "发布包校验通过"
@@ -429,7 +723,7 @@ fetch_source() {
   [ -f "$dst/server/package.json" ] && [ -f "$dst/web/package.json" ] || die "代码结构不正确（缺少 server/ 或 web/）"
   if [ -z "$SRC_VERSION" ]; then
     SRC_VERSION="$("$NODE_BIN" -p "require('$dst/package.json').version || '0.0.0'" 2>/dev/null || echo 0.0.0)"
-    [ -n "$SRC_COMMIT" ] && SRC_VERSION="$SRC_VERSION+${SRC_COMMIT:0:7}"
+    if [ -n "$SRC_COMMIT" ]; then SRC_VERSION="$SRC_VERSION+${SRC_COMMIT:0:7}"; fi
   fi
 }
 
@@ -612,7 +906,7 @@ restart_marker() {
 health_check() { # expected version, timeout seconds; fails early if the app keeps crashing
   local want="$1" t="${2:-90}" body
   for _ in $(seq 1 "$t"); do
-    body="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
+    body="$(curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
     if [ -n "$body" ]; then
       if [ -z "$want" ] || printf '%s' "$body" | grep -qF "\"version\":\"$want\""; then return 0; fi
     fi
@@ -704,6 +998,8 @@ cmd_install() {
     if [ -f "$SCRIPT_DIR/server/package.json" ]; then OPT_FROM="$SCRIPT_DIR"; else die "请指定 --from PATH、--repo URL 或 --manifest URL"; fi
   fi
   [ "$UPDATE_SOURCE" = local ] && [ -n "$OPT_FROM" ] && LOCAL_SOURCE="$OPT_FROM"
+  setup_network
+  net_preflight
   if is_root; then
     SERVICE_USER="${OPT_USER:-${SERVICE_USER:-roadshow}}"
     if [ "$SERVICE_USER" != root ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -723,7 +1019,15 @@ cmd_install() {
   deploy_release
   save_conf
   fix_owner
-  if is_root; then ln -sfn "$BASE_DIR/deploy.sh" "/usr/local/bin/$APP_NAME" && ok "已注册命令：$APP_NAME（等同于 $BASE_DIR/deploy.sh）"; fi
+  if is_root; then
+    local link="/usr/local/bin/$APP_NAME" target
+    target="$(readlink -f "$link" 2>/dev/null || true)"
+    if [ -n "$target" ] && [ "$target" != "$BASE_DIR/deploy.sh" ] && [ -f "$target" ]; then
+      warn "命令 $APP_NAME 已指向另一个安装（$target），未覆盖；本实例请使用 $BASE_DIR/deploy.sh"
+    else
+      ln -sfn "$BASE_DIR/deploy.sh" "$link" && ok "已注册命令：$APP_NAME（等同于 $BASE_DIR/deploy.sh）"
+    fi
+  fi
   echo
   ok "安装完成！访问 http://<服务器IP>:$PORT ，默认账号 admin / ${ADMIN_PASSWORD:-admin123}"
   echo "   检查更新：$APP_NAME check      更新：$APP_NAME update      状态：$APP_NAME status"
@@ -757,7 +1061,10 @@ cmd_check() {
 }
 
 cmd_update() {
-  require_installed; lock; start_logging; ensure_node
+  require_installed; lock; start_logging
+  setup_network
+  net_preflight
+  ensure_node
   STATUS_FROM="$(current_version)"
   if [ -z "$OPT_FROM" ] && [ "$OPT_FORCE" = 0 ]; then
     set_status running "检查更新"
@@ -784,6 +1091,15 @@ cmd_rollback() {
   rm -f "$RUN_DIR/last-backup"
 }
 
+cmd_nettest() {
+  # Nothing is written: a --ca-cert given here is only used for this test.
+  if [ -n "$OPT_CA_CERT" ] && [ "$OPT_CA_CERT" != none ]; then CERT_DIR="$(mktemp -d)"; fi
+  setup_network
+  OPT_SKIP_NETTEST=0; RS_NETTEST_DONE=""
+  net_preflight
+  echo "检测通过后，用相同的网络参数执行安装：sudo bash deploy.sh install $(printf '%q ' "${ORIG_ARGS[@]:1}")"
+}
+
 cmd_status() {
   require_installed
   echo "安装目录：$BASE_DIR"
@@ -792,7 +1108,7 @@ cmd_status() {
   echo "更新源：  $UPDATE_SOURCE ${REPO_URL:+$REPO_URL#$BRANCH}${MANIFEST_URL}${LOCAL_SOURCE:+$LOCAL_SOURCE}"
   echo "进程管理：$([ "$USE_SYSTEMD" = 1 ] && echo systemd || echo 内置守护进程)"
   local a; a="$(app_pid || true)"
-  if [ -n "$a" ] && curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then ok "运行中（PID $a）"; else warn "未运行"; return 1; fi
+  if [ -n "$a" ] && curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then ok "运行中（PID $a）"; else warn "未运行"; return 1; fi
 }
 
 cmd_uninstall() {
@@ -807,9 +1123,21 @@ cmd_uninstall() {
 # Day-to-day commands run as the service user so files under $BASE_DIR keep a single owner
 # (and match what an in-app update, which already runs as that user, produces).
 # Root-run updates first refresh system packages, which new versions may depend on.
+apply_network
 if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && [ -L "$CURRENT" ]; then
   case "$CMD" in
-    update|auto) ensure_system_deps; exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
+    update|auto)
+      # The network test and a new --ca-cert are handled here (the CA file may only be readable by root).
+      setup_network; net_preflight
+      save_conf; [ -d "$CERT_DIR" ] && chown -R "$SERVICE_USER": "$CERT_DIR"
+      ensure_system_deps
+      child=(); skip=0
+      for a in "${ORIG_ARGS[@]}"; do
+        if [ "$skip" = 1 ]; then skip=0; continue; fi
+        [ "$a" = --ca-cert ] && { skip=1; continue; }
+        child+=("$a")
+      done
+      exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" RS_NETTEST_DONE=1 bash "$SCRIPT_PATH" "${child[@]}" ;;
     check|rollback) exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
   esac
 fi
@@ -820,6 +1148,7 @@ case "$CMD" in
   check) cmd_check ;;
   update) cmd_update ;;
   rollback) cmd_rollback ;;
+  nettest|doctor) cmd_nettest ;;
   start) require_installed; start_app; health_check "" 60 && ok "已启动：http://$HOST:$PORT" || die "启动失败，请查看 $LOG_DIR/app.log" ;;
   stop) require_installed; stop_app; ok "已停止" ;;
   restart) require_installed; write_app_env; restart_app; health_check "" 60 && ok "已重启" || die "重启失败，请查看 $LOG_DIR/app.log" ;;
@@ -832,5 +1161,5 @@ case "$CMD" in
   uninstall) cmd_uninstall ;;
   run) cmd_run ;;
   supervise) cmd_supervise ;;
-  help|*) sed -n '2,25p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//' ;;
+  help|*) sed -n '2,37p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//' ;;
 esac
