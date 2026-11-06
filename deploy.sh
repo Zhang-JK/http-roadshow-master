@@ -575,13 +575,27 @@ restart_app() {
   fi
 }
 
-health_check() { # expected version, timeout seconds
+crash_count() { # restarts observed since restart_marker was called
+  [ -n "${CRASH_BASE:-}" ] || { echo 0; return; }
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
+    echo $(( $(systemctl show "$APP_NAME" -p NRestarts --value 2>/dev/null || echo 0) - ${CRASH_BASE:-0} ))
+  else
+    tail -c +"$(( ${CRASH_BASE:-0} + 1 ))" "$LOG_DIR/app.log" 2>/dev/null | grep -c '应用已退出' || true
+  fi
+}
+restart_marker() {
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then CRASH_BASE="$(systemctl show "$APP_NAME" -p NRestarts --value 2>/dev/null || echo 0)"
+  else CRASH_BASE="$(stat -c %s "$LOG_DIR/app.log" 2>/dev/null || echo 0)"; fi
+}
+
+health_check() { # expected version, timeout seconds; fails early if the app keeps crashing
   local want="$1" t="${2:-90}" body
   for _ in $(seq 1 "$t"); do
     body="$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
     if [ -n "$body" ]; then
       if [ -z "$want" ] || printf '%s' "$body" | grep -qF "\"version\":\"$want\""; then return 0; fi
     fi
+    if [ "$(crash_count)" -ge 3 ]; then warn "新版本启动后反复崩溃"; return 1; fi
     sleep 1
   done
   return 1
@@ -589,7 +603,7 @@ health_check() { # expected version, timeout seconds
 
 # ---------------------------------------------------------------- deploy pipeline
 deploy_release() {
-  local id rel prev backup
+  local id rel prev old_prev backup
   STATUS_FROM="$(current_version || true)"
   set_status running "获取代码"
   mkdir -p "$RELEASES" "$DATA_DIR" "$LOG_DIR" "$BACKUP_DIR"
@@ -610,10 +624,12 @@ deploy_release() {
   write_app_env
   switch_current "$rel"
   BUILDING_REL=""
+  old_prev="$(cat "$RUN_DIR/previous" 2>/dev/null || true)"
   [ -n "$prev" ] && echo "$prev" > "$RUN_DIR/previous"
   [ -n "$backup" ] && echo "$backup" > "$RUN_DIR/last-backup"
   fix_owner
   if [ "$USE_SYSTEMD" = 1 ] && systemd_available && is_root && [ ! -f "$UNIT_FILE" ]; then install_systemd_unit; fi
+  restart_marker
   if app_pid >/dev/null || supervisor_pid >/dev/null; then restart_app; else start_app; fi
   set_status running "健康检查"
   if health_check "$SRC_VERSION" 90; then
@@ -627,7 +643,11 @@ deploy_release() {
   if [ -n "$prev" ]; then
     warn "自动回滚到 $(basename "$prev")"
     do_rollback "$prev" "$backup"
-    die "更新到 $SRC_VERSION 失败，已回滚到 $STATUS_FROM"
+    rm -rf "$rel"
+    if [ -n "$old_prev" ] && [ -d "$old_prev" ]; then echo "$old_prev" > "$RUN_DIR/previous"; else rm -f "$RUN_DIR/previous"; fi
+    set_status rolled_back "更新到 $SRC_VERSION 失败，已自动回滚到 $STATUS_FROM 并恢复数据库"
+    STATUS_ACTIVE=0
+    die "更新到 $SRC_VERSION 失败，已自动回滚到 $STATUS_FROM"
   fi
   die "部署失败，请查看日志：$LOG_DIR/app.log"
 }
@@ -641,10 +661,11 @@ do_rollback() { # target release, db backup to restore (optional)
     echo "$backup" > "$RUN_DIR/restore-db"
   fi
   fix_owner
+  restart_marker
   restart_app
   local v; v="$(current_version)"
   if health_check "$v" 90; then
-    ok "已回滚到 $v"; set_status rolled_back "已回滚到 $v" "$v"
+    ok "已回滚到 $v"; set_status rolled_back "已回滚到 $v（已恢复更新前的数据库）" "$v"
   else
     die "回滚后服务仍无法启动，请查看 $LOG_DIR/app.log"
   fi
