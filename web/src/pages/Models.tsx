@@ -40,7 +40,15 @@ export function ModelsPage() {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [assignments, setAssignments] = useState<{ userId: number; username: string; endpointName: string | null }[]>([]);
   const [usage, setUsage] = useState<Usage[]>([]);
-  const [settings, setSettings] = useState<{ attachScreenshots: boolean; selfCheck: boolean; selfCheckRounds: number; maxTokens: number; temperature: number } | null>(null);
+  const [settings, setSettings] = useState<{
+    attachScreenshots: boolean;
+    selfCheck: boolean;
+    selfCheckRounds: number;
+    maxTokens: number;
+    temperature: number;
+    llmIdleTimeoutSec: number;
+    llmMaxCallMinutes: number;
+  } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
   const [formTest, setFormTest] = useState<TestResult | null>(null);
@@ -206,6 +214,17 @@ export function ModelsPage() {
                 <span>Temperature</span>
                 <input type="number" step="0.1" min="0" max="2" defaultValue={settings.temperature} onBlur={(e) => saveSettings({ temperature: Number(e.target.value) })} />
               </label>
+              <label className="field inline" title="模型持续这么久没有返回任何数据（包括长输入的预填充阶段）才判定为卡住并中止">
+                <span>无响应超时（秒）</span>
+                <input type="number" min="30" max="7200" defaultValue={settings.llmIdleTimeoutSec} onBlur={(e) => saveSettings({ llmIdleTimeoutSec: Number(e.target.value) })} data-testid="idle-timeout" />
+              </label>
+              <label className="field inline" title="单次模型调用（即使一直在输出）的最长时间">
+                <span>单次调用上限（分钟）</span>
+                <input type="number" min="5" max="1440" defaultValue={settings.llmMaxCallMinutes} onBlur={(e) => saveSettings({ llmMaxCallMinutes: Number(e.target.value) })} />
+              </label>
+              <p className="muted small">
+                只要模型还在持续输出就不会中止。按输出速度估算：「最大输出 tokens」÷ 每秒 tokens 数 ≈ 一次调用的最长耗时，例如 32000 tokens 在 20 tokens/秒 下约 27 分钟；单次调用上限应大于该值。
+              </p>
             </div>
           )}
           <h3 style={{ marginTop: 20 }}>用量统计 <span className="muted small">合计 ${totalCost.toFixed(4)}</span></h3>

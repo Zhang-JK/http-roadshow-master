@@ -6,6 +6,13 @@ export function timeAgo(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
 }
 
+/** Time since ts as m:ss (or h:mm:ss). */
+export function elapsed(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  const mmss = `${Math.floor((s % 3600) / 60)}:${String(s % 60).padStart(2, '0')}`;
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss.padStart(5, '0')}` : mmss;
+}
+
 export function fullTime(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
 }

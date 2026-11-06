@@ -31,7 +31,6 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD ?? 'admin123',
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
   chromePath: findChrome(),
-  llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 600_000),
   appRoot,
   /** Set by deploy.sh; when absent the app was not installed by the deploy tool and cannot self-update. */
   baseDir: process.env.RS_BASE_DIR,

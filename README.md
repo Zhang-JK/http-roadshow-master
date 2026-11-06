@@ -111,7 +111,7 @@ sudo bash deploy.sh install --proxy http://proxy.corp:8080 --insecure
 - 有些代理只返回服务器证书而不带根证书，此时 `--ca-cert auto` 会尝试按证书中的「颁发者地址」下载；仍失败时会提示改用文件或 `--insecure`。
 - 这些设置保存在 `shared/deploy.conf`，之后的命令行更新和网页一键更新都会沿用，应用本身调用模型接口也走同一代理与证书（`NODE_USE_ENV_PROXY`、`NODE_EXTRA_CA_CERTS`，或 `--insecure` 时的 `NODE_TLS_REJECT_UNAUTHORIZED=0`）。修改时可执行 `sudo roadshow-studio update --force --proxy ... --ca-cert ...`，或用 `--secure` 恢复证书校验。
 
-**目录结构**（`/opt/roadshow-studio`）：`releases/` 各版本、`current` 当前版本、`shared/data` 数据库与素材、`shared/backups` 数据库备份、`shared/logs` 应用与部署日志、`shared/deploy.conf` 部署配置（可修改端口、更新源等后执行 `roadshow-studio restart`）、`shared/extra.env` 额外环境变量（如 `CHROME_PATH`、`LLM_TIMEOUT_MS`）。
+**目录结构**（`/opt/roadshow-studio`）：`releases/` 各版本、`current` 当前版本、`shared/data` 数据库与素材、`shared/backups` 数据库备份、`shared/logs` 应用与部署日志、`shared/deploy.conf` 部署配置（可修改端口、更新源等后执行 `roadshow-studio restart`）、`shared/extra.env` 额外环境变量（如 `CHROME_PATH`）。
 
 **发布新版本（发布包方式）**：在仓库中执行 `bash scripts/package-release.sh [输出目录] [下载地址前缀]`，生成 `roadshow-studio-<版本>.tar.gz` 与 `latest.json`（含版本、提交、SHA256），上传到任意静态文件服务即可；服务器端会校验 SHA256。git 方式只需推送到所跟踪的分支。版本号 = 根目录 `package.json` 的 `version` + 提交短哈希。
 
@@ -140,6 +140,8 @@ bash server/scripts/slides-to-images.sh 输入.pptx 输出目录 [最多页数=3
 
 依赖 `libreoffice-impress`（PDF 输入无需）与 `poppler-utils`，`deploy.sh` 会自动安装；本地开发请自行安装（如 `sudo apt-get install --no-install-recommends libreoffice-impress poppler-utils`）。每次请求最多附带 24 张页面图（多个文件平均分配）、8 张可嵌入图片和 8 张参考图；修改时为 12 / 4 / 6 张。
 
+**模型调用超时**在「模型接入 → 生成设置」中调整：模型连续「无响应超时」（默认 600 秒，含长输入的预填充阶段）没有返回任何数据才会中止，持续输出时不会中止；「单次调用上限」（默认 120 分钟）是一次调用的总时长上限。慢速的本地模型可按「最大输出 tokens ÷ 每秒 tokens 数」估算一次调用的耗时（32000 tokens 在 20 tokens/秒 下约 27 分钟）。
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -148,7 +150,6 @@ bash server/scripts/slides-to-images.sh 输入.pptx 输出目录 [最多页数=3
 | `DATA_DIR` | `server/data` | 数据库与素材目录 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 首次启动时创建的管理员 |
 | `CHROME_PATH` | 自动探测 | Chrome 可执行文件 |
-| `LLM_TIMEOUT_MS` | `600000` | 单次模型调用超时 |
 | `SESSION_DAYS` | `14` | 登录有效期 |
 
 ## 测试

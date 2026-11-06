@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DB } from '../db.js';
 import { getSettings, setSettings } from '../db.js';
 import { HttpError, requireAdmin, requireUser } from '../auth.js';
-import { listEnabledEndpoints, rankEndpointsForUser, testEndpoint, type Endpoint } from '../llm.js';
+import { callTimeouts, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, type Endpoint } from '../llm.js';
 
 const maskKey = (k: string) => (k.length <= 10 ? '****' : `${k.slice(0, 6)}…${k.slice(-4)}`);
 
@@ -106,7 +106,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     const id = Number((req.params as any).id);
     const ep = db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(id) as Endpoint | undefined;
     if (!ep) throw new HttpError(404, '接入点不存在');
-    const result = await testEndpoint(ep);
+    const result = await testEndpoint(ep, callTimeouts(db).idleTimeoutMs);
     db.prepare('UPDATE llm_endpoints SET last_test_at = ?, last_test_ok = ?, last_test_message = ? WHERE id = ?').run(
       Date.now(),
       result.ok ? 1 : 0,
@@ -139,7 +139,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       last_test_message: null,
       created_at: Date.now(),
     };
-    return { result: await testEndpoint(ep) };
+    return { result: await testEndpoint(ep, callTimeouts(db).idleTimeoutMs) };
   });
 
   /** Shows which endpoint each user is pinned to (rendezvous hashing over enabled endpoints). */
@@ -182,6 +182,8 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     if (body.selfCheckRounds !== undefined) patch.selfCheckRounds = Math.max(1, Math.min(20, Math.floor(Number(body.selfCheckRounds)) || 10));
     if (body.maxTokens !== undefined) patch.maxTokens = Math.max(1000, Math.min(200000, Number(body.maxTokens) || 32000));
     if (body.temperature !== undefined) patch.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
+    if (body.llmIdleTimeoutSec !== undefined) patch.llmIdleTimeoutSec = Math.max(30, Math.min(7200, Math.floor(Number(body.llmIdleTimeoutSec)) || 600));
+    if (body.llmMaxCallMinutes !== undefined) patch.llmMaxCallMinutes = Math.max(5, Math.min(1440, Math.floor(Number(body.llmMaxCallMinutes)) || 120));
     setSettings(db, patch);
     return { settings: getSettings(db) };
   });

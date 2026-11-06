@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import type { DB } from './db.js';
-import { config } from './config.js';
+import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
+
+export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
+export const DEFAULT_MAX_CALL_MINUTES = 120;
 
 export interface Endpoint {
   id: number;
@@ -42,6 +44,10 @@ export interface ChatOptions {
   onDelta?: (chunk: string, totalChars: number) => void;
   onReasoning?: (totalChars: number) => void;
   signal?: AbortSignal;
+  /** Abort when the endpoint sends nothing (no headers, no stream data) for this long. */
+  idleTimeoutMs?: number;
+  /** Hard cap on one request, however steadily it streams. */
+  timeoutMs?: number;
   tools?: ToolDef[];
   toolChoice?: 'auto' | 'none';
   /** Treat an empty reply as a valid answer instead of an endpoint failure. */
@@ -122,40 +128,88 @@ export async function chatWithEndpoint(
     body.tool_choice = opts.toolChoice ?? 'auto';
   }
   if (stream) body.stream_options = { include_usage: true };
-  const timeout = AbortSignal.timeout(config.llmTimeoutMs);
-  const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
-  let res: Response;
+
+  // Slow (e.g. self-hosted) models can stream for a long time, so a request is only cut off when the
+  // endpoint goes silent, or when it reaches the overall cap. A non-streamed reply arrives in one piece,
+  // so only the cap applies to it.
+  const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_SEC * 1000;
+  const capMs = opts.timeoutMs ?? DEFAULT_MAX_CALL_MINUTES * 60_000;
+  const timer = new AbortController();
+  let timedOut = '';
+  let received = 0;
+  const expire = (why: string) => {
+    timedOut = why;
+    timer.abort(new Error(why));
+  };
+  let idle: NodeJS.Timeout | undefined;
+  const alive = () => {
+    if (!stream) return;
+    clearTimeout(idle);
+    idle = setTimeout(
+      () => expire(`接入点 ${ep.name} 已 ${Math.round(idleMs / 1000)} 秒没有返回任何数据${received ? `（已收到 ${received.toLocaleString()} 字符）` : '（尚未开始输出）'}，已中止。模型较慢或输入较长时可在「模型接入 → 生成设置」中调大「无响应超时」`),
+      idleMs,
+    );
+  };
+  const cap = setTimeout(
+    () => expire(`接入点 ${ep.name} 单次调用超过 ${Math.round(capMs / 60_000)} 分钟上限${received ? `（已收到 ${received.toLocaleString()} 字符）` : ''}，已中止。可在「模型接入 → 生成设置」中调大「单次调用上限」或减小「最大输出 tokens」`),
+    capMs,
+  );
+  const signal = opts.signal ? AbortSignal.any([opts.signal, timer.signal]) : timer.signal;
+  const failure = (e: unknown, what: string) =>
+    timedOut ? new LlmError(timedOut, true) : opts.signal?.aborted ? (e as Error) : new LlmError(`${what}: ${(e as Error).message}`, true);
+  alive();
   try {
-    res = await fetch(chatUrl(ep.base_url), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${ep.api_key}`,
-        'HTTP-Referer': 'https://roadshow-studio.local',
-        'X-Title': 'Roadshow Studio',
-      },
-      body: JSON.stringify(body),
-      signal,
+    let res: Response;
+    try {
+      res = await fetch(chatUrl(ep.base_url), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ep.api_key}`,
+          'HTTP-Referer': 'https://roadshow-studio.local',
+          'X-Title': 'Roadshow Studio',
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (e) {
+      throw failure(e, `无法连接接入点 ${ep.name}`);
+    }
+    alive();
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const retryable = res.status === 429 || res.status >= 500 || res.status === 408;
+      throw new LlmError(`接入点 ${ep.name} 返回 HTTP ${res.status}: ${text.slice(0, 500)}`, retryable);
+    }
+    const result: ChatResult = { text: '', endpointId: ep.id, model: ep.model };
+    if (!stream) {
+      let data: any;
+      try {
+        data = await res.json();
+      } catch (e) {
+        throw failure(e, `接入点 ${ep.name} 响应读取失败`);
+      }
+      if (data.error) throw new LlmError(`接入点 ${ep.name} 错误: ${JSON.stringify(data.error).slice(0, 500)}`, true);
+      result.text = data.choices?.[0]?.message?.content ?? '';
+      const calls = data.choices?.[0]?.message?.tool_calls;
+      if (Array.isArray(calls) && calls.length) result.toolCalls = calls;
+      result.finishReason = data.choices?.[0]?.finish_reason;
+      applyUsage(result, data.usage);
+      return result;
+    }
+    return await readStream(ep, res, result, opts, (n) => {
+      received = n;
+      alive();
+    }).catch((e) => {
+      throw e instanceof LlmError ? e : failure(e, `接入点 ${ep.name} 连接中断`);
     });
-  } catch (e) {
-    throw new LlmError(`无法连接接入点 ${ep.name}: ${(e as Error).message}`, true);
+  } finally {
+    clearTimeout(idle);
+    clearTimeout(cap);
   }
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    const retryable = res.status === 429 || res.status >= 500 || res.status === 408;
-    throw new LlmError(`接入点 ${ep.name} 返回 HTTP ${res.status}: ${text.slice(0, 500)}`, retryable);
-  }
-  const result: ChatResult = { text: '', endpointId: ep.id, model: ep.model };
-  if (!stream) {
-    const data = (await res.json()) as any;
-    if (data.error) throw new LlmError(`接入点 ${ep.name} 错误: ${JSON.stringify(data.error).slice(0, 500)}`, true);
-    result.text = data.choices?.[0]?.message?.content ?? '';
-    const calls = data.choices?.[0]?.message?.tool_calls;
-    if (Array.isArray(calls) && calls.length) result.toolCalls = calls;
-    result.finishReason = data.choices?.[0]?.finish_reason;
-    applyUsage(result, data.usage);
-    return result;
-  }
+}
+
+async function readStream(ep: Endpoint, res: Response, result: ChatResult, opts: ChatOptions, onData: (chars: number) => void): Promise<ChatResult> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -200,6 +254,7 @@ export async function chatWithEndpoint(
       if (fr) result.finishReason = fr;
       if (data.usage) applyUsage(result, data.usage);
     }
+    onData(result.text.length + reasoningChars);
   }
   const toolCalls = calls.filter((c) => c && c.function.name);
   if (toolCalls.length) {
@@ -209,6 +264,14 @@ export async function chatWithEndpoint(
   }
   if (!result.text && !opts.allowEmpty) throw new LlmError(`接入点 ${ep.name} 返回了空内容`, true);
   return result;
+}
+
+export function callTimeouts(db: DB): Pick<ChatOptions, 'idleTimeoutMs' | 'timeoutMs'> {
+  const s = getSettings(db);
+  return {
+    idleTimeoutMs: (Number(s.llmIdleTimeoutSec) || DEFAULT_IDLE_TIMEOUT_SEC) * 1000,
+    timeoutMs: (Number(s.llmMaxCallMinutes) || DEFAULT_MAX_CALL_MINUTES) * 60_000,
+  };
 }
 
 function applyUsage(result: ChatResult, usage: any) {
@@ -223,6 +286,7 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   if (!endpoints.length) throw new LlmError('尚未配置任何可用的大模型接入点，请联系管理员在「模型接入」中添加', false);
   const userKey = `rs-user-${userId}`;
   const ranked = rankEndpointsForUser(endpoints, userKey);
+  opts = { ...callTimeouts(db), ...opts };
   const errors: string[] = [];
   for (const ep of ranked) {
     try {
@@ -353,7 +417,7 @@ export interface TestResult {
 }
 
 /** Connectivity test: a text round-trip plus a vision check (identify the colour of a solid image). */
-export async function testEndpoint(ep: Endpoint): Promise<TestResult> {
+export async function testEndpoint(ep: Endpoint, timeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000): Promise<TestResult> {
   const started = Date.now();
   const colors: [string, [number, number, number]][] = [
     ['red', [230, 20, 20]],
@@ -379,7 +443,7 @@ export async function testEndpoint(ep: Endpoint): Promise<TestResult> {
         },
       ],
       'rs-connectivity-test',
-      { maxTokens: 2000 },
+      { maxTokens: 2000, timeoutMs },
     );
     const reply = r.text.trim().toLowerCase();
     const visionOk = reply.includes(name);

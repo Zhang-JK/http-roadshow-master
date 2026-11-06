@@ -9,7 +9,13 @@ import { useToast } from '../components/Toast';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { AssetsPanel } from '../components/AssetsPanel';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
-import { TYPE_LABELS } from '../lib/format';
+import { elapsed, TYPE_LABELS } from '../lib/format';
+
+function progressText(j: Job): string {
+  if (!j.progress) return `排队中 · 已等待 ${elapsed(j.createdAt)}`;
+  const chars = j.progress.chars ? ` · ${j.progress.chars.toLocaleString()} 字符` : '';
+  return `${j.progress.stage}${chars} · 已用 ${elapsed(j.createdAt)}`;
+}
 
 interface ProjectResponse {
   project: Project;
@@ -324,11 +330,11 @@ export function EditorPage() {
               <div className="spinner big" />
               <h2>AI 正在生成{TYPE_LABELS[project.type]}…</h2>
               <p className="muted">
-                {createJob?.progress
-                  ? `${createJob.progress.stage}${createJob.progress.chars ? ` · ${createJob.progress.chars.toLocaleString()} 字符` : ''}`
-                  : '正在准备请求…'}
+                {createJob?.progress ? progressText(createJob) : '正在准备请求…'}
               </p>
-              <p className="muted small">生成完整材料通常需要 1–3 分钟，你可以离开此页面，稍后回来查看。</p>
+              <p className="muted small">
+                耗时取决于模型输出速度：在线模型通常 1–3 分钟；本地部署的模型（约 20–30 tokens/秒）生成并自检一份完整{TYPE_LABELS[project.type]}可能需要 20–60 分钟。字符数在增长就说明仍在生成。你可以离开此页面，稍后回来查看。
+              </p>
             </>
           )}
         </div>
@@ -404,7 +410,7 @@ export function EditorPage() {
                             : `第 ${pages.findIndex((p) => p.id === j.request.pageId) + 1} 页${j.request.scope === 'element' ? ` · ${j.request.elementIds?.length} 个元素` : ''}`}
                         </span>
                         <span className="job-prompt" title={j.request.prompt}>{j.request.prompt}</span>
-                        <span className="muted small">{j.progress ? `${j.progress.stage} ${j.progress.chars ? `${j.progress.chars.toLocaleString()} 字符` : ''}` : '排队中'}</span>
+                        <span className="muted small">{progressText(j)}</span>
                       </div>
                     ))}
                   </div>

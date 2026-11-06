@@ -144,6 +144,8 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   selfCheckRounds: 10,
   maxTokens: 32000,
   temperature: 0.7,
+  llmIdleTimeoutSec: 600,
+  llmMaxCallMinutes: 120,
 };
 
 export function getSettings(db: DB): typeof DEFAULT_SETTINGS {

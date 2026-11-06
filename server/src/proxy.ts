@@ -1,4 +1,4 @@
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
+import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
 const PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
 const env = (...names: string[]) => names.map((n) => process.env[n]).find((v) => v && v !== 'none');
@@ -15,30 +15,32 @@ function normalizeProxyEnv() {
   }
 }
 
-/** fetch() honours HTTP(S)_PROXY by itself only with NODE_USE_ENV_PROXY=1 on Node 22.21+ / 24.5+. */
-function nativeEnvProxy(): boolean {
-  if (process.env.NODE_USE_ENV_PROXY !== '1') return false;
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  return major > 24 || (major === 24 && minor >= 5) || (major === 22 && minor >= 21);
-}
+/**
+ * fetch() gives up after 5 minutes without response headers or between two body chunks. Slow models
+ * exceed both (long prefill, long non-streamed thinking), and llm.ts enforces its own timeouts.
+ */
+const NO_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 
-/** Routes outgoing fetch() (model APIs) through the proxy from the environment, honouring NO_PROXY. */
+/**
+ * Routes outgoing fetch() (model APIs) through the proxy from the environment, honouring NO_PROXY.
+ * Always installs the dispatcher, replacing Node's own NODE_USE_ENV_PROXY one, for NO_TIMEOUTS.
+ */
 export function setupProxy(): string | undefined {
   normalizeProxyEnv();
   const url = proxyUrl();
-  if (url && !/^https?:\/\//i.test(url)) {
-    console.warn(`Ignoring proxy ${url.replace(/\/\/[^/@]+@/, '//***@')}: model API calls only support http:// or https:// proxies`);
-    return undefined;
-  }
-  if (url && !nativeEnvProxy()) {
+  const masked = url?.replace(/\/\/[^/@]+@/, '//***@');
+  if (url && /^https?:\/\//i.test(url)) {
     try {
-      setGlobalDispatcher(new EnvHttpProxyAgent());
+      setGlobalDispatcher(new EnvHttpProxyAgent(NO_TIMEOUTS));
+      return url;
     } catch (e) {
-      console.warn(`Ignoring unusable proxy ${url.replace(/\/\/[^/@]+@/, '//***@')}: ${(e as Error).message}`);
-      return undefined;
+      console.warn(`Ignoring unusable proxy ${masked}: ${(e as Error).message}`);
     }
+  } else if (url) {
+    console.warn(`Ignoring proxy ${masked}: model API calls only support http:// or https:// proxies`);
   }
-  return url;
+  setGlobalDispatcher(new Agent(NO_TIMEOUTS));
+  return undefined;
 }
 
 /** Proxy settings for headless Chrome, or undefined when no proxy is configured. */
