@@ -68,7 +68,7 @@ while [ $# -gt 0 ]; do
     --repo) OPT_REPO="$2"; shift ;;
     --branch) OPT_BRANCH="$2"; shift ;;
     --manifest) OPT_MANIFEST="$2"; shift ;;
-    --from) OPT_FROM="$(readlink -f "$2")"; shift ;;
+    --from) OPT_FROM="$(readlink -f "$2" 2>/dev/null || echo "$2")"; shift ;;
     --port) OPT_PORT="$2"; shift ;;
     --host) OPT_HOST="$2"; shift ;;
     --base) OPT_BASE="$2"; shift ;;
@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
     --node-mirror) OPT_NODE_MIRROR="$2"; shift ;;
     --proxy) OPT_PROXY="$2"; shift ;;
     --no-proxy) OPT_NO_PROXY="$2"; shift ;;
-    --ca-cert) case "$2" in auto|none) OPT_CA_CERT="$2" ;; *) OPT_CA_CERT="$(readlink -f "$2")" ;; esac; shift ;;
+    --ca-cert) case "$2" in auto|none) OPT_CA_CERT="$2" ;; *) OPT_CA_CERT="$(readlink -f "$2" 2>/dev/null || echo "$2")" ;; esac; shift ;;
     --insecure) OPT_INSECURE=1 ;;
     --secure) OPT_INSECURE=0 ;;
     --skip-nettest) OPT_SKIP_NETTEST=1 ;;
@@ -101,6 +101,8 @@ elif [ -n "${RS_BASE_DIR:-}" ]; then BASE_DIR="$RS_BASE_DIR"
 elif [ -f "$SCRIPT_DIR/shared/deploy.conf" ]; then BASE_DIR="$SCRIPT_DIR"
 else BASE_DIR="/opt/$APP_NAME"; fi
 
+# Commands often start in a directory the service user cannot enter (e.g. /root after a privilege drop).
+if ! [ -r . ] || ! [ -x . ]; then cd "$BASE_DIR" 2>/dev/null || cd /; fi
 SHARED="$BASE_DIR/shared"
 CONF="$SHARED/deploy.conf"
 APP_ENV="$SHARED/app.env"
@@ -111,12 +113,11 @@ BACKUP_DIR="$SHARED/backups"
 RELEASES="$BASE_DIR/releases"
 CURRENT="$BASE_DIR/current"
 STATUS_FILE="$RUN_DIR/update-status.json"
-UNIT_FILE="/etc/systemd/system/$APP_NAME.service"
 
 # Defaults, overridden by deploy.conf, then by command-line options.
 PORT=9090; HOST=0.0.0.0; UPDATE_SOURCE=local; REPO_URL=""; BRANCH=main; MANIFEST_URL=""; LOCAL_SOURCE=""
 SERVICE_USER=""; USE_SYSTEMD=0; NODE_BIN=""; KEEP_RELEASES=3; NPM_REGISTRY=""; NODE_MIRROR="https://nodejs.org/dist"
-ADMIN_PASSWORD=""; PROXY_URL=""; NO_PROXY_LIST=""; CA_CERT=""; TLS_INSECURE=0; PREBUILT=0
+ADMIN_PASSWORD=""; PROXY_URL=""; NO_PROXY_LIST=""; CA_CERT=""; TLS_INSECURE=0; PREBUILT=0; SERVICE_NAME=""
 if [ -f "$CONF" ] && [ ! -r "$CONF" ]; then
   if have sudo; then exec sudo bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}"; fi
   echo "无权读取 $CONF，请使用 root 或服务用户执行" >&2; exit 1
@@ -135,6 +136,8 @@ fi
 [ -n "$OPT_NO_PROXY" ] && NO_PROXY_LIST="$OPT_NO_PROXY"
 [ -n "$OPT_INSECURE" ] && TLS_INSECURE="$OPT_INSECURE"
 [ -n "$OPT_PREBUILT" ] && PREBUILT="$OPT_PREBUILT"
+SERVICE_NAME="${SERVICE_NAME:-$APP_NAME}"
+UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 [ "$OPT_CA_CERT" = none ] && CA_CERT=""
 if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
@@ -163,6 +166,7 @@ NO_PROXY_LIST=$(printf %q "$NO_PROXY_LIST")
 CA_CERT=$(printf %q "$CA_CERT")
 TLS_INSECURE=$(printf %q "$TLS_INSECURE")
 PREBUILT=$(printf %q "$PREBUILT")
+SERVICE_NAME=$(printf %q "$SERVICE_NAME")
 EOF
   mv -f "$CONF.tmp" "$CONF"
   chmod 600 "$CONF"
@@ -190,7 +194,7 @@ EOF
   # The app calls model APIs and renders pages with web fonts, so it needs the same proxy / trust settings.
   {
     printf 'NO_PROXY=%q\nno_proxy=%q\n' "$NO_PROXY_ALL" "$NO_PROXY_ALL"
-    if proxy_on; then
+    if proxy_on && app_proxy_ok; then
       printf '%s=%q\n' HTTPS_PROXY "$PROXY_URL" HTTP_PROXY "$PROXY_URL" https_proxy "$PROXY_URL" http_proxy "$PROXY_URL"
       echo "NODE_USE_ENV_PROXY=1"
     fi
@@ -368,8 +372,18 @@ fetch_proxy_ca() {
   rm -rf "$tmp"
 }
 
+# Corporate settings often omit the scheme (proxy.corp:8080). curl accepts that, but Node.js refuses to start
+# with such a proxy in its environment, so always store and pass on a full URL.
+normalize_proxy() {
+  proxy_on || return 0
+  case "$PROXY_URL" in *://*) ;; *) PROXY_URL="http://$PROXY_URL" ;; esac
+  PROXY_URL="${PROXY_URL%/}"
+}
+app_proxy_ok() { case "$PROXY_URL" in http://*|https://*) return 0 ;; *) return 1 ;; esac; }
+
 apply_network() {
   detect_proxy
+  normalize_proxy
   if proxy_on; then
     export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
     export npm_config_proxy="$PROXY_URL" npm_config_https_proxy="$PROXY_URL"
@@ -514,6 +528,7 @@ net_preflight() {
   NET_FAIL=0
   if proxy_on; then
     log "  代理：$(mask_url "$PROXY_URL")（来源：$PROXY_SOURCE），直连：$NO_PROXY_ALL"
+    app_proxy_ok || warn "  应用调用模型接口只支持 http:// 或 https:// 代理，$(mask_url "$PROXY_URL") 只用于安装下载；应用将直连（可在 $SHARED/extra.env 中设置 HTTPS_PROXY=http://...）"
     local hp; hp="$(proxy_hostport)"
     if timeout 8 bash -c ': </dev/tcp/"$1"/"$2"' _ "${hp%:*}" "${hp##*:}" 2>/dev/null; then ok "  代理服务器 $hp：可连接"
     else NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   代理服务器 %s 无法连接，请检查 --proxy 地址与端口%s\n' "$c_err" "$(date '+%F %T')" "$hp" "$c_off" >&2; fi
@@ -817,7 +832,8 @@ fetch_source() {
   local dst="$1"
   SRC_COMMIT=""; SRC_VERSION=""; SRC_REF=""
   if [ -n "$OPT_FROM" ]; then
-    [ -e "$OPT_FROM" ] || die "源路径不存在：$OPT_FROM"
+    [ -e "$OPT_FROM" ] || die "源路径不存在，或用户 $(id -un) 无权访问：$OPT_FROM"
+    [ -r "$OPT_FROM" ] || die "用户 $(id -un) 无权读取 $OPT_FROM，请把它放到该用户可读的位置（如 /tmp）"
     log "从本地获取代码：$OPT_FROM"
     if [ -d "$OPT_FROM" ]; then
       copy_tree "$OPT_FROM" "$dst"
@@ -946,8 +962,8 @@ systemd_available() { have systemctl && [ -d /run/systemd/system ]; }
 app_pid() { local p; p="$(cat "$RUN_DIR/app.pid" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; }
 supervisor_pid() { local p; p="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; }
 
-install_systemd_unit() {
-  cat > "$UNIT_FILE" <<EOF
+install_systemd_unit() { # writes the unit when missing or changed
+  cat > "$UNIT_FILE.new" <<EOF
 [Unit]
 Description=Roadshow Studio (AI 路演材料生成)
 After=network-online.target
@@ -968,9 +984,11 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
+  if [ -f "$UNIT_FILE" ] && cmp -s "$UNIT_FILE.new" "$UNIT_FILE"; then rm -f "$UNIT_FILE.new"; return 0; fi
+  mv -f "$UNIT_FILE.new" "$UNIT_FILE"
   systemctl daemon-reload
-  systemctl enable "$APP_NAME" >/dev/null 2>&1 || true
-  ok "已安装 systemd 服务：$APP_NAME"
+  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  ok "已安装 systemd 服务：$SERVICE_NAME"
 }
 
 # Rollback leaves a marker pointing at the pre-update backup; apply it before the app opens the database.
@@ -994,6 +1012,8 @@ cmd_run() { # foreground; used by systemd and the supervisor
   . "$APP_ENV"
   set +a
   restore_pending_db
+  # Under systemd, keep a copy in app.log as well (the supervisor already writes there).
+  if [ -n "${INVOCATION_ID:-}" ]; then mkdir -p "$LOG_DIR"; exec > >(tee -a "$LOG_DIR/app.log") 2>&1; fi
   cd "$CURRENT/server"
   exec "$NODE_BIN" dist/main.js
 }
@@ -1015,7 +1035,10 @@ cmd_supervise() {
 
 start_app() {
   if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
-    is_root && systemctl start "$APP_NAME" || die "请使用 root 执行（systemctl start $APP_NAME）"
+    if is_root; then systemctl start "$SERVICE_NAME"; return; fi
+    # Running, or waiting to be restarted by systemd (Restart=always): it picks up the new release by itself.
+    case "$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)" in active|activating|reloading) return 0 ;; esac
+    die "服务 $SERVICE_NAME 未运行，普通用户无法启动它：请执行 sudo systemctl start $SERVICE_NAME（或 sudo $APP_NAME update）"
   else
     if supervisor_pid >/dev/null; then return 0; fi
     mkdir -p "$LOG_DIR"
@@ -1030,7 +1053,7 @@ start_app() {
 
 stop_app() {
   if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
-    is_root && systemctl stop "$APP_NAME" || die "请使用 root 执行（systemctl stop $APP_NAME）"
+    is_root && systemctl stop "$SERVICE_NAME" || die "请使用 root 执行（systemctl stop $SERVICE_NAME）"
   else
     local s a; s="$(supervisor_pid || true)"; a="$(app_pid || true)"
     touch "$RUN_DIR/stop" 2>/dev/null || true
@@ -1044,10 +1067,12 @@ stop_app() {
 
 # Restart without needing root: SIGTERM the app and let systemd (Restart=always) or the supervisor bring it back.
 restart_app() {
-  if [ "$USE_SYSTEMD" = 1 ] && systemd_available && is_root; then systemctl restart "$APP_NAME"; return; fi
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available && is_root; then systemctl restart "$SERVICE_NAME"; return; fi
   local a; a="$(app_pid || true)"
   if [ -n "$a" ] && { [ "$USE_SYSTEMD" = 1 ] || supervisor_pid >/dev/null; }; then
     kill "$a"
+  elif [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
+    start_app
   else
     stop_app; start_app
   fi
@@ -1056,13 +1081,13 @@ restart_app() {
 crash_count() { # restarts observed since restart_marker was called
   [ -n "${CRASH_BASE:-}" ] || { echo 0; return; }
   if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
-    echo $(( $(systemctl show "$APP_NAME" -p NRestarts --value 2>/dev/null || echo 0) - ${CRASH_BASE:-0} ))
+    echo $(( $(systemctl show "$SERVICE_NAME" -p NRestarts --value 2>/dev/null || echo 0) - ${CRASH_BASE:-0} ))
   else
     tail -c +"$(( ${CRASH_BASE:-0} + 1 ))" "$LOG_DIR/app.log" 2>/dev/null | grep -c '应用已退出' || true
   fi
 }
 restart_marker() {
-  if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then CRASH_BASE="$(systemctl show "$APP_NAME" -p NRestarts --value 2>/dev/null || echo 0)"
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then CRASH_BASE="$(systemctl show "$SERVICE_NAME" -p NRestarts --value 2>/dev/null || echo 0)"
   else CRASH_BASE="$(stat -c %s "$LOG_DIR/app.log" 2>/dev/null || echo 0)"; fi
 }
 
@@ -1107,7 +1132,7 @@ deploy_release() {
   [ -n "$prev" ] && echo "$prev" > "$RUN_DIR/previous"
   [ -n "$backup" ] && echo "$backup" > "$RUN_DIR/last-backup"
   fix_owner
-  if [ "$USE_SYSTEMD" = 1 ] && systemd_available && is_root && [ ! -f "$UNIT_FILE" ]; then install_systemd_unit; fi
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available && is_root; then install_systemd_unit; fi
   restart_marker
   if app_pid >/dev/null || supervisor_pid >/dev/null; then restart_app; else start_app; fi
   set_status running "健康检查"
@@ -1118,7 +1143,7 @@ deploy_release() {
     return 0
   fi
   warn "健康检查失败，最近日志："
-  tail -n 30 "$LOG_DIR/app.log" 2>/dev/null >&2 || true
+  show_app_log
   if [ -n "$prev" ]; then
     warn "自动回滚到 $(basename "$prev")"
     do_rollback "$prev" "$backup"
@@ -1128,7 +1153,24 @@ deploy_release() {
     STATUS_ACTIVE=0
     die "更新到 $SRC_VERSION 失败，已自动回滚到 $STATUS_FROM"
   fi
-  die "部署失败，请查看日志：$LOG_DIR/app.log"
+  # Nothing to roll back to: don't leave a crash-looping service behind.
+  (stop_app) >/dev/null 2>&1 || true
+  die "部署失败（服务已停止），完整日志：$(app_log_hint)"
+}
+
+app_log_hint() {
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then echo "journalctl -u $SERVICE_NAME -n 200 --no-pager（也会写入 $LOG_DIR/app.log）"
+  else echo "$LOG_DIR/app.log"; fi
+}
+
+show_app_log() {
+  if [ "$USE_SYSTEMD" = 1 ] && systemd_available && have journalctl; then
+    journalctl -u "$SERVICE_NAME" -n 40 --no-pager -o cat 2>/dev/null | sed 's/^/    /' >&2 || true
+  elif [ -f "$LOG_DIR/app.log" ]; then
+    tail -n 30 "$LOG_DIR/app.log" | sed 's/^/    /' >&2
+  else
+    warn "（没有找到应用日志 $LOG_DIR/app.log）"
+  fi
 }
 
 do_rollback() { # target release, db backup to restore (optional)
@@ -1146,7 +1188,7 @@ do_rollback() { # target release, db backup to restore (optional)
   if health_check "$v" 90; then
     ok "已回滚到 $v"; set_status rolled_back "已回滚到 $v（已恢复更新前的数据库）" "$v"
   else
-    die "回滚后服务仍无法启动，请查看 $LOG_DIR/app.log"
+    show_app_log; die "回滚后服务仍无法启动，完整日志：$(app_log_hint)"
   fi
 }
 
@@ -1178,6 +1220,11 @@ cmd_install() {
     SERVICE_USER="$(id -un)"
   fi
   if [ "$OPT_NO_SYSTEMD" = 0 ] && is_root && systemd_available; then USE_SYSTEMD=1; else USE_SYSTEMD=0; fi
+  if [ "$USE_SYSTEMD" = 1 ] && [ -f "$UNIT_FILE" ] && ! grep -qxF "WorkingDirectory=$BASE_DIR" "$UNIT_FILE"; then
+    # The unit belongs to an installation in another directory: give this one its own service.
+    SERVICE_NAME="$APP_NAME-$(basename "$BASE_DIR")"; UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+    warn "systemd 服务 $APP_NAME 属于另一个安装目录，本安装使用服务名 $SERVICE_NAME"
+  fi
   [ "$USE_SYSTEMD" = 0 ] && log "使用内置守护进程管理服务（未检测到可用的 systemd 或指定了 --no-systemd）"
   mkdir -p "$RUN_DIR" "$LOG_DIR" "$DATA_DIR" "$BACKUP_DIR" "$RELEASES"
   ensure_system_deps
@@ -1280,8 +1327,10 @@ cmd_status() {
 
 cmd_uninstall() {
   is_root || [ "$USE_SYSTEMD" = 0 ] || die "请使用 root 执行"
+  # An installation from before per-directory service names may share the unit of another directory.
+  if [ "$USE_SYSTEMD" = 1 ] && ! grep -qxF "WorkingDirectory=$BASE_DIR" "$UNIT_FILE" 2>/dev/null; then USE_SYSTEMD=0; fi
   stop_app || true
-  if [ -f "$UNIT_FILE" ]; then systemctl disable "$APP_NAME" >/dev/null 2>&1 || true; rm -f "$UNIT_FILE"; systemctl daemon-reload || true; fi
+  if [ -f "$UNIT_FILE" ] && grep -qxF "WorkingDirectory=$BASE_DIR" "$UNIT_FILE"; then systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true; rm -f "$UNIT_FILE"; systemctl daemon-reload || true; fi
   if [ "$(readlink -f "/usr/local/bin/$APP_NAME" 2>/dev/null)" = "$BASE_DIR/deploy.sh" ]; then rm -f "/usr/local/bin/$APP_NAME"; fi
   if [ "$OPT_PURGE" = 1 ]; then rm -rf "$BASE_DIR"; ok "已删除 $BASE_DIR（含数据）"
   else rm -rf "$RELEASES" "$CURRENT" "$BASE_DIR/node"; ok "已卸载程序，数据保留在 $SHARED（使用 --purge 彻底删除）"; fi
@@ -1298,6 +1347,12 @@ if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && [ -L "$CU
       setup_network; net_preflight
       save_conf; [ -d "$CERT_DIR" ] && chown -R "$SERVICE_USER": "$CERT_DIR"
       ensure_system_deps
+      # The service user cannot (re)start a stopped unit, e.g. after an earlier failed attempt.
+      if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then
+        install_systemd_unit
+        systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+        systemctl is-active --quiet "$SERVICE_NAME" || systemctl start "$SERVICE_NAME" || true
+      fi
       child=(); skip=0
       for a in "${ORIG_ARGS[@]}"; do
         if [ "$skip" = 1 ]; then skip=0; continue; fi
@@ -1316,14 +1371,14 @@ case "$CMD" in
   update) cmd_update ;;
   rollback) cmd_rollback ;;
   nettest|doctor) cmd_nettest ;;
-  start) require_installed; start_app; health_check "" 60 && ok "已启动：http://$HOST:$PORT" || die "启动失败，请查看 $LOG_DIR/app.log" ;;
+  start) require_installed; start_app; health_check "" 60 && ok "已启动：http://$HOST:$PORT" || { show_app_log; die "启动失败，完整日志：$(app_log_hint)"; } ;;
   stop) require_installed; stop_app; ok "已停止" ;;
-  restart) require_installed; write_app_env; restart_app; health_check "" 60 && ok "已重启" || die "重启失败，请查看 $LOG_DIR/app.log" ;;
+  restart) require_installed; write_app_env; restart_app; health_check "" 60 && ok "已重启" || { show_app_log; die "重启失败，完整日志：$(app_log_hint)"; } ;;
   status) cmd_status ;;
   logs)
     require_installed
     follow=(); [ "$OPT_FOLLOW" = 1 ] && follow=(-f)
-    if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then journalctl -u "$APP_NAME" -n 200 "${follow[@]}"
+    if [ "$USE_SYSTEMD" = 1 ] && systemd_available; then journalctl -u "$SERVICE_NAME" -n 200 "${follow[@]}"
     else tail -n 200 "${follow[@]}" "$LOG_DIR/app.log"; fi ;;
   uninstall) cmd_uninstall ;;
   run) cmd_run ;;

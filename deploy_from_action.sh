@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift ;;
     --tag) TAG="$2"; shift ;;
-    --file) FILE="$(readlink -f "$2")"; shift ;;
+    --file) FILE="$(readlink -f "$2" 2>/dev/null || echo "$2")"; shift ;;
     --manifest) MANIFEST="$2"; shift ;;
     --proxy) PROXY="$2"; PASS+=("$1" "$2"); shift ;;
     --ca-cert) CA="$2"; shift ;;
@@ -141,7 +141,9 @@ else MANIFEST_URL="https://github.com/$REPO/releases/download/$TAG/latest-linux-
 
 if [ -n "$FILE" ]; then
   [ -f "$FILE" ] || die "安装包不存在：$FILE"
-  PKG="$FILE"
+  # Copied next to the extracted package: deploy.sh re-runs as the service user, who often cannot read e.g. /root.
+  PKG="$WORK/$(basename "$FILE")"
+  cp "$FILE" "$PKG"
   log "使用本地安装包：$FILE"
 else
   route=直连
@@ -172,5 +174,6 @@ APP="$WORK/roadshow-studio"
 if [ -L "$(readlink -m "$BASE")/current" ]; then log "检测到已有安装，执行更新（预编译模式：不安装 npm 依赖，不下载 Node.js）"
 else log "执行安装（预编译模式：不安装 npm 依赖，不下载 Node.js）"; fi
 rc=0
+cd "$WORK"
 bash "$APP/deploy.sh" auto --source archive --manifest "$MANIFEST_URL" --prebuilt --from "$PKG" ${PASS[@]+"${PASS[@]}"} || rc=$?
 exit "$rc"

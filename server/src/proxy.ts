@@ -1,9 +1,18 @@
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
+const PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
 const env = (...names: string[]) => names.map((n) => process.env[n]).find((v) => v && v !== 'none');
 
 export function proxyUrl(): string | undefined {
-  return env('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy');
+  return env(...PROXY_VARS);
+}
+
+/** undici rejects proxies without a scheme (proxy.corp:8080), which corporate settings often use. */
+function normalizeProxyEnv() {
+  for (const name of PROXY_VARS) {
+    const v = process.env[name];
+    if (v && v !== 'none' && !v.includes('://')) process.env[name] = `http://${v}`;
+  }
 }
 
 /** fetch() honours HTTP(S)_PROXY by itself only with NODE_USE_ENV_PROXY=1 on Node 22.21+ / 24.5+. */
@@ -15,8 +24,20 @@ function nativeEnvProxy(): boolean {
 
 /** Routes outgoing fetch() (model APIs) through the proxy from the environment, honouring NO_PROXY. */
 export function setupProxy(): string | undefined {
+  normalizeProxyEnv();
   const url = proxyUrl();
-  if (url && !nativeEnvProxy()) setGlobalDispatcher(new EnvHttpProxyAgent());
+  if (url && !/^https?:\/\//i.test(url)) {
+    console.warn(`Ignoring proxy ${url.replace(/\/\/[^/@]+@/, '//***@')}: model API calls only support http:// or https:// proxies`);
+    return undefined;
+  }
+  if (url && !nativeEnvProxy()) {
+    try {
+      setGlobalDispatcher(new EnvHttpProxyAgent());
+    } catch (e) {
+      console.warn(`Ignoring unusable proxy ${url.replace(/\/\/[^/@]+@/, '//***@')}: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
   return url;
 }
 

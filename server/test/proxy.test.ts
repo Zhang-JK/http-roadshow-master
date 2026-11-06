@@ -41,6 +41,14 @@ describe('proxy settings from the environment', () => {
     expect(chromeProxy()).toMatchObject({ server: 'http://proxy.corp:3128', username: undefined });
   });
 
+  it('accepts a proxy without a scheme and ignores ones fetch() cannot use', () => {
+    setEnv({ HTTPS_PROXY: 'proxy.corp:8080', http_proxy: 'proxy.corp:8080' });
+    expect(setupProxy()).toBe('http://proxy.corp:8080');
+    expect(process.env.http_proxy).toBe('http://proxy.corp:8080');
+    setEnv({ HTTPS_PROXY: 'socks5://proxy.corp:1080' });
+    expect(setupProxy()).toBeUndefined();
+  });
+
   it('routes fetch() through the proxy and honours NO_PROXY', async () => {
     const seen: string[] = [];
     const upstream = http.createServer((_req, res) => res.end('via-proxy'));
