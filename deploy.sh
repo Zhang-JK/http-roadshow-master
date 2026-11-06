@@ -315,8 +315,13 @@ latest_remote() {
   esac
 }
 
-# Local-path repositories are usually owned by another user; command-line safe.directory is honoured by git.
-git_remote() { GIT_TERMINAL_PROMPT=0 git -c safe.directory='*' "$@"; }
+# Local-path repositories are often owned by another user. git drops -c/GIT_CONFIG_* for local transports,
+# so trust them through a dedicated global config instead of touching the user's ~/.gitconfig.
+git_remote() {
+  local gc="$SHARED/gitconfig"
+  [ -f "$gc" ] || printf '[safe]\n\tdirectory = *\n' > "$gc"
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL="$gc" git "$@"
+}
 
 current_id() {
   case "$UPDATE_SOURCE" in git) current_commit ;; *) current_version ;; esac
