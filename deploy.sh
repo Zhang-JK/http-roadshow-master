@@ -497,6 +497,7 @@ restore_pending_db() {
 }
 
 cmd_run() { # foreground; used by systemd and the supervisor
+  exec 9>&-
   [ -f "$APP_ENV" ] || die "未安装（缺少 $APP_ENV）"
   set -a
   # shellcheck source=/dev/null
@@ -508,6 +509,7 @@ cmd_run() { # foreground; used by systemd and the supervisor
 }
 
 cmd_supervise() {
+  exec 9>&-  # never hold the deploy lock
   rm -f "$RUN_DIR/stop"
   echo $$ > "$RUN_DIR/supervisor.pid"
   trap 'touch "$RUN_DIR/stop"; p=$(cat "$RUN_DIR/app.pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null; exit 0' TERM INT
@@ -528,9 +530,9 @@ start_app() {
     if supervisor_pid >/dev/null; then return 0; fi
     mkdir -p "$LOG_DIR"
     if is_root && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ]; then
-      runuser -u "$SERVICE_USER" -- setsid nohup "$BASE_DIR/deploy.sh" supervise >> "$LOG_DIR/app.log" 2>&1 < /dev/null &
+      runuser -u "$SERVICE_USER" -- setsid nohup "$BASE_DIR/deploy.sh" supervise >> "$LOG_DIR/app.log" 2>&1 < /dev/null 9>&- &
     else
-      setsid nohup "$BASE_DIR/deploy.sh" supervise >> "$LOG_DIR/app.log" 2>&1 < /dev/null &
+      setsid nohup "$BASE_DIR/deploy.sh" supervise >> "$LOG_DIR/app.log" 2>&1 < /dev/null 9>&- &
     fi
     sleep 1
   fi
