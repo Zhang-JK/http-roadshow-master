@@ -226,11 +226,25 @@ ensure_system_deps() {
   esac
 }
 
-node_ok() { [ -x "$1" ] && [ "$("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ]; }
+node_ok() { # usable node: new enough, ships npm, and runnable by the service user
+  [ -x "$1" ] && [ "$(as_service_user "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge "$NODE_MAJOR" ] \
+    && [ -n "$(npm_cli_for "$1")" ]
+}
+
+npm_cli_for() { # node binary -> npm-cli.js of the same installation
+  local d c; d="$(dirname "$1")"
+  for c in "$d/../lib/node_modules/npm/bin/npm-cli.js" "$(readlink -f "$d/npm" 2>/dev/null)"; do
+    [ -n "$c" ] && [ -f "$c" ] && { readlink -f "$c"; return 0; }
+  done
+}
 
 ensure_node() {
   if [ -n "$NODE_BIN" ] && node_ok "$NODE_BIN"; then return 0; fi
-  if have node && node_ok "$(command -v node)"; then NODE_BIN="$(readlink -f "$(command -v node)")"; ok "使用系统 Node.js $("$NODE_BIN" -v)"; return 0; fi
+  local n
+  while read -r n; do
+    n="$(readlink -f "$n")"
+    if node_ok "$n"; then NODE_BIN="$n"; ok "使用系统 Node.js $("$NODE_BIN" -v)（$NODE_BIN）"; return 0; fi
+  done < <(type -ap node; true)
   if node_ok "$BASE_DIR/node/bin/node"; then NODE_BIN="$BASE_DIR/node/bin/node"; return 0; fi
   local arch
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) die "不支持的 CPU 架构：$(uname -m)" ;; esac
@@ -250,9 +264,10 @@ ensure_node() {
 }
 
 npm_cmd() { # runs npm from the selected node
-  local npm_cli; npm_cli="$(dirname "$NODE_BIN")/../lib/node_modules/npm/bin/npm-cli.js"
+  local npm_cli; npm_cli="$(npm_cli_for "$NODE_BIN")"
+  [ -n "$npm_cli" ] || die "未找到与 $NODE_BIN 配套的 npm"
   local reg=(); [ -n "$NPM_REGISTRY" ] && reg=(--registry "$NPM_REGISTRY")
-  local runner=("$NODE_BIN" "$npm_cli"); [ -f "$npm_cli" ] || runner=(npm)
+  local runner=("$NODE_BIN" "$npm_cli")
   # In-app updates inherit NODE_ENV=production from the app, which would make npm skip build tools.
   env -u NODE_ENV PATH="$(dirname "$NODE_BIN"):$PATH" npm_config_cache="$SHARED/npm-cache" \
     "${runner[@]}" "$@" "${reg[@]}" --no-audit --no-fund --no-update-notifier --loglevel=error
@@ -605,6 +620,7 @@ health_check() { # expected version, timeout seconds; fails early if the app kee
 deploy_release() {
   local id rel prev old_prev backup
   STATUS_FROM="$(current_version || true)"
+  save_conf
   set_status running "获取代码"
   mkdir -p "$RELEASES" "$DATA_DIR" "$LOG_DIR" "$BACKUP_DIR"
   id="$(date +%Y%m%d-%H%M%S)"
