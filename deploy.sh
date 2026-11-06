@@ -389,7 +389,8 @@ fetch_source() {
     case "$UPDATE_SOURCE" in
       git)
         log "从 git 获取代码：$REPO_URL ($BRANCH)"
-        git_remote clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$dst" || die "git clone 失败"
+        local url="$REPO_URL"; case "$url" in /*) url="file://$url" ;; esac  # shallow clones need file:// for local paths
+        git_remote clone -q --depth 1 --branch "$BRANCH" "$url" "$dst" || die "git clone 失败"
         SRC_COMMIT="$(git -C "$dst" rev-parse HEAD)"
         rm -rf "$dst/.git"
         SRC_REF="$REPO_URL#$BRANCH"
