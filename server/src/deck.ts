@@ -74,8 +74,11 @@ function sanitize($: cheerio.CheerioAPI, root: cheerio.Cheerio<AnyNode>) {
   });
 }
 
-/** Ensure every element inside each slide carries a unique data-eid, and the slide a data-page-id. */
-export function assignIds(doc: DeckDoc): DeckDoc {
+/**
+ * Ensure every element inside each slide carries a unique data-eid, and the slide a data-page-id.
+ * Scripts and event handlers are removed unless keepScripts is set (drafts the delivery check still has to see).
+ */
+export function assignIds(doc: DeckDoc, opts: { keepScripts?: boolean } = {}): DeckDoc {
   const seen = new Set<string>();
   const pageSeen = new Set<string>();
   const pages = doc.pages.map((page) => {
@@ -90,7 +93,7 @@ export function assignIds(doc: DeckDoc): DeckDoc {
     if (!pid || pageSeen.has(pid)) pid = newPageId();
     pageSeen.add(pid);
     section.attr('data-page-id', pid);
-    sanitize($, section);
+    if (!opts.keepScripts) sanitize($, section);
     const visit = (el: Element, insideSvg: boolean) => {
       const tag = el.tagName?.toLowerCase();
       if (!tag || SKIP_TAGS.has(tag)) return;

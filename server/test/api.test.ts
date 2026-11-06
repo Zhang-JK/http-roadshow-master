@@ -328,7 +328,7 @@ describe('templates, decks, edits, history and export', () => {
     expect(first.text).toContain('【修改方式】');
     expect(first.text).not.toContain('只输出修改后的第');
     expect(first.body.tools.map((t: any) => t.function.name)).toEqual(expect.arrayContaining(['edit_elements', 'edit_css', 'find_elements']));
-    expect(last.body.messages.find((m: any) => m.role === 'tool').content).toContain('已修改 1 个元素（第 1 页）');
+    expect(last.body.messages.find((m: any) => m.role === 'tool').content).toContain('已修改 1 个元素（第 1 页（pages/cover.html））');
     let doc = (await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc;
     expect(doc.pages[0].html).toContain('整页新增段落');
     expect(doc.pages.slice(1)).toEqual(doc0.pages.slice(1));

@@ -17,6 +17,7 @@ import {
 } from './domEdit.js';
 import { sliceText, type FileTools, type ToolDef, type ToolOutput } from './fileTools.js';
 import { ADDITIONS_CSS, checkPath, cssFiles, fileTree, joinCssFiles, nameFiles, parseFileBlocks, README } from './files.js';
+import { checkProject, formatProjectReport, unbalancedTags, type CheckInput } from './projectCheck.js';
 import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart } from './llm.js';
 import { inspectLayout, renderContactSheets, renderPageImages, type PageReport } from './render.js';
 
@@ -47,6 +48,9 @@ function withoutIds(html: string): string {
  */
 export class Draft {
   edits = 0;
+
+  /** Tag mismatches in HTML written since the last tool result (the parser re-nested them). */
+  fixups: string[] = [];
 
   /** README changes in fragment mode, applied onto the latest saved document. */
   private readmeEdit?: string;
@@ -128,6 +132,31 @@ export class Draft {
     });
     if (this.mode === 'fragment' && !lines.some((l) => l.startsWith(ADDITIONS_CSS))) lines.push(`${ADDITIONS_CSS}（尚未创建）［可追加本页样式］`);
     return `项目文件（共 ${view.pages.length} 页；页面按下面的顺序组成材料）：\n${lines.join('\n')}`;
+  }
+
+  /** Whether the model may change this project file in this job. */
+  canEdit(path: string): boolean {
+    if (path === README || path === 'index.html') return true;
+    if (path.startsWith('styles/')) return this.mode === 'doc' || path === ADDITIONS_CSS;
+    const n = this.pageOf(path);
+    return n !== undefined && this.isEditable(n);
+  }
+
+  /** What the delivery check looks at: the draft as saved, plus the page sources as written. */
+  checkInput(): CheckInput {
+    const doc = this.view();
+    return {
+      doc,
+      sources: doc.pages.map((p, i) => ({ file: p.file!, html: this.pageSource(i + 1) })),
+      canEdit: (f) => this.canEdit(f),
+      strictReadme: this.mode === 'doc',
+    };
+  }
+
+  /** Page number and file, as tool results name them. */
+  where(page: number): string {
+    const f = this.view().pages[page - 1]?.file;
+    return `第 ${page} 页${f ? `（${f}）` : ''}`;
   }
 
   readFile(path: string): string {
@@ -288,6 +317,7 @@ export class Draft {
   setPage(page: number, html: string) {
     if (!this.isEditable(page)) throw new Error(`第 ${page} 页是只读的，本次只能修改第 ${this.describeEditable()} 页`);
     const sections = splitSections(html);
+    this.fixups.push(...unbalancedTags(html));
     if (!sections.length) throw new Error('内容中没有 <section> 页面元素，未做修改');
     const old = splitSections(this.pageSource(page))[0];
     if (old?.id && !sections[0].id) {
@@ -364,7 +394,10 @@ export class Draft {
     }
     const total = open.reduce((n, c) => n + c.count, 0);
     const exact = !!target.eids?.length && total === target.eids.length;
-    if (total > 1 && !all && !exact) throw tooMany(open.flatMap((c) => findInPage(this.pageSource(c.page), target).map((m) => ({ ...m, page: c.page }))));
+    if (total > 1 && !all && !exact) {
+      const files = this.view().pages.map((p) => p.file);
+      throw tooMany(open.flatMap((c) => findInPage(this.pageSource(c.page), target).map((m) => ({ ...m, page: c.page, file: files[c.page - 1] }))));
+    }
     for (const c of open) this.setPage(c.page, editInPage(this.pageSource(c.page), target, edit, true).html);
     return open;
   }
@@ -408,6 +441,7 @@ export class Draft {
   insertPages(after: number, html: string, file?: string): number {
     const sections: DeckPage[] = splitSections(html).map((s) => ({ id: '', html: withoutIds(s.html) }));
     if (!sections.length) throw new Error('内容中没有 <section class="slide"> 页面元素');
+    this.fixups.push(...unbalancedTags(html));
     if (file) sections[0].file = file;
     if (this.mode === 'doc') {
       if (after < 0 || after > this.doc.pages.length) throw new Error(`after 超出范围（0–${this.doc.pages.length}）`);
@@ -424,7 +458,11 @@ export class Draft {
 
   duplicatePage(page: number): void {
     if (this.mode !== 'doc') throw new Error('只有修改整份材料时才能复制页面');
-    this.insertPages(page, this.pageSource(page));
+    const files = new Set(this.view().pages.map((p) => p.file));
+    const base = (this.pageFile(page) ?? 'pages/page.html').replace(/(-\d+)?\.html$/, '');
+    let n = 2;
+    while (files.has(`${base}-${n}.html`)) n++;
+    this.insertPages(page, this.pageSource(page), `${base}-${n}.html`);
   }
 
   movePage(page: number, to: number): void {
@@ -525,7 +563,7 @@ export function formatReport(view: DeckDoc, reports: PageReport[], pages?: numbe
   for (const n of numbers) {
     const r = byId.get(view.pages[n - 1]?.id);
     if (!r?.issues.length) continue;
-    lines.push(`第 ${n} 页：`);
+    lines.push(`第 ${n} 页${view.pages[n - 1]?.file ? `（${view.pages[n - 1].file}）` : ''}：`);
     for (const i of r.issues) {
       if (i.severity === 'error') errors++;
       else warnings++;
@@ -540,7 +578,7 @@ export function formatReport(view: DeckDoc, reports: PageReport[], pages?: numbe
 const MAX_RENDER_PAGES = 4;
 const intParam = { type: 'integer' } as const;
 
-function draftToolDefs(draft: Draft): ToolDef[] {
+function draftToolDefs(draft: Draft, canCheck: boolean): ToolDef[] {
   const pageParam = { type: 'integer', description: '页码（从 1 开始）' };
   const pathParam = { type: 'string', description: '文件路径，如 pages/cover.html（可代替 page）' };
   const defs: ToolDef[] = [
@@ -699,10 +737,25 @@ function draftToolDefs(draft: Draft): ToolDef[] {
       function: {
         name: 'insert_page',
         description: `在第 after 页之后插入新页面（html 为一个或多个 <section class="slide">${draft.mode === 'doc' ? '；after=0 插在最前面' : '；只能插在可修改的页面之后'}）。`,
-        parameters: { type: 'object', properties: { after: intParam, html: { type: 'string' } }, required: ['after', 'html'] },
+        parameters: {
+          type: 'object',
+          properties: { after: intParam, after_path: { type: 'string', description: '或：插在这个页面文件之后' }, path: { type: 'string', description: '新页面的文件名，如 pages/team.html（不填则按版式自动命名）' }, html: { type: 'string' } },
+          required: ['html'],
+        },
       },
     },
   ];
+  if (canCheck) {
+    defs.push({
+      type: 'function',
+      function: {
+        name: 'check_project',
+        description:
+          '交付检查：按导出结构组装 index.html（引用全部 styles/*.css、按顺序包含所有页面）和可单独打开的 pages/*.html，在浏览器中加载，检查文件缺失、图片无法加载、脚本错误、页数与页面尺寸、CSS 语法与未定义变量、HTML 标签配对，以及 README.md 是否包含需求、风格约定和与实际文件一致的页面规划。结束前会自动运行一次。',
+        parameters: { type: 'object', properties: {} },
+      },
+    });
+  }
   if (draft.mode === 'doc') {
     defs.push(
       {
@@ -721,8 +774,8 @@ function draftToolDefs(draft: Draft): ToolDef[] {
         type: 'function',
         function: {
           name: 'move_page',
-          description: '把第 page 页移动到第 to 页的位置。',
-          parameters: { type: 'object', properties: { page: pageParam, to: pageParam }, required: ['page', 'to'] },
+          description: '把第 page 页（或 path 指定的页面文件）移动到第 to 页的位置。',
+          parameters: { type: 'object', properties: { page: pageParam, path: pathParam, to: pageParam }, required: ['to'] },
         },
       },
     );
@@ -733,6 +786,7 @@ function draftToolDefs(draft: Draft): ToolDef[] {
 export const DRAFT_TOOL_NAMES = new Set([
   'render_pages',
   'check_layout',
+  'check_project',
   'read_draft',
   'write_file',
   'delete_file',
@@ -794,7 +848,7 @@ function editOf(args: Record<string, unknown>): ElementEdit {
 const optPage = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Math.floor(Number(v)));
 
 /** Tools over the in-memory draft: rendering and inspection are read-only; edits change only the draft. */
-export function createDraftTools(draft: Draft, resolver: Resolver): FileTools {
+export function createDraftTools(draft: Draft, resolver: Resolver, db?: DB): FileTools {
   const pageNo = (v: unknown) => Math.floor(Number(v));
   const pageArg = (args: Record<string, unknown>) => {
     const n = draft.resolvePage(args.path, args.page);
@@ -802,128 +856,157 @@ export function createDraftTools(draft: Draft, resolver: Resolver): FileTools {
     return n;
   };
   return {
-    defs: draftToolDefs(draft),
+    defs: draftToolDefs(draft, !!db),
     async execute(name, args): Promise<ToolOutput> {
-      try {
-        switch (name) {
-          case 'render_pages': {
-            const raw = [
-              ...(Array.isArray(args.pages) ? args.pages : args.pages !== undefined ? [args.pages] : []).map(pageNo),
-              ...(Array.isArray(args.paths) ? args.paths : typeof args.paths === 'string' ? [args.paths] : []).map((p) => draft.resolvePage(String(p), undefined)!),
-            ];
-            const pages = [...new Set(raw)].filter((n) => n >= 1 && n <= draft.pageCount).slice(0, MAX_RENDER_PAGES);
-            if (!pages.length) return { content: `错误：请给出有效页码（共 ${draft.pageCount} 页）` };
-            const view = draft.view();
-            const ids = pages.map((n) => view.pages[n - 1].id);
-            const [shots, reports] = await Promise.all([
-              renderPageImages(view, resolver, { pageIds: ids, type: 'jpeg', scale: args.full_size ? 1 : 0.5 }),
-              inspectLayout(view, resolver, ids),
-            ]);
-            return {
-              content: `已渲染第 ${pages.join('、')} 页（${args.full_size ? '原尺寸' : '缩小一半'}，截图见下一条消息）。\n${formatReport(view, reports, pages)}`,
-              images: shots.map((s) => ({
-                label: `草稿第 ${pages[ids.indexOf(s.pageId)]} 页`,
-                url: `data:image/jpeg;base64,${s.image.toString('base64')}`,
-              })),
-            };
-          }
-          case 'check_layout': {
-            const view = draft.view();
-            const pages = draft.mode === 'fragment' ? draft.editablePages() : undefined;
-            const reports = await inspectLayout(view, resolver, pages?.map((n) => view.pages[n - 1].id));
-            return { content: formatReport(view, reports, pages) };
-          }
-          case 'read_draft': {
-            if (typeof args.path === 'string' && args.path.trim()) {
-              const path = checkPath(args.path).path;
-              const n = draft.pageOf(path);
-              const ro = n ? !draft.isEditable(n) : draft.mode === 'fragment' && path.startsWith('styles/') && path !== ADDITIONS_CSS;
-              return { content: sliceText(draft.readFile(path), args.offset, args.max_chars, `${path}${n ? `（第 ${n} 页）` : ''}${ro ? '（只读）' : ''}`) };
-            }
-            if (args.page === undefined || args.page === null || args.page === '') return { content: draft.listFiles() };
-            const n = pageNo(args.page);
-            const text = n === 0 ? draft.cssSource() : draft.pageSource(n);
-            return { content: sliceText(text, args.offset, args.max_chars, n === 0 ? '草稿 CSS' : `草稿第 ${n} 页${draft.isEditable(n) ? '' : '（只读）'}`) };
-          }
-          case 'write_file': {
-            const after = args.after === undefined || args.after === null || args.after === '' ? undefined : pageNo(args.after);
-            return { content: `${draft.writeFile(String(args.path ?? ''), String(args.content ?? ''), after)}。` };
-          }
-          case 'delete_file':
-            return { content: `${draft.deleteFile(String(args.path ?? ''))}。` };
-          case 'find_elements': {
-            const target = targetOf(args);
-            if (!target.selector && !target.text && !target.eids) return { content: '错误：请给出 selector 或 contains' };
-            const found = draft.findElements(target, draft.resolvePage(args.path, optPage(args.page)));
-            const locked = found.filter((m) => !m.editable).length;
-            return { content: `${listMatches(found)}${locked && draft.mode === 'fragment' ? `\n（其中 ${locked} 个在只读页面上）` : ''}` };
-          }
-          case 'edit_elements': {
-            const hits = draft.editElements(targetOf(args), editOf(args), args.all === true, draft.resolvePage(args.path, optPage(args.page)));
-            const n = hits.reduce((s, h) => s + h.count, 0);
-            return { content: `已修改 ${n} 个元素（第 ${hits.map((h) => h.page).join('、')} 页）。需要时用 render_pages 查看效果。` };
-          }
-          case 'find_css': {
-            const rules = draft.findCss(String(args.query ?? ''));
-            if (!rules.length) return { content: '没有匹配的 CSS 规则。' };
-            const text = rules.join('\n');
-            return { content: `共 ${rules.length} 条规则：\n${text.length > 6000 ? `${text.slice(0, 6000)}\n…（结果过长已截断，请用更具体的 query）` : text}` };
-          }
-          case 'edit_css': {
-            const r = draft.editCss(
-              { selector: String(args.selector ?? ''), media: typeof args.media === 'string' && args.media ? args.media : undefined, set: asMap(args.set), remove: args.remove === true },
-              typeof args.file === 'string' && args.file.trim() ? args.file : undefined,
-            );
-            const verb = { updated: '已修改', created: '已新建', removed: '已删除' }[r.action];
-            return { content: `${verb}规则（${r.file}）：${r.rule}` };
-          }
-          case 'insert_page': {
-            const added = draft.insertPages(pageNo(args.after), String(args.html ?? ''));
-            return { content: `已在第 ${pageNo(args.after)} 页之后插入 ${added} 页，后续页码顺延；现共 ${draft.pageCount} 页。` };
-          }
-          case 'duplicate_page': {
-            const n = pageArg(args);
-            draft.duplicatePage(n);
-            return { content: `已复制第 ${n} 页，副本为第 ${n + 1} 页（${draft.view().pages[n].file}）；现共 ${draft.pageCount} 页。` };
-          }
-          case 'move_page': {
-            draft.movePage(pageNo(args.page), pageNo(args.to));
-            return { content: `已把第 ${pageNo(args.page)} 页移到第 ${pageNo(args.to)} 页。` };
-          }
-          case 'replace_in_draft': {
-            if (args.all_pages === true) {
-              const hits = draft.replaceEverywhere(String(args.old_text ?? ''), String(args.new_text ?? ''));
-              return { content: `已替换 ${hits.reduce((s, h) => s + h.count, 0)} 处（${hits.map((h) => `第 ${h.page} 页 ${h.count} 处`).join('，')}）。` };
-            }
-            if (typeof args.path === 'string' && args.path.trim()) {
-              const path = checkPath(args.path).path;
-              const count = draft.replaceInFile(path, String(args.old_text ?? ''), String(args.new_text ?? ''), Boolean(args.replace_all));
-              return { content: `已在 ${path} 中替换 ${count} 处。${path === README ? '' : '建议用 render_pages 复查效果。'}` };
-            }
-            const n = pageNo(args.page);
-            const count = draft.replace(n, String(args.old_text ?? ''), String(args.new_text ?? ''), Boolean(args.replace_all));
-            return { content: `已在草稿${n === 0 ? ' CSS ' : `第 ${n} 页`}替换 ${count} 处。建议用 render_pages 复查效果。` };
-          }
-          case 'rewrite_page': {
-            const n = pageArg(args);
-            const before = draft.pageCount;
-            draft.setPage(n, String(args.html ?? ''));
-            const added = draft.pageCount - before;
-            return { content: `已重写草稿第 ${n} 页${added > 0 ? `，并拆分出 ${added} 个新页面（后续页码顺延）` : ''}。建议用 render_pages 复查效果。` };
-          }
-          case 'delete_page': {
-            if (draft.mode !== 'doc') break;
-            const n = pageArg(args);
-            draft.deletePage(n);
-            return { content: `已删除草稿第 ${n} 页，后续页码前移；现共 ${draft.pageCount} 页。` };
-          }
-        }
-      } catch (e) {
-        return { content: `错误：${(e as Error).message}` };
-      }
-      return { content: `错误：没有名为 ${name} 的工具` };
+      draft.fixups = [];
+      const out = await run(name, args);
+      if (!draft.fixups.length) return out;
+      const note = `\n注意：写入的 HTML 标签不配对（${[...new Set(draft.fixups)].join('；')}），浏览器已自动修正嵌套，页面结构可能与预期不同；请用 read_draft 确认。`;
+      draft.fixups = [];
+      return { ...out, content: `${out.content}${note}` };
     },
   };
+
+  async function run(name: string, args: Record<string, unknown>): Promise<ToolOutput> {
+    try {
+      switch (name) {
+        case 'render_pages': {
+          const raw = [
+            ...(Array.isArray(args.pages) ? args.pages : args.pages !== undefined ? [args.pages] : []).map(pageNo),
+            ...(Array.isArray(args.paths) ? args.paths : typeof args.paths === 'string' ? [args.paths] : []).map((p) => draft.resolvePage(String(p), undefined)!),
+          ];
+          const pages = [...new Set(raw)].filter((n) => n >= 1 && n <= draft.pageCount).slice(0, MAX_RENDER_PAGES);
+          if (!pages.length) return { content: `错误：请给出有效页码（共 ${draft.pageCount} 页）` };
+          const view = draft.view();
+          const ids = pages.map((n) => view.pages[n - 1].id);
+          const [shots, reports] = await Promise.all([
+            renderPageImages(view, resolver, { pageIds: ids, type: 'jpeg', scale: args.full_size ? 1 : 0.5 }),
+            inspectLayout(view, resolver, ids),
+          ]);
+          return {
+            content: `已渲染${pages.map((n) => draft.where(n)).join('、')}（${args.full_size ? '原尺寸' : '缩小一半'}，截图见下一条消息）。\n${formatReport(view, reports, pages)}`,
+            images: shots.map((s) => ({
+              label: `草稿${draft.where(pages[ids.indexOf(s.pageId)])}`,
+              url: `data:image/jpeg;base64,${s.image.toString('base64')}`,
+            })),
+          };
+        }
+        case 'check_project': {
+          if (!db) break;
+          const input = draft.checkInput();
+          return { content: formatProjectReport(input.doc, await checkProject(db, input)) };
+        }
+        case 'check_layout': {
+          const view = draft.view();
+          const pages = draft.mode === 'fragment' ? draft.editablePages() : undefined;
+          const reports = await inspectLayout(view, resolver, pages?.map((n) => view.pages[n - 1].id));
+          return { content: formatReport(view, reports, pages) };
+        }
+        case 'read_draft': {
+          if (typeof args.path === 'string' && args.path.trim()) {
+            const path = checkPath(args.path).path;
+            const n = draft.pageOf(path);
+            const ro = n ? !draft.isEditable(n) : draft.mode === 'fragment' && path.startsWith('styles/') && path !== ADDITIONS_CSS;
+            return { content: sliceText(draft.readFile(path), args.offset, args.max_chars, `${path}${n ? `（第 ${n} 页）` : ''}${ro ? '（只读）' : ''}`) };
+          }
+          if (args.page === undefined || args.page === null || args.page === '') return { content: draft.listFiles() };
+          const n = pageNo(args.page);
+          const text = n === 0 ? draft.cssSource() : draft.pageSource(n);
+          return { content: sliceText(text, args.offset, args.max_chars, n === 0 ? '草稿 CSS' : `草稿第 ${n} 页${draft.isEditable(n) ? '' : '（只读）'}`) };
+        }
+        case 'write_file': {
+          const after = args.after === undefined || args.after === null || args.after === '' ? undefined : pageNo(args.after);
+          return { content: `${draft.writeFile(String(args.path ?? ''), String(args.content ?? ''), after)}。` };
+        }
+        case 'delete_file':
+          return { content: `${draft.deleteFile(String(args.path ?? ''))}。` };
+        case 'find_elements': {
+          const target = targetOf(args);
+          if (!target.selector && !target.text && !target.eids) return { content: '错误：请给出 selector 或 contains' };
+          const found = draft.findElements(target, draft.resolvePage(args.path, optPage(args.page)));
+          const locked = found.filter((m) => !m.editable).length;
+          const files = draft.view().pages.map((p) => p.file);
+          return { content: `${listMatches(found.map((m) => ({ ...m, file: files[m.page - 1] })))}${locked && draft.mode === 'fragment' ? `\n（其中 ${locked} 个在只读页面上）` : ''}` };
+        }
+        case 'edit_elements': {
+          const hits = draft.editElements(targetOf(args), editOf(args), args.all === true, draft.resolvePage(args.path, optPage(args.page)));
+          const n = hits.reduce((s, h) => s + h.count, 0);
+          return { content: `已修改 ${n} 个元素（${hits.map((h) => draft.where(h.page)).join('、')}）。需要时用 render_pages 查看效果。` };
+        }
+        case 'find_css': {
+          const rules = draft.findCss(String(args.query ?? ''));
+          if (!rules.length) return { content: '没有匹配的 CSS 规则。' };
+          const text = rules.join('\n');
+          return { content: `共 ${rules.length} 条规则：\n${text.length > 6000 ? `${text.slice(0, 6000)}\n…（结果过长已截断，请用更具体的 query）` : text}` };
+        }
+        case 'edit_css': {
+          const r = draft.editCss(
+            { selector: String(args.selector ?? ''), media: typeof args.media === 'string' && args.media ? args.media : undefined, set: asMap(args.set), remove: args.remove === true },
+            typeof args.file === 'string' && args.file.trim() ? args.file : undefined,
+          );
+          const verb = { updated: '已修改', created: '已新建', removed: '已删除' }[r.action];
+          return { content: `${verb}规则（${r.file}）：${r.rule}` };
+        }
+        case 'insert_page': {
+          const after = draft.resolvePage(args.after_path, args.after);
+          if (after === undefined || Number.isNaN(after)) return { content: '错误：请给出 after（页码，0 表示最前面）或 after_path（页面文件）' };
+          let file: string | undefined;
+          if (typeof args.path === 'string' && args.path.trim()) {
+            const c = checkPath(args.path);
+            if (c.kind !== 'page') throw new Error('path 必须是 pages/名称.html');
+            if (draft.pageOf(c.path)) throw new Error(`${c.path} 已存在；覆盖请用 write_file 或 rewrite_page`);
+            file = c.path;
+          }
+          const added = draft.insertPages(after, String(args.html ?? ''), file);
+          const view = draft.view();
+          const names = view.pages.slice(after, after + added).map((p) => p.file);
+          return { content: `已在第 ${after} 页之后插入 ${added} 页（${names.join('、')}），后续页码顺延；现共 ${draft.pageCount} 页。` };
+        }
+        case 'duplicate_page': {
+          const n = pageArg(args);
+          draft.duplicatePage(n);
+          return { content: `已复制第 ${n} 页，副本为第 ${n + 1} 页（${draft.view().pages[n].file}）；现共 ${draft.pageCount} 页。` };
+        }
+        case 'move_page': {
+          const n = pageArg(args);
+          const file = draft.view().pages[n - 1]?.file;
+          draft.movePage(n, pageNo(args.to));
+          return { content: `已把${file ? ` ${file}` : ''}（原第 ${n} 页）移到第 ${pageNo(args.to)} 页；页面顺序即 index.html 中的顺序。` };
+        }
+        case 'replace_in_draft': {
+          if (args.all_pages === true) {
+            const hits = draft.replaceEverywhere(String(args.old_text ?? ''), String(args.new_text ?? ''));
+            return { content: `已替换 ${hits.reduce((s, h) => s + h.count, 0)} 处（${hits.map((h) => `${draft.where(h.page)} ${h.count} 处`).join('，')}）。` };
+          }
+          if (typeof args.path === 'string' && args.path.trim()) {
+            const path = checkPath(args.path).path;
+            const count = draft.replaceInFile(path, String(args.old_text ?? ''), String(args.new_text ?? ''), Boolean(args.replace_all));
+            return { content: `已在 ${path} 中替换 ${count} 处。${path === README ? '' : '建议用 render_pages 复查效果。'}` };
+          }
+          const n = pageNo(args.page);
+          const count = draft.replace(n, String(args.old_text ?? ''), String(args.new_text ?? ''), Boolean(args.replace_all));
+          return { content: `已在草稿${n === 0 ? ' CSS ' : draft.where(n)}替换 ${count} 处。建议用 render_pages 复查效果。` };
+        }
+        case 'rewrite_page': {
+          const n = pageArg(args);
+          const before = draft.pageCount;
+          draft.setPage(n, String(args.html ?? ''));
+          const added = draft.pageCount - before;
+          return { content: `已重写草稿${draft.where(n)}${added > 0 ? `，并拆分出 ${added} 个新页面（后续页码顺延）` : ''}。建议用 render_pages 复查效果。` };
+        }
+        case 'delete_page': {
+          if (draft.mode !== 'doc') break;
+          const n = pageArg(args);
+          const was = draft.where(n);
+          draft.deletePage(n);
+          return { content: `已删除草稿${was}，后续页码前移；现共 ${draft.pageCount} 页。` };
+        }
+      }
+    } catch (e) {
+      return { content: `错误：${(e as Error).message}` };
+    }
+    return { content: `错误：没有名为 ${name} 的工具` };
+  }
 }
 
 /** One tool set dispatching to several; unknown names go to the last one (which reports the error). */
@@ -991,6 +1074,16 @@ export function cleanSummary(text: string): string | undefined {
   return s ? s.slice(0, 300) : undefined;
 }
 
+export interface CheckLog {
+  errors: number;
+  warnings: number;
+  /** Times the report went back to the model. */
+  fixes: number;
+  /** Errors still there at the end (first few). */
+  remaining: string[];
+  error?: string;
+}
+
 export interface ReviewLog {
   before: IssueCount;
   after: IssueCount;
@@ -999,6 +1092,9 @@ export interface ReviewLog {
   edits: number;
   summary?: string;
   error?: string;
+  /** Layout review skipped (switched off in the settings). */
+  layoutSkipped?: boolean;
+  check?: CheckLog;
 }
 
 export interface ReviewOptions extends ChatOptions {
@@ -1012,16 +1108,35 @@ export interface ReviewOptions extends ChatOptions {
   onUsage?: (u: ChatResult) => void;
   /** Skip the model's review when the automatic check finds no errors (small, already inspected edits). */
   skipIfClean?: boolean;
+  /** Render, inspect and let the model fix the layout (default true). */
+  layoutReview?: boolean;
+  /** Run the delivery check at the end and send its errors back to the model (default true). */
+  finalCheck?: boolean;
+}
+
+/** Times the delivery check's errors go back to the model before the draft is saved as it is. */
+export const MAX_CHECK_FIXES = 2;
+
+function checkPrompt(draft: Draft, report: string): string {
+  const scope =
+    draft.mode === 'fragment'
+      ? `本次只能修改第 ${draft.describeEditable()} 页、${ADDITIONS_CSS} 与 README.md，其他文件的问题已省略。`
+      : '';
+  return `【交付检查】草稿已按导出结构组装为 index.html 与各页面文件，并在浏览器中加载检查。${scope}
+请修复下面的「✗ 错误」（用 read_draft 查看文件，用 replace_in_draft / write_file / edit_css / edit_elements 修改），「△ 提醒」酌情处理；修复后可调用 check_project 复查。完成后用一两句话总结，不要输出完整 HTML。
+
+${report}`;
 }
 
 /**
  * Agent loop after the first draft: render it, inspect the layout, and let the model look at its own
  * pages and fix them with the draft tools until it is satisfied (bounded by maxRounds). If errors are
- * still detected afterwards it gets one more pass. Failures here never fail the job: the draft as it
- * stands is kept.
+ * still detected afterwards it gets one more pass. Then the delivery check puts the project together
+ * as exported (index.html, styles, pages, README) and sends what fails back to the model. Failures here
+ * never fail the job: the draft as it stands is kept.
  */
 export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): Promise<ReviewLog> {
-  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, ...chatOpts } = opts;
+  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, ...chatOpts } = opts;
   const editsBefore = draft.edits;
   const focus = () => (draft.mode === 'fragment' ? draft.editablePages() : undefined);
   const inspect = async () => {
@@ -1031,60 +1146,96 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
     return { view, reports, text: formatReport(view, reports, pages) };
   };
   const log: ReviewLog = { before: { errors: 0, warnings: 0 }, after: { errors: 0, warnings: 0 }, passes: 0, toolCalls: 0, edits: 0 };
-  try {
-    onStage?.('自检：渲染并检查初稿');
-    const first = await inspect();
-    log.before = log.after = countIssues(first.reports);
-    if (skipIfClean && !log.before.errors) return log;
-    const labels = first.view.pages.map((_, i) => `第 ${i + 1} 页${draft.mode === 'fragment' && !draft.isEditable(i + 1) ? '（只读）' : ''}`);
-    const sheets = await renderContactSheets(first.view, resolver, { labels });
-    const images: ContentPart[] = sheets.flatMap((s, i) => [
-      { type: 'text' as const, text: sheets.length > 1 ? `缩略图总览 ${i + 1}/${sheets.length}：` : '缩略图总览：' },
-      { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${s.toString('base64')}` } },
-    ]);
-    const draftChars = draft.view().pages.reduce((n, p) => n + p.html.length, 0);
-    let messages: ChatMessage[] = [
-      ...trimPromptImages(prompt, !!fileTools),
-      {
-        role: 'assistant',
-        content: `（初稿已完成：共 ${first.view.pages.length} 页，页面 HTML 约 ${draftChars} 字符，已保存为草稿；可用 read_draft 查看文件列表与源码。）`,
+  const tools = combineTools(createDraftTools(draft, resolver, db), fileTools);
+  const converse = async (messages: ChatMessage[], rounds: number) => {
+    const r = await chatWithTools(db, userId, messages, {
+      ...chatOpts,
+      tools: tools.defs,
+      execute: tools.execute,
+      onTool: (name, args) => {
+        log.toolCalls++;
+        onTool?.(name, args);
       },
-      { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text) }, ...images] },
-    ];
-    const tools = combineTools(createDraftTools(draft, resolver), fileTools);
-    let report = first;
-    for (let pass = 0; pass < 2; pass++) {
-      log.passes++;
-      onStage?.('自检：模型检查草稿');
-      const r = await chatWithTools(db, userId, messages, {
-        ...chatOpts,
-        tools: tools.defs,
-        execute: tools.execute,
-        onTool: (name, args) => {
-          log.toolCalls++;
-          onTool?.(name, args);
-        },
-        onRound: onUsage,
-        maxRounds: pass === 0 ? maxRounds : Math.max(2, Math.ceil(maxRounds / 2)),
-        maxImages: 16,
-        allowEmptyFinal: true,
-      });
-      if (r.text && draft.replaceFromText(r.text)) log.summary = '（模型重新输出了完整内容）';
-      else if (r.text) log.summary = cleanSummary(r.text);
-      onStage?.('自检：复查布局');
-      report = await inspect();
-      log.after = countIssues(report.reports);
-      if (!log.after.errors || pass > 0) break;
-      messages = [
-        ...r.history,
-        {
-          role: 'user',
-          content: `【自动复查】草稿中仍检测到以下问题，请继续修复（若确属有意设计，可说明理由后结束）：\n${report.text}`,
-        },
-      ];
+      onRound: onUsage,
+      maxRounds: rounds,
+      maxImages: 16,
+      allowEmptyFinal: true,
+    });
+    if (r.text && draft.replaceFromText(r.text)) log.summary = '（模型重新输出了完整内容）';
+    else if (r.text) log.summary = cleanSummary(r.text);
+    return r;
+  };
+  const opening = (pages: number): ChatMessage[] => [
+    ...trimPromptImages(prompt, !!fileTools),
+    {
+      role: 'assistant',
+      content: `（初稿已完成：共 ${pages} 页，页面 HTML 约 ${draft.view().pages.reduce((n, p) => n + p.html.length, 0)} 字符，已保存为草稿；可用 read_draft 查看文件列表与源码。）`,
+    },
+  ];
+  let history: ChatMessage[] | undefined;
+  if (!layoutReview) log.layoutSkipped = true;
+  else {
+    try {
+      onStage?.('自检：渲染并检查初稿');
+      const first = await inspect();
+      log.before = log.after = countIssues(first.reports);
+      if (!(skipIfClean && !log.before.errors)) {
+        const labels = first.view.pages.map((p, i) => `第 ${i + 1} 页 ${p.file ?? ''}${draft.mode === 'fragment' && !draft.isEditable(i + 1) ? '（只读）' : ''}`);
+        const sheets = await renderContactSheets(first.view, resolver, { labels });
+        const images: ContentPart[] = sheets.flatMap((s, i) => [
+          { type: 'text' as const, text: sheets.length > 1 ? `缩略图总览 ${i + 1}/${sheets.length}：` : '缩略图总览：' },
+          { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${s.toString('base64')}` } },
+        ]);
+        let messages: ChatMessage[] = [
+          ...opening(first.view.pages.length),
+          { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text) }, ...images] },
+        ];
+        for (let pass = 0; pass < 2; pass++) {
+          log.passes++;
+          onStage?.('自检：模型检查草稿');
+          const r = await converse(messages, pass === 0 ? maxRounds : Math.max(2, Math.ceil(maxRounds / 2)));
+          history = r.history;
+          onStage?.('自检：复查布局');
+          const report = await inspect();
+          log.after = countIssues(report.reports);
+          if (!log.after.errors || pass > 0) break;
+          messages = [
+            ...r.history,
+            {
+              role: 'user',
+              content: `【自动复查】草稿中仍检测到以下问题，请继续修复（若确属有意设计，可说明理由后结束）：\n${report.text}`,
+            },
+          ];
+        }
+      }
+    } catch (e) {
+      log.error = (e as Error).message;
     }
-  } catch (e) {
-    log.error = (e as Error).message;
+  }
+  if (finalCheck) {
+    try {
+      for (let fix = 0; ; fix++) {
+        onStage?.('交付检查：组装 index.html，检查 README、样式与页面文件');
+        const input = draft.checkInput();
+        const issues = await checkProject(db, input);
+        const errors = issues.filter((i) => i.severity === 'error');
+        log.check = {
+          errors: errors.length,
+          warnings: issues.length - errors.length,
+          fixes: fix,
+          remaining: errors.slice(0, 5).map((i) => `${i.file}：${i.message}`.slice(0, 200)),
+        };
+        if (!errors.length || fix >= MAX_CHECK_FIXES) break;
+        onStage?.('交付检查：模型修复问题');
+        const r = await converse(
+          [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues)) }],
+          Math.max(3, Math.ceil(maxRounds / 2)),
+        );
+        history = r.history;
+      }
+    } catch (e) {
+      log.check = { errors: log.check?.errors ?? 0, warnings: log.check?.warnings ?? 0, fixes: log.check?.fixes ?? 0, remaining: log.check?.remaining ?? [], error: (e as Error).message };
+    }
   }
   log.edits = draft.edits - editsBefore;
   return log;

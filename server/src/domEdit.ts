@@ -47,9 +47,9 @@ function describe($: cheerio.CheerioAPI, el: Element): ElementMatch {
   };
 }
 
-export function formatMatch(m: ElementMatch & { page?: number }): string {
+export function formatMatch(m: ElementMatch & { page?: number; file?: string }): string {
   const cls = m.classes ? `.${m.classes.trim().split(/\s+/).join('.')}` : '';
-  return `${m.page ? `第 ${m.page} 页 ` : ''}<${m.tag}${cls}>${m.eid ? ` data-eid="${m.eid}"` : ''}${m.children ? `（${m.children} 个子元素）` : ''}${m.text ? `「${m.text}」` : ''}`;
+  return `${m.page ? `第 ${m.page} 页${m.file ? `（${m.file}）` : ''} ` : ''}<${m.tag}${cls}>${m.eid ? ` data-eid="${m.eid}"` : ''}${m.children ? `（${m.children} 个子元素）` : ''}${m.text ? `「${m.text}」` : ''}`;
 }
 
 function select($: cheerio.CheerioAPI, target: ElementTarget): Element[] {
@@ -67,7 +67,7 @@ function select($: cheerio.CheerioAPI, target: ElementTarget): Element[] {
   } else {
     throw new Error('请用 eids、selector 或 text 指定要找的元素');
   }
-  let els = found.toArray().filter((n): n is Element => n.type === 'tag');
+  let els = found.toArray().filter((n): n is Element => n.type === 'tag' || n.type === 'script' || n.type === 'style');
   if (target.text) {
     const needle = target.text.toLowerCase();
     const hit = (el: Element) => $(el).text().toLowerCase().includes(needle);
@@ -197,7 +197,7 @@ export function tooMany(matches: (ElementMatch & { page?: number })[]): Error {
   );
 }
 
-export function listMatches(matches: (ElementMatch & { page: number })[]): string {
+export function listMatches(matches: (ElementMatch & { page: number; file?: string })[]): string {
   if (!matches.length) return '没有匹配的元素。';
   const shown = matches.slice(0, MAX_LISTED).map((m) => formatMatch(m));
   return `共 ${matches.length} 个匹配${matches.length > MAX_LISTED ? `（只列出前 ${MAX_LISTED} 个）` : ''}：\n${shown.join('\n')}`;

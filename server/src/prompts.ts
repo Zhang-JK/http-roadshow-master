@@ -165,7 +165,9 @@ const TOOL_GUIDE = (scope: EditScope) => `【修改方式】
     : '本页内容过多时可用 rewrite_page 拆成多页，或用 write_file 新建页面文件（插在本页之后）；'
 }只有需要重新设计整页时才用 rewrite_page 或 write_file 覆盖整页；一次只写一个文件，避免单次输出过长
 - 如果用户的要求改变了 README 记录的需求、受众、风格约定或页面规划（例如换主色、改受众、增删章节），请用 replace_in_draft（path="README.md"）同步更新 README 的相应部分；修改记录由系统自动追加，不用写
-- 修改后可用 render_pages 查看效果
+- 增删、拆分或改名页面后，README 的「页面规划」要与实际的 pages/*.html 一致
+- 不要写 JavaScript（<script>、onclick 等会被移除）；动效用 CSS，图表用内联 SVG
+- 修改后可用 render_pages 查看效果；结束前系统会做交付检查（组装 index.html、检查 README 与各文件），也可以自己先调用 check_project
 全部完成后用一两句话说明做了哪些修改。`;
 
 const README_LIMIT = 8000;

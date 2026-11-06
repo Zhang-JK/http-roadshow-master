@@ -124,6 +124,7 @@ test('create a template through the dialog and watch it generate', async () => {
   await expect(page.locator('.gen-state')).toContainText('AI 正在生成');
   await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(3, { timeout: 30_000 });
   await expect(page.locator('[data-testid=page-indicator]')).toHaveText('第 1 / 3 页');
+  await expect(page.locator('.toast-success')).toContainText('交付检查通过');
   await expect(historyItems()).toHaveCount(1);
   await expect(historyItems().first()).toContainText('生成');
 });
@@ -360,7 +361,7 @@ test('attach an HTML deck as a page-by-page reference', async () => {
   await page.fill('[data-testid=prompt-input]', '参考网页调整');
   await page.click('[data-testid=send-btn]');
   await expect(historyItems()).toHaveCount(4, { timeout: 30_000 });
-  await expect(page.locator('.toast-success')).toContainText('修改已应用（自检：未修改）');
+  await expect(page.locator('.toast-success')).toContainText('修改已应用（自检：未修改；交付检查通过）');
   await page.click('.tabs button:has-text("素材")');
   await expect(page.locator('.asset-list li:has-text("old-site.html")')).toContainText('3 页图片');
 });

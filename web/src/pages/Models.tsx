@@ -205,7 +205,7 @@ export function ModelsPage() {
               </label>
               <label className="switch">
                 <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
-                <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存</span>
+                <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存（之后的交付检查始终运行：组装 index.html、检查 README 与各文件，有错误时交回模型修复）</span>
               </label>
               <label className="field inline" title="分步生成：先写 README（需求、风格约定、页面规划）与样式文件，再每次生成几页，单次输出短、被截断也只需重做一页；单次生成：一次输出整份 HTML">
                 <span>生成方式</span>

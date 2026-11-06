@@ -141,7 +141,7 @@ describe('draft', () => {
     expect(result.pages.map((p) => p.html.replace(/<[^>]+>/g, ''))).toEqual(['原第1页', 'A', 'B2 NEW', '原第3页', '别人新加的页']);
     expect(result.pages[1].id).toBe(target);
     const render = await tools.execute('render_pages', { pages: [2, 3, 99] });
-    expect(render.images?.map((i) => i.label)).toEqual(['草稿第 2 页', '草稿第 3 页']);
+    expect(render.images?.map((i) => i.label)).toEqual(['草稿第 2 页（pages/page-2.html）', '草稿第 3 页（pages/page-4.html）']);
     expect(render.images?.[0].url).toMatch(/^data:image\/jpeg;base64,/);
   });
 });
@@ -157,12 +157,12 @@ describe('self-check agent loop', () => {
 
     const first = calls[0];
     expect(first.text).toContain('【自检阶段】');
-    expect(first.text).toMatch(/第 2 页：\n\s+✗ 文字超出页面边界 \d+px：<p\.body>「OVERFLOW-TEXT/);
+    expect(first.text).toMatch(/第 2 页（pages\/content-1\.html）：\n\s+✗ 文字超出页面边界 \d+px：<p\.body>「OVERFLOW-TEXT/);
     expect(first.images.filter((i) => i.startsWith('data:image/jpeg'))).toHaveLength(1);
     expect(first.text).not.toContain('<section class="slide" data-layout'); // the draft HTML is not resent
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
       [
-        'check_layout', 'delete_file', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
+        'check_layout', 'check_project', 'delete_file', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
         'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page', 'write_file',
       ],
     );
@@ -172,7 +172,7 @@ describe('self-check agent loop', () => {
     expect(results[1]).toContain('README.md');
     expect(results[2]).toContain('已渲染第 2 页');
     expect(results[3]).toContain('left:1800px');
-    expect(results[4]).toContain('已在草稿第 2 页替换 1 处');
+    expect(results[4]).toContain('已在草稿第 2 页（pages/content-1.html）替换 1 处');
     expect(results[5]).toContain('没有找到 old_text');
     const shots = calls[2].body.messages.find((m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.text?.includes('工具调用返回的图片'));
     expect(shots.content.find((p: any) => p.type === 'text' && p.text.includes('草稿第 2 页'))).toBeTruthy();
@@ -238,7 +238,7 @@ describe('self-check agent loop', () => {
     const job = await waitJob(r.json.job.id);
     expect(job.status).toBe('done');
     expect(mock.reviewCalls.length).toBe(before);
-    expect(job.review).toBeNull();
+    expect(job.review).toMatchObject({ layoutSkipped: true, passes: 0, check: { errors: 0, fixes: 0 } });
     expect(savedDoc(r.json.project.id).pages[1].html).toContain('left:1800px');
     await req('PUT', '/api/settings', { selfCheck: true });
   });

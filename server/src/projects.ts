@@ -181,9 +181,11 @@ function describeTool(name: string, args: Record<string, unknown>): string {
   const pages = Array.isArray(args.pages) ? args.pages.join('、') : String(args.pages ?? '');
   switch (name) {
     case 'render_pages':
-      return `渲染草稿第 ${pages} 页`;
+      return `渲染草稿${pages ? `第 ${pages} 页` : ''}${args.paths ? ` ${String(args.paths)}` : ''}`;
     case 'check_layout':
       return '检查草稿布局';
+    case 'check_project':
+      return '交付检查（index.html、README、样式与页面文件）';
     case 'read_draft':
       return args.path
         ? `查看 ${String(args.path)}`
@@ -211,11 +213,11 @@ function describeTool(name: string, args: Record<string, unknown>): string {
     case 'edit_css':
       return `修改样式 ${String(args.selector ?? '').slice(0, 30)}`;
     case 'insert_page':
-      return `在第 ${args.after} 页后插入页面`;
+      return `插入页面${args.path ? ` ${String(args.path)}` : ''}`;
     case 'duplicate_page':
       return `复制第 ${args.page} 页`;
     case 'move_page':
-      return `把第 ${args.page} 页移到第 ${args.to} 页`;
+      return `把${args.path ? ` ${String(args.path)}` : `第 ${args.page} 页`}移到第 ${args.to} 页`;
     case 'list_files':
       return '列出参考文件';
     case 'read_text':
@@ -268,7 +270,8 @@ function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptToken
 
 /**
  * Self-check loop: render the draft in headless Chrome, inspect its layout and let the model fix it
- * with the draft tools. Skipped when disabled in the settings.
+ * with the draft tools (skipped when disabled in the settings), then the delivery check of the
+ * project as exported, whose errors always go back to the model.
  */
 async function selfReview(
   db: DB,
@@ -278,9 +281,8 @@ async function selfReview(
   prompt: ChatMessage[],
   fileTools?: FileTools,
   skipIfClean = false,
-): Promise<ReviewLog | null> {
+): Promise<ReviewLog> {
   const settings = getSettings(db);
-  if (!settings.selfCheck) return null;
   const log = await reviewDraft(db, userId, {
     draft,
     resolver: makeAssetResolver(db),
@@ -294,6 +296,7 @@ async function selfReview(
     onStage: (stage) => jobProgress.set(jobId, { chars: 0, stage }),
     onUsage: (u) => recordUsage(db, jobId, u),
     skipIfClean,
+    layoutReview: !!settings.selfCheck,
   });
   updateJob(db, jobId, { review: JSON.stringify(log) });
   return log;
@@ -350,7 +353,7 @@ async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessa
  */
 async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft, messages: ChatMessage[], fileTools?: FileTools) {
   const settings = getSettings(db);
-  const tools = combineTools(createDraftTools(draft, makeAssetResolver(db)), fileTools);
+  const tools = combineTools(createDraftTools(draft, makeAssetResolver(db), db), fileTools);
   jobProgress.set(jobId, { chars: 0, stage: '模型修改中' });
   const r = await chatWithTools(db, userId, messages, {
     maxTokens: Number(settings.maxTokens) || undefined,
@@ -428,7 +431,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
             pagesPerCall: Number(settings.genPagesPerCall) || 3,
           },
         );
-        draft = Draft.ofDocument(assignIds({ ...doc, title: project.name }));
+        draft = Draft.ofDocument(assignIds({ ...doc, title: project.name }, { keepScripts: true }));
         reviewContext = buildReviewContext(doc, project.type);
       } else {
         reviewContext =

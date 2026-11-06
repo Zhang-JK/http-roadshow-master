@@ -52,14 +52,24 @@ export interface JobReview {
   edits: number;
   summary?: string;
   error?: string;
+  layoutSkipped?: boolean;
+  check?: { errors: number; warnings: number; fixes: number; remaining: string[]; error?: string };
 }
 
 /** One-line description of what the self-check did. */
 export function reviewText(r: JobReview): string {
-  if (r.error) return `自检未完成（${r.error.slice(0, 60)}），已保存初稿`;
+  const check = !r.check
+    ? ''
+    : r.check.error
+      ? '；交付检查未完成'
+      : r.check.errors
+        ? `；交付检查仍有 ${r.check.errors} 个问题`
+        : `；交付检查通过${r.check.fixes ? `（修复 ${r.check.fixes} 轮）` : ''}`;
+  if (r.error) return `自检未完成（${r.error.slice(0, 60)}），已保存初稿${check}`;
+  if (r.layoutSkipped) return check.replace(/^；/, '');
   const fixed = r.edits ? `修改 ${r.edits} 处` : '未修改';
   const issues = r.before.errors || r.after.errors ? `，布局错误 ${r.before.errors} → ${r.after.errors}` : '';
-  return `自检：${fixed}${issues}`;
+  return `自检：${fixed}${issues}${check}`;
 }
 
 export interface Job {

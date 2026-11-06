@@ -48,8 +48,11 @@ ${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i =
 </body></html>
 \`\`\``;
 
-const PAGE = (n: number, layout: string, broken: boolean) =>
-  `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}</section>`;
+const PAGE = (n: number, layout: string, broken: boolean, extra = '') =>
+  `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}${n === 2 ? extra : ''}</section>`;
+
+/** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
+const pageExtra = (text: string) => (text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : '');
 
 const README_DOC = (title: string, n: number, notes: string) => `# ${title}
 
@@ -80,10 +83,11 @@ ${README_DOC(title, n, notes)}
 
 /** Page step: the files listed under 【本批任务】. */
 function pagesReply(text: string, broken: boolean, stray: boolean): string {
+  const extra = pageExtra(text);
   const task = text.slice(text.indexOf('【本批任务】'));
   const lines = [...task.matchAll(/^- 第 (\d+) 页：(pages\/[\w.-]+\.html) ｜ (\w+)/gm)];
   return lines
-    .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken)}\n</file>`)
+    .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken, extra)}\n</file>`)
     .join('\n\n');
 }
 
@@ -121,7 +125,7 @@ function mockToolRound(toolMsgs: { content: string }[]): { name: string; args: R
 function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args: Record<string, unknown> }[] | null {
   if (toolMsgs.length === 0) return [{ name: 'check_layout', args: {} }, { name: 'read_draft', args: {} }];
   if (toolMsgs.length === 2) {
-    const bad = Number(toolMsgs[0].content.match(/第 (\d+) 页：\n\s+✗ 文字超出页面边界/)?.[1] ?? 0);
+    const bad = Number(toolMsgs[0].content.match(/第 (\d+) 页(?:（[^）]*）)?：\n\s+✗ 文字超出页面边界/)?.[1] ?? 0);
     if (!bad) return null;
     const readOnly = toolMsgs[1].content.match(/第 (\d+) 页［只读］/)?.[1];
     return [
@@ -133,6 +137,37 @@ function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args:
     ];
   }
   return null;
+}
+
+/**
+ * Scripted fix after a failed delivery check (the last user message has 【交付检查】): remove scripts
+ * from the pages named in the report and list the files, then rewrite the README with every section
+ * and a page plan of the actual files. Markers: CHECK_STUBBORN never fixes anything.
+ */
+function mockCheckRound(report: string, after: { content: string }[], stubborn: boolean): { name: string; args: Record<string, unknown> }[] | null {
+  if (stubborn) return null;
+  if (after.length === 0) {
+    const scripted = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：包含 /g)].map((m) => m[1]);
+    return [
+      { name: 'read_draft', args: {} },
+      { name: 'read_draft', args: { path: 'README.md' } },
+      ...scripted.flatMap((path) => [
+        { name: 'edit_elements', args: { path, selector: 'script', remove: true, all: true } },
+        { name: 'edit_elements', args: { path, selector: '[onclick]', attrs: { onclick: null }, all: true } },
+      ]),
+    ];
+  }
+  const list = after[0].content;
+  if (!/✗ README\.md/.test(report) || after.some((m) => m.content.includes('已写入 README.md'))) return null;
+  const pages = [...list.matchAll(/^(pages\/[\w.-]+\.html) — 第 (\d+) 页/gm)].map((m) => `${m[2]}. ${m[1]} ｜ content ｜ 第${m[2]}页 ｜ 要点`);
+  const old = after[1].content.replace(/^.*\n/, '').replace(/\n（已到结尾）$/, '').replace(/\n## 页面规划[\s\S]*?(?=\n## |$)/, '');
+  const add = [
+    !/^## 需求/m.test(old) && '## 需求\n- CHECK-FIXED-README',
+    !/^## 风格约定/m.test(old) && '## 风格约定\n- 主色 #1e40af',
+    `## 页面规划\n${pages.join('\n')}`,
+  ].filter(Boolean);
+  const content = `${old.trim()}\n\n${add.join('\n\n')}\n`;
+  return [{ name: 'write_file', args: { path: 'README.md', content } }];
 }
 
 const EDIT_TOOLS = new Set(['write_file', 'delete_file', 'edit_elements', 'edit_css', 'replace_in_draft', 'rewrite_page', 'insert_page', 'delete_page', 'duplicate_page', 'move_page']);
@@ -156,6 +191,10 @@ function mockEditRound(text: string, messages: any[]): { name: string; args: Rec
   if (text.includes('本次只能修改草稿第')) {
     return [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: '<p class="body">整页新增段落</p>' } } }, ...overflow];
   }
+  // Whole-document markers: DELETE_LAST drops the last page without touching the README plan;
+  // EDIT_ADD_JS puts a script into every page.
+  if (text.includes('DELETE_LAST')) return [{ name: 'delete_file', args: { path: 'pages/content-2.html' } }];
+  if (text.includes('EDIT_ADD_JS')) return [{ name: 'edit_elements', args: { selector: 'section', all: true, insert: { position: 'append', html: '<script>track()</script>' } } }];
   return [
     { name: 'find_css', args: { query: '--brand' } },
     { name: 'edit_css', args: { selector: ':root', set: { '--brand': '#111827' } } },
@@ -189,6 +228,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
   const calls: MockCall[] = [];
   /** Requests made during the self-check phase (kept apart so draft-phase assertions stay simple). */
   const reviewCalls: MockCall[] = [];
+  /** Requests answering a failed delivery check (also counted in calls / reviewCalls). */
+  const checkCalls: MockCall[] = [];
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || !req.url?.endsWith('/chat/completions')) {
       res.writeHead(404).end();
@@ -222,11 +263,17 @@ export async function startMockLlm(opts: MockOptions = {}) {
 
     const toolMsgs = body.messages.filter((m: any) => m.role === 'tool');
     const canCall = body.tools && body.tool_choice !== 'none';
+    const lastUserAt = body.messages.map((m: any) => m.role).lastIndexOf('user');
+    const lastUserText = typeof body.messages[lastUserAt]?.content === 'string' ? (body.messages[lastUserAt].content as string) : '';
+    const checkPhase = lastUserText.includes('【交付检查】');
+    if (checkPhase) checkCalls.push({ model: body.model, stream: !!body.stream, user: body.user, text: lastUserText, images, body });
     const toolEdit = !review && text.includes('【修改方式】') && !/FULL_REWRITE|NO_CHANGE/.test(text);
     const planStep = text.includes('本次只输出 README.md 与样式文件');
     const pageStep = text.includes('【本批任务】');
     const toolCalls = !canCall
       ? null
+      : checkPhase
+        ? mockCheckRound(lastUserText, body.messages.slice(lastUserAt + 1).filter((m: any) => m.role === 'tool'), text.includes('CHECK_STUBBORN'))
       : review
         ? text.includes('FIX_DRAFT')
           ? mockReviewRound(toolMsgs)
@@ -262,6 +309,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
     } else if (typeof lastUser?.content === 'string' && lastUser.content.includes('请从中断处继续输出')) {
       const full = FULL_DOC(title, 3, broken);
       reply = full.slice(full.length / 2);
+    } else if (checkPhase) {
+      reply = '已按交付检查修复。';
     } else if (toolEdit) {
       reply = '已按要求修改。';
     } else if (text.includes('NO_CHANGE')) {
@@ -312,6 +361,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
     brokenUrl: `http://127.0.0.1:${port}/broken/v1`,
     calls,
     reviewCalls,
+    checkCalls,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }

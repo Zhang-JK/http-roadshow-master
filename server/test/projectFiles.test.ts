@@ -129,12 +129,17 @@ describe('staged multi-file generation', () => {
     try {
       const { id, job, calls } = await create({ name: '单次模板', notes: 'TRUNCATE_SINGLE' });
       expect(job.status).toBe('done');
-      expect(calls).toHaveLength(2);
       expect(calls[1].body.messages.at(-1).content).toContain('请从中断处继续输出');
       const doc = savedDoc(id);
       expect(doc.pages).toHaveLength(3);
       expect(doc.readme).toContain('# 单次模板');
       expect(doc.readme).toContain('TRUNCATE_SINGLE');
+      // The README written from the brief has no style or page plan: the delivery check sends it back.
+      const check = calls.find((c) => c.text.includes('【交付检查】'))!;
+      expect(check.text).toContain('✗ README.md：缺少「## 风格约定」一节');
+      expect(check.text).toContain('✗ README.md：缺少「## 页面规划」一节');
+      expect(doc.readme).toMatch(/## 页面规划\n1\. pages\/cover\.html[\s\S]*3\. pages\/content-2\.html/);
+      expect(job.review.check).toMatchObject({ errors: 0, fixes: 1 });
     } finally {
       await req('PUT', '/api/settings', { generateMode: 'files' });
     }

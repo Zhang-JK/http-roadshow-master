@@ -1,4 +1,4 @@
-import { chromium, type Browser } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext } from 'playwright-core';
 import PptxGenJS from 'pptxgenjs';
 import { config } from './config.js';
 import { assembleHtml, pageText, type DeckDoc } from './deck.js';
@@ -47,6 +47,18 @@ async function withPage<T>(doc: DeckDoc, html: string, fn: (page: import('playwr
     await page.setContent(html, { waitUntil: 'load', timeout: 20_000 }).catch(() => {});
     await page.evaluate(() => Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 3000))]));
     return await fn(page);
+  } finally {
+    await context.close();
+  }
+}
+
+/** A fresh browser context, closed afterwards, for checks that drive pages themselves. */
+export async function withContext<T>(viewport: { width: number; height: number }, fn: (context: BrowserContext) => Promise<T>): Promise<T> {
+  const browser = await getBrowser();
+  const context = await browser.newContext({ viewport, deviceScaleFactor: 1, ignoreHTTPSErrors: !!chromeProxy() });
+  await context.addInitScript(NAME_SHIM);
+  try {
+    return await fn(context);
   } finally {
     await context.close();
   }

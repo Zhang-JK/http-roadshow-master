@@ -99,9 +99,9 @@ describe('structured draft tools', () => {
     const draft = Draft.ofDocument(snapshot());
     const tools = createDraftTools(draft, (h) => h);
     const run = async (name: string, args: Record<string, unknown>) => (await tools.execute(name, args)).content;
-    expect(await run('find_elements', { selector: 'h1' })).toMatch(/共 3 个匹配[\s\S]*第 3 页 <h1\.title> data-eid="e[0-9a-z]{8}"「第3页 ACME」/);
+    expect(await run('find_elements', { selector: 'h1' })).toMatch(/共 3 个匹配[\s\S]*第 3 页（pages\/page-3\.html） <h1\.title> data-eid="e[0-9a-z]{8}"「第3页 ACME」/);
     expect(await run('edit_elements', { selector: 'h1', text: 'x' })).toContain('匹配到 3 个元素');
-    expect(await run('edit_elements', { selector: '.num', all: true, style: { color: 'green' } })).toContain('已修改 3 个元素（第 1、2、3 页）');
+    expect(await run('edit_elements', { selector: '.num', all: true, style: { color: 'green' } })).toContain('已修改 3 个元素（第 1 页（pages/page.html）、第 2 页（pages/page-2.html）、第 3 页（pages/page-3.html））');
     const eid = draft.view().pages[1].html.match(/<h1[^>]*data-eid="([^"]+)"/)![1];
     expect(await run('edit_elements', { eids: [eid], text: '市场机会' })).toContain('第 2 页');
     expect(await run('replace_in_draft', { old_text: 'ACME', new_text: 'Acme 公司', all_pages: true })).toContain('已替换 2 处');
@@ -124,7 +124,7 @@ describe('structured draft tools', () => {
     const run = async (name: string, args: Record<string, unknown>) => (await tools.execute(name, args)).content;
     expect(tools.defs.map((d) => d.function.name)).not.toContain('move_page');
     expect(await run('edit_elements', { selector: 'h1', page: 1, text: 'x' })).toContain('只读');
-    expect(await run('edit_elements', { selector: 'h1', text: '只改第二页' })).toContain('已修改 1 个元素（第 2 页）');
+    expect(await run('edit_elements', { selector: 'h1', text: '只改第二页' })).toContain('已修改 1 个元素（第 2 页（pages/page-2.html））');
     expect(await run('edit_css', { selector: '.title', set: { color: 'blue' } })).toContain('共享样式');
     expect(await run('edit_css', { selector: '.p2-note', set: { color: 'blue' } })).toContain('已新建规则');
     expect(await run('find_css', { query: 'title' })).toContain('［styles/main.css，共享只读］.title{color:red}');
