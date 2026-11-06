@@ -1,0 +1,13 @@
+{
+  "name": "roadshow-studio",
+  "private": true,
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix web install",
+    "build": "npm --prefix web run build",
+    "start": "npm --prefix server run start",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "test": "npm --prefix server test && npm --prefix web run test:e2e",
+    "typecheck": "npm --prefix server run typecheck && cd web && npx tsc -b"
+  }
+}

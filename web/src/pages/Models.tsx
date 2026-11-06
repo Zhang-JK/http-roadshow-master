@@ -1,0 +1,248 @@
+import { useCallback, useEffect, useState } from 'react';
+import { api } from '../api';
+import type { Endpoint, TestResult } from '../types';
+import { Modal } from '../components/Modal';
+import { useToast } from '../components/Toast';
+import { fullTime } from '../lib/format';
+
+interface Form {
+  id?: number;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  weight: number;
+  enabled: boolean;
+  extraBody: string;
+}
+
+const EMPTY: Form = {
+  name: 'OpenRouter',
+  baseUrl: 'https://openrouter.ai/api/v1',
+  apiKey: '',
+  model: '',
+  weight: 1,
+  enabled: true,
+  extraBody: '{}',
+};
+
+interface Usage {
+  username: string | null;
+  endpoint: string | null;
+  calls: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  cost: number | null;
+}
+
+export function ModelsPage() {
+  const toast = useToast();
+  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const [assignments, setAssignments] = useState<{ userId: number; username: string; endpointName: string | null }[]>([]);
+  const [usage, setUsage] = useState<Usage[]>([]);
+  const [settings, setSettings] = useState<{ attachScreenshots: boolean; maxTokens: number; temperature: number } | null>(null);
+  const [form, setForm] = useState<Form | null>(null);
+  const [testing, setTesting] = useState<number | 'form' | null>(null);
+  const [formTest, setFormTest] = useState<TestResult | null>(null);
+
+  const load = useCallback(() => {
+    api.get<{ endpoints: Endpoint[] }>('/api/llm/endpoints').then((r) => setEndpoints(r.endpoints)).catch((e) => toast(e.message, 'error'));
+    api.get<{ assignments: typeof assignments }>('/api/llm/assignments').then((r) => setAssignments(r.assignments));
+    api.get<{ usage: Usage[] }>('/api/llm/usage').then((r) => setUsage(r.usage));
+    api.get<{ settings: typeof settings }>('/api/settings').then((r) => setSettings(r.settings));
+  }, [toast]);
+  useEffect(load, [load]);
+
+  const save = async () => {
+    if (!form) return;
+    try {
+      const body = { ...form, apiKey: form.apiKey || undefined };
+      if (form.id) await api.put(`/api/llm/endpoints/${form.id}`, body);
+      else await api.post('/api/llm/endpoints', body);
+      toast('已保存', 'success');
+      setForm(null);
+      load();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+
+  const test = async (ep: Endpoint) => {
+    setTesting(ep.id);
+    try {
+      const r = await api.post<{ result: TestResult }>(`/api/llm/endpoints/${ep.id}/test`);
+      toast(r.result.message, r.result.ok ? 'success' : 'error');
+      load();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const testForm = async () => {
+    if (!form) return;
+    setTesting('form');
+    setFormTest(null);
+    try {
+      const r = await api.post<{ result: TestResult }>('/api/llm/test', { ...form, apiKey: form.apiKey || undefined });
+      setFormTest(r.result);
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const toggle = async (ep: Endpoint) => {
+    await api.put(`/api/llm/endpoints/${ep.id}`, { enabled: !ep.enabled }).catch((e) => toast(e.message, 'error'));
+    load();
+  };
+
+  const remove = async (ep: Endpoint) => {
+    if (!confirm(`删除接入点「${ep.name}」？`)) return;
+    await api.del(`/api/llm/endpoints/${ep.id}`);
+    load();
+  };
+
+  const saveSettings = async (patch: Partial<NonNullable<typeof settings>>) => {
+    try {
+      const r = await api.put<{ settings: NonNullable<typeof settings> }>('/api/settings', patch);
+      setSettings(r.settings);
+      toast('设置已保存', 'success');
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+
+  const totalCost = usage.reduce((a, u) => a + (u.cost ?? 0), 0);
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1>模型接入</h1>
+          <p className="muted">
+            配置兼容 OpenAI Chat Completions 协议的大模型接入点（模型必须支持图像输入）。启用多个接入点时，系统按<strong>用户</strong>做一致性哈希负载均衡：同一用户的请求固定发往同一接入点以充分利用提示词缓存，该接入点故障时自动切换到下一个。
+          </p>
+        </div>
+        <button className="btn btn-primary" onClick={() => { setForm({ ...EMPTY }); setFormTest(null); }} data-testid="add-endpoint">＋ 添加接入点</button>
+      </div>
+
+      <div className="table-card">
+        <table className="table">
+          <thead>
+            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th>权重</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
+          </thead>
+          <tbody>
+            {endpoints.length === 0 && (
+              <tr><td colSpan={8} className="muted center-text">尚未配置接入点，AI 生成功能不可用</td></tr>
+            )}
+            {endpoints.map((ep) => (
+              <tr key={ep.id} data-testid="endpoint-row">
+                <td><strong>{ep.name}</strong></td>
+                <td><code>{ep.model}</code></td>
+                <td className="muted small">{ep.baseUrl}</td>
+                <td><code>{ep.apiKeyMasked}</code></td>
+                <td>{ep.weight}</td>
+                <td>
+                  <label className="switch">
+                    <input type="checkbox" checked={ep.enabled} onChange={() => toggle(ep)} />
+                    <span>{ep.enabled ? '启用' : '停用'}</span>
+                  </label>
+                </td>
+                <td className="small">
+                  {ep.lastTestAt ? (
+                    <span className={ep.lastTestOk ? 'ok-text' : 'err-text'} title={ep.lastTestMessage ?? ''} data-testid="test-status">
+                      {ep.lastTestOk ? '✓ ' : '✗ '}{ep.lastTestMessage?.slice(0, 40)}
+                      <br /><span className="muted">{fullTime(ep.lastTestAt)}</span>
+                    </span>
+                  ) : <span className="muted">未测试</span>}
+                </td>
+                <td className="right nowrap">
+                  <button className="btn btn-sm" disabled={testing === ep.id} onClick={() => test(ep)} data-testid="test-endpoint">{testing === ep.id ? '测试中…' : '测试'}</button>{' '}
+                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody }); setFormTest(null); }}>编辑</button>{' '}
+                  <button className="btn btn-sm btn-danger" onClick={() => remove(ep)}>删除</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="two-col">
+        <div className="panel-card">
+          <h3>用户 → 接入点分配</h3>
+          <p className="muted small">基于加权一致性哈希（Rendezvous Hashing），增删接入点时只有少量用户会被重新分配。</p>
+          <table className="table compact">
+            <tbody>
+              {assignments.map((a) => (
+                <tr key={a.userId}><td>{a.username}</td><td>{a.endpointName ?? <span className="muted">—</span>}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="panel-card">
+          <h3>生成设置</h3>
+          {settings && (
+            <div className="settings-form">
+              <label className="switch">
+                <input type="checkbox" checked={settings.attachScreenshots} onChange={(e) => saveSettings({ attachScreenshots: e.target.checked })} />
+                <span>修改单页/元素时附带页面截图（红框标出选中元素，利用多模态能力）</span>
+              </label>
+              <label className="field inline">
+                <span>最大输出 tokens</span>
+                <input type="number" defaultValue={settings.maxTokens} onBlur={(e) => saveSettings({ maxTokens: Number(e.target.value) })} />
+              </label>
+              <label className="field inline">
+                <span>Temperature</span>
+                <input type="number" step="0.1" min="0" max="2" defaultValue={settings.temperature} onBlur={(e) => saveSettings({ temperature: Number(e.target.value) })} />
+              </label>
+            </div>
+          )}
+          <h3 style={{ marginTop: 20 }}>用量统计 <span className="muted small">合计 ${totalCost.toFixed(4)}</span></h3>
+          <table className="table compact">
+            <thead><tr><th>用户</th><th>接入点</th><th>调用</th><th>输入/输出 tokens</th><th>费用</th></tr></thead>
+            <tbody>
+              {usage.map((u, i) => (
+                <tr key={i}><td>{u.username ?? '—'}</td><td>{u.endpoint ?? '（已删除）'}</td><td>{u.calls}</td><td>{(u.promptTokens ?? 0).toLocaleString()} / {(u.completionTokens ?? 0).toLocaleString()}</td><td>{u.cost != null ? `$${u.cost.toFixed(4)}` : '—'}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {form && (
+        <Modal
+          title={form.id ? '编辑接入点' : '添加接入点'}
+          onClose={() => setForm(null)}
+          footer={
+            <>
+              <button className="btn" disabled={testing === 'form'} onClick={testForm} data-testid="test-form">{testing === 'form' ? '测试中…' : '联通测试'}</button>
+              <div className="spacer" />
+              <button className="btn" onClick={() => setForm(null)}>取消</button>
+              <button className="btn btn-primary" onClick={save} data-testid="save-endpoint">保存</button>
+            </>
+          }
+        >
+          <label className="field"><span>名称</span><input name="ep-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+          <label className="field"><span>接入地址（Base URL）</span><input name="ep-base" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://openrouter.ai/api/v1" /></label>
+          <label className="field"><span>模型名称</span><input name="ep-model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="例如 deepseek/deepseek-v4.1-flash-1017" /></label>
+          <label className="field"><span>API Token{form.id ? '（留空则保持不变）' : ''}</span><input name="ep-key" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." /></label>
+          <div className="row gap">
+            <label className="field"><span>权重（1–100）</span><input type="number" min={1} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: Number(e.target.value) })} /></label>
+            <label className="switch" style={{ marginTop: 22 }}><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /><span>启用</span></label>
+          </div>
+          <label className="field"><span>附加请求参数（JSON，可选，会合并进请求体）</span><textarea rows={3} value={form.extraBody} onChange={(e) => setForm({ ...form, extraBody: e.target.value })} placeholder='例如 {"reasoning":{"effort":"low"}}' /></label>
+          {formTest && (
+            <div className={`test-result ${formTest.ok ? 'ok' : 'err'}`} data-testid="form-test-result">
+              <strong>{formTest.ok ? '✓ 测试通过' : '✗ 测试未通过'}</strong>（{formTest.latencyMs} ms）
+              <div>文本：{formTest.textOk ? '正常' : '失败'} · 多模态：{formTest.visionOk ? '支持' : '不支持/失败'}</div>
+              <div className="small">{formTest.message}</div>
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
