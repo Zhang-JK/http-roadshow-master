@@ -38,6 +38,7 @@ is_root() { [ "$(id -u)" -eq 0 ]; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- options
+ORIG_ARGS=("$@")
 CMD="${1:-auto}"; [ $# -gt 0 ] && shift
 OPT_SOURCE=""; OPT_REPO=""; OPT_BRANCH=""; OPT_MANIFEST=""; OPT_FROM=""; OPT_PORT=""; OPT_HOST=""
 OPT_BASE=""; OPT_USER=""; OPT_NO_SYSTEMD=0; OPT_ADMIN_PWD=""; OPT_NPM_REGISTRY=""; OPT_NODE_MIRROR=""
@@ -90,6 +91,10 @@ UNIT_FILE="/etc/systemd/system/$APP_NAME.service"
 PORT=9090; HOST=0.0.0.0; UPDATE_SOURCE=local; REPO_URL=""; BRANCH=main; MANIFEST_URL=""; LOCAL_SOURCE=""
 SERVICE_USER=""; USE_SYSTEMD=0; NODE_BIN=""; KEEP_RELEASES=3; NPM_REGISTRY=""; NODE_MIRROR="https://nodejs.org/dist"
 ADMIN_PASSWORD=""
+if [ -f "$CONF" ] && [ ! -r "$CONF" ]; then
+  if have sudo; then exec sudo bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}"; fi
+  echo "无权读取 $CONF，请使用 root 或服务用户执行" >&2; exit 1
+fi
 # shellcheck source=/dev/null
 [ -f "$CONF" ] && . "$CONF"
 [ -n "$OPT_PORT" ] && PORT="$OPT_PORT"
@@ -103,6 +108,14 @@ ADMIN_PASSWORD=""
 if [ -n "$OPT_SOURCE" ]; then UPDATE_SOURCE="$OPT_SOURCE"
 elif [ -n "$OPT_REPO" ]; then UPDATE_SOURCE=git
 elif [ -n "$OPT_MANIFEST" ]; then UPDATE_SOURCE=archive; fi
+
+# Day-to-day commands run as the service user so files under $BASE_DIR keep a single owner
+# (and match what an in-app update, which already runs as that user, produces).
+if [ "$(id -u)" -eq 0 ] && [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ] && [ -L "$CURRENT" ]; then
+  case "$CMD" in
+    check|update|rollback|auto) exec runuser -u "$SERVICE_USER" -- env HOME="$BASE_DIR" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" ;;
+  esac
+fi
 
 save_conf() {
   mkdir -p "$SHARED"
@@ -235,7 +248,7 @@ npm_cmd() { # runs npm from the selected node
   local reg=(); [ -n "$NPM_REGISTRY" ] && reg=(--registry "$NPM_REGISTRY")
   local runner=("$NODE_BIN" "$npm_cli"); [ -f "$npm_cli" ] || runner=(npm)
   PATH="$(dirname "$NODE_BIN"):$PATH" npm_config_cache="$SHARED/npm-cache" \
-    "${runner[@]}" "$@" "${reg[@]}" --no-audit --no-fund --loglevel=error
+    "${runner[@]}" "$@" "${reg[@]}" --no-audit --no-fund --no-update-notifier --loglevel=error
 }
 
 find_system_chrome() {
@@ -283,8 +296,10 @@ latest_remote() {
     git)
       [ -n "$REPO_URL" ] || die "未配置 git 仓库地址（REPO_URL）"
       local sha
-      sha="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REPO_URL" "refs/heads/$BRANCH" 2>/dev/null | cut -f1)" || true
-      [ -n "$sha" ] || die "无法访问仓库 $REPO_URL 的分支 $BRANCH"
+      local out
+      out="$(git_remote ls-remote "$REPO_URL" "refs/heads/$BRANCH" 2>&1)" || true
+      sha="$(printf '%s\n' "$out" | grep -E $'^[0-9a-f]{40}\t' | head -1 | cut -f1)"
+      [ -n "$sha" ] || die "无法访问仓库 $REPO_URL 的分支 $BRANCH：$(printf '%s' "$out" | grep -m1 -E 'fatal|error' || echo 分支不存在)"
       printf '%s\t%s\n' "$sha" "$BRANCH@${sha:0:7}"
       ;;
     archive)
@@ -299,6 +314,9 @@ latest_remote() {
     *) die "未知的更新源类型：$UPDATE_SOURCE" ;;
   esac
 }
+
+# Local-path repositories are usually owned by another user; command-line safe.directory is honoured by git.
+git_remote() { GIT_TERMINAL_PROMPT=0 git -c safe.directory='*' "$@"; }
 
 current_id() {
   case "$UPDATE_SOURCE" in git) current_commit ;; *) current_version ;; esac
@@ -344,7 +362,7 @@ fetch_source() {
     case "$UPDATE_SOURCE" in
       git)
         log "从 git 获取代码：$REPO_URL ($BRANCH)"
-        GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$dst" || die "git clone 失败"
+        git_remote clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$dst" || die "git clone 失败"
         SRC_COMMIT="$(git -C "$dst" rev-parse HEAD)"
         rm -rf "$dst/.git"
         SRC_REF="$REPO_URL#$BRANCH"
