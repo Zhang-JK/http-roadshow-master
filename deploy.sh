@@ -426,6 +426,41 @@ explain_curl_error() { # curl exit code, stderr file, url -> one-line cause and 
   esac
 }
 
+# Proxies often let the registry API through but block or rewrite package archives (binaries, size limits),
+# so download the largest dependency and compare it with the lockfile's checksum.
+probe_npm_tarball() {
+  local registry="${NPM_REGISTRY:-https://registry.npmjs.org}" lock="" f url integrity tmp err rc=0 got why size what
+  for f in "$SCRIPT_DIR/server/package-lock.json" "$BASE_DIR/current/server/package-lock.json"; do
+    [ -f "$f" ] && { lock="$f"; break; }
+  done
+  [ -n "$lock" ] || return 0
+  read -r url integrity < <(awk '/"node_modules\/better-sqlite3": \{/ {f=1}
+    f && /"resolved":/ {gsub(/[",]/, "", $2); u=$2}
+    f && /"integrity":/ {gsub(/[",]/, "", $2); print u, $2; exit}' "$lock") || true
+  [ -n "${url:-}" ] || return 0
+  url="${registry%/}/${url#https://registry.npmjs.org/}"
+  local label; label="npm 包下载（$(basename "$url")，含预编译二进制）"
+  tmp="$(mktemp)"; err="$(mktemp)"
+  net_curl -sS -f -o "$tmp" --connect-timeout 10 --max-time 180 "$url" 2>"$err" || rc=$?
+  if [ "$rc" != 0 ]; then
+    why="$(explain_curl_error "$rc" "$err" "$url")"
+    grep -q 'error: 403' "$err" && why="被拒绝（HTTP 403）：公司代理可能按文件类型或大小拦截了 npm 包。请让 IT 放行 $registry 的 .tgz 下载，或用 --npm-registry 指定公司内部 npm 镜像"
+    NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   %s：%s%s\n' "$c_err" "$(date '+%F %T')" "$label" "$why" "$c_off" >&2
+  elif have openssl && [ "${integrity%%-*}" = sha512 ]; then
+    got="sha512-$(openssl dgst -sha512 -binary "$tmp" | base64 | tr -d '\n')"
+    size="$(wc -c < "$tmp" | tr -d ' ')"
+    if [ "$got" = "$integrity" ]; then ok "  $label：下载完整（$((size / 1024)) KB，校验一致）"
+    else
+      NET_FAIL=$((NET_FAIL + 1))
+      what="收到 $size 字节"
+      [ "$(head -c 2 "$tmp" | od -An -tx1 | tr -d ' \n')" = 1f8b ] || what="$what，不是压缩包，像是代理返回的网页：$(head -c 120 "$tmp" | tr -d '\0\r' | tr '\n' ' ')"
+      printf '%s[%s] ✘   %s：下载内容与官方校验值不符（%s）。代理可能替换了文件（拦截页、病毒扫描页）或截断了下载，请让 IT 放行 %s 的 .tgz 下载，或用 --npm-registry 指定内部镜像%s\n' \
+        "$c_err" "$(date '+%F %T')" "$label" "$what" "$registry" "$c_off" >&2
+    fi
+  else ok "  $label：可下载"; fi
+  rm -f "$tmp" "$err"
+}
+
 probe_url() { # label url required(1|0)
   local label="$1" url="$2" req="$3" code rc=0 err why
   err="$(mktemp)"
@@ -487,6 +522,7 @@ net_preflight() {
   if find_node >/dev/null; then ok "  Node.js：已有可用的 Node.js $NODE_MAJOR+，无需下载"
   else probe_url "Node.js 下载源（$NODE_MIRROR）" "$NODE_MIRROR/latest-v$NODE_MAJOR.x/SHASUMS256.txt" 1; fi
   probe_url "npm 仓库（${NPM_REGISTRY:-https://registry.npmjs.org}）" "${NPM_REGISTRY:-https://registry.npmjs.org}/-/ping" 1
+  probe_npm_tarball
   if [ -z "$OPT_FROM" ]; then
     case "$UPDATE_SOURCE" in
       git) case "$REPO_URL" in /*|file://*) ;; *) [ -n "$REPO_URL" ] && probe_git "$REPO_URL" "$BRANCH" ;; esac ;;
@@ -598,6 +634,54 @@ npm_cmd() { # runs npm from the selected node
   # In-app updates inherit NODE_ENV=production from the app, which would make npm skip build tools.
   env -u NODE_ENV PATH="$(dirname "$NODE_BIN"):$PATH" npm_config_cache="$SHARED/npm-cache" \
     "${runner[@]}" "$@" "${reg[@]}" --no-audit --no-fund --no-update-notifier --loglevel=error
+}
+
+NPM_WHY=""; NPM_TRANSIENT=0
+explain_npm_error() { # npm output file, lockfile -> NPM_WHY (cause and fix), NPM_TRANSIENT=1 when worth retrying
+  local f="$1" lock="${2:-}" registry="${NPM_REGISTRY:-https://registry.npmjs.org}" pkg last hash
+  NPM_TRANSIENT=0
+  pkg="$(grep -oE 'https?://[^ ]+\.tgz' "$f" | tail -1 | sed -E 's#.*/-/##; s#\.tgz$##' || true)"
+  hash="$(grep -oE 'wanted sha512-[A-Za-z0-9+/=]+' "$f" | head -1 | sed 's/^wanted //' || true)"
+  if [ -z "$pkg" ] && [ -n "$hash" ] && [ -f "$lock" ]; then
+    pkg="$(awk -v h="$hash" '/^    "node_modules\// {k=$1; gsub(/[":]/, "", k); sub(/.*node_modules\//, "", k)}
+      index($0, h) {print k; exit}' "$lock")"
+  fi
+  pkg="${pkg:-某个依赖包}"
+  if grep -qE 'SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_GET_ISSUER_CERT|unable to get local issuer|UNABLE_TO_VERIFY_LEAF_SIGNATURE|CERT_HAS_EXPIRED|ERR_TLS_CERT|self[- ]signed certificate' "$f"; then
+    NPM_WHY="下载 npm 包时 HTTPS 证书校验失败：请用 --ca-cert 公司根证书.pem（或 --ca-cert auto），无法获得证书时可用 --insecure"
+  elif grep -qE 'E407|407 Proxy' "$f"; then
+    NPM_WHY="代理要求身份认证（HTTP 407）：请使用 --proxy http://用户名:密码@代理:端口"
+  elif grep -qE 'EINTEGRITY|integrity checksum failed' "$f"; then
+    NPM_WHY="下载的 $pkg 与官方校验值不符：代理可能替换或截断了文件（拦截页、病毒扫描页、大小限制）。请让 IT 放行 $registry 的 .tgz 下载，或用 --npm-registry 指定公司内部 npm 镜像"
+  elif grep -qE 'E403|403 Forbidden' "$f"; then
+    NPM_WHY="$pkg 的下载被拒绝（HTTP 403）：通常是公司代理按文件类型或大小拦截（该包含预编译的二进制文件）。请让 IT 放行 $registry 的 .tgz 下载，或用 --npm-registry 指定公司内部 npm 镜像"
+  elif grep -qE 'E404|404 Not Found' "$f"; then
+    NPM_WHY="npm 仓库中找不到 $pkg（HTTP 404）：若使用了 --npm-registry 镜像，请确认它同步了该包"
+  elif grep -qE 'ENOSPC|no space left' "$f"; then
+    NPM_WHY="磁盘空间不足（df -h $BASE_DIR）"
+  elif grep -qE 'EACCES|EPERM' "$f"; then
+    NPM_WHY="文件权限不足：$(grep -m1 -E 'EACCES|EPERM|path ' "$f" | sed 's/^npm error //')"
+  elif grep -qE 'ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|socket hang up|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|EPIPE|network' "$f"; then
+    NPM_TRANSIENT=1
+    NPM_WHY="下载 $pkg 时网络中断或超时：请检查代理 / 网络，或用 --npm-registry 换一个更近的镜像"
+  else
+    last="$(grep -E '^npm (error|ERR!)' "$f" | grep -v 'complete log' | tail -1 | sed -E 's/^npm (error|ERR!) //' || true)"
+    NPM_WHY="${last:-npm 退出但未给出原因}"
+  fi
+}
+
+npm_install() { # dir label
+  local dir="$1" label="$2" sub=install out n
+  [ -f "$dir/package-lock.json" ] && sub=ci
+  out="$(mktemp)"
+  for n in 1 2; do
+    if (cd "$dir" && npm_cmd "$sub" --include=dev) 2>&1 | tee "$out"; then rm -f "$out"; return 0; fi
+    explain_npm_error "$out" "$dir/package-lock.json"
+    if [ "$NPM_TRANSIENT" = 1 ] && [ "$n" = 1 ]; then warn "$label依赖安装失败（$NPM_WHY），10 秒后重试"; sleep 10; continue; fi
+    break
+  done
+  rm -f "$out"
+  die "$label依赖安装失败：$NPM_WHY"
 }
 
 find_system_chrome() {
@@ -760,15 +844,13 @@ fetch_source() {
 build_release() { # dir
   local dir="$1"
   log "安装后端依赖并编译"
-  ( cd "$dir/server"
-    if [ -f package-lock.json ]; then npm_cmd ci --include=dev; else npm_cmd install --include=dev; fi
-    "$NODE_BIN" node_modules/typescript/bin/tsc -p . || "$NODE_BIN" node_modules/.bin/tsc -p .
-    npm_cmd prune --omit=dev ) || die "后端构建失败"
+  npm_install "$dir/server" 后端
+  (cd "$dir/server" && "$NODE_BIN" node_modules/typescript/bin/tsc -p .) || die "后端编译失败（TypeScript 报错见上方）"
+  (cd "$dir/server" && npm_cmd prune --omit=dev) || die "后端清理开发依赖失败"
   log "安装前端依赖并构建"
-  ( cd "$dir/web"
-    if [ -f package-lock.json ]; then npm_cmd ci --include=dev; else npm_cmd install --include=dev; fi
-    PATH="$(dirname "$NODE_BIN"):$PATH" npm_cmd run build
-    rm -rf node_modules ) || die "前端构建失败"
+  npm_install "$dir/web" 前端
+  (cd "$dir/web" && PATH="$(dirname "$NODE_BIN"):$PATH" npm_cmd run build) || die "前端构建失败（报错见上方）"
+  rm -rf "$dir/web/node_modules"
   [ -f "$dir/server/dist/main.js" ] && [ -f "$dir/web/dist/index.html" ] || die "构建产物缺失"
   cat > "$dir/VERSION.json" <<EOF
 {"version":"$(json_escape "$SRC_VERSION")","commit":"$(json_escape "$SRC_COMMIT")","source":"$(json_escape "${OPT_FROM:+local}${OPT_FROM:-$UPDATE_SOURCE}")","ref":"$(json_escape "$SRC_REF")","builtAt":"$(date -u +%FT%TZ)"}
