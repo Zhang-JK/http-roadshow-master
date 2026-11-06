@@ -1,10 +1,13 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode, Element } from 'domhandler';
 import { customAlphabet } from 'nanoid';
+import { ADDITIONS_CSS, appendCss, cssFiles, nameFiles, readmeBody } from './files.js';
 
 export interface DeckPage {
   id: string;
   html: string;
+  /** Source file of the page, e.g. pages/cover.html. */
+  file?: string;
 }
 
 export interface DeckDoc {
@@ -12,8 +15,11 @@ export interface DeckDoc {
   width: number;
   height: number;
   head: string;
+  /** All style files, separated by file markers (see files.ts). */
   css: string;
   pages: DeckPage[];
+  /** README.md: the user's request, style guide and page plan; read before every later edit. */
+  readme?: string;
 }
 
 export interface ElementInfo {
@@ -29,6 +35,9 @@ export interface DiffSummary {
   pagesRemoved: string[];
   pagesChanged: number[];
   cssChanged: boolean;
+  readmeChanged?: boolean;
+  /** Style files added, changed or removed. */
+  stylesChanged?: string[];
   elementsChanged: { eid: string; page: number; tag: string; text: string }[];
   elementsAdded: { eid: string; page: number; tag: string; text: string }[];
   elementsRemoved: { eid: string; tag: string; text: string }[];
@@ -103,9 +112,9 @@ export function assignIds(doc: DeckDoc): DeckDoc {
     const sectionEl = section.get(0) as Element;
     // The section itself is the page; it gets an eid too so it can be selected as "whole page background".
     visit(sectionEl, false);
-    return { id: pid, html: $.html(section) };
+    return { id: pid, html: $.html(section), file: page.file };
   });
-  return { ...doc, pages };
+  return { ...doc, pages: nameFiles(pages) };
 }
 
 export function extractHtmlBlock(text: string): string {
@@ -226,7 +235,7 @@ export function assembleHtml(doc: DeckDoc, opts: AssembleOptions = {}): string {
 ${doc.head}
 <style>${BASE_CSS(doc.width, doc.height)}</style>
 <style>
-${doc.css}
+${hoistImports(doc.css)}
 </style>
 ${opts.extraHead ?? ''}
 </head>
@@ -238,6 +247,16 @@ ${opts.extraBody ?? ''}
 </html>`;
   if (opts.assetResolver) out = opts.assetResolver(out);
   return out;
+}
+
+/** @import / @charset are only valid at the top of a stylesheet; style files are concatenated. */
+export function hoistImports(css: string): string {
+  const imports: string[] = [];
+  const rest = css.replace(/^[ \t]*@(?:import|charset)\b[^;]*;[ \t]*$/gim, (m) => {
+    if (!/^\s*@charset/i.test(m)) imports.push(m.trim());
+    return '';
+  });
+  return imports.length ? `${imports.join('\n')}\n${rest}` : css;
 }
 
 export function escapeHtml(s: string): string {
@@ -300,6 +319,15 @@ export function diffDocs(before: DeckDoc | null, after: DeckDoc): DiffSummary {
     return summary;
   }
   summary.cssChanged = before.css.trim() !== after.css.trim() || before.head.trim() !== after.head.trim();
+  summary.readmeChanged = readmeBody(before.readme ?? '') !== readmeBody(after.readme ?? '');
+  if (summary.cssChanged) {
+    const old = new Map(cssFiles(before.css).map((f) => [f.path, f.css.trim()]));
+    const now = cssFiles(after.css);
+    summary.stylesChanged = [
+      ...now.filter((f) => old.get(f.path) !== f.css.trim()).map((f) => f.path),
+      ...[...old.keys()].filter((path) => !now.some((f) => f.path === path)),
+    ];
+  }
   const beforePages = new Map(before.pages.map((p) => [p.id, p.html]));
   const afterIds = new Set(after.pages.map((p) => p.id));
   after.pages.forEach((p, i) => {
@@ -377,10 +405,10 @@ export function replacePage(doc: DeckDoc, pageId: string, newPages: DeckPage[], 
     } else {
       s.removeAttr('data-page-id');
     }
-    return { id: i === 0 ? pageId : '', html: $.html(s) };
+    return { id: i === 0 ? pageId : '', html: $.html(s), file: i === 0 ? doc.pages[idx].file : p.file };
   });
   const pages = [...doc.pages.slice(0, idx), ...fixed, ...doc.pages.slice(idx + 1)];
-  const css = extraCss ? `${doc.css}\n/* 追加样式 */\n${extraCss}` : doc.css;
+  const css = extraCss.trim() ? appendCss(doc.css, ADDITIONS_CSS, extraCss) : doc.css;
   return assignIds({ ...doc, pages, css });
 }
 

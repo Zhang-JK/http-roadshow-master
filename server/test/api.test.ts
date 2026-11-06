@@ -194,16 +194,25 @@ describe('templates, decks, edits, history and export', () => {
     templateId = r.json.project.id;
     const job = await waitJob(r.json.job.id);
     expect(job.status).toBe('done');
-    const call = mock.calls.at(-1)!;
+    const call = planCall();
     expect(call.stream).toBe(true);
     expect(call.text).toContain('深色科技');
     expect(call.text).toContain('1920×1080');
     expect(call.images[0]).toMatch(/^data:image\/png;base64,/);
+    // The pages are written in a second call that works from the README and the styles.
+    const pages = mock.calls.at(-1)!;
+    expect(pages.text).toContain('【本批任务】');
+    expect(pages.text).toContain('MOCK-README-NEED');
+    expect(pages.text).toContain('<file path="styles/theme.css">');
     const p = await req('GET', `/api/projects/${templateId}`, adminCookie);
     expect(p.json.project).toMatchObject({ status: 'ready', versionNo: 1, pageCount: 3, width: 1920, height: 1080, createdBy: '爱丽丝' });
     expect(p.json.assets).toHaveLength(1);
     expect(p.json.project.doc.title).toBe('科技蓝模板');
+    expect(p.json.project.doc.readme).toContain('## 页面规划');
+    expect(p.json.project.doc.pages.map((x: any) => x.file)).toEqual(['pages/cover.html', 'pages/content-1.html', 'pages/content-2.html']);
   });
+
+  const planCall = () => [...mock.calls].reverse().find((c) => c.text.includes('本次只输出 README.md 与样式文件'))!;
 
   it('supports other aspect ratios', async () => {
     const r = await req('POST', '/api/projects', adminCookie, { type: 'template', name: '竖版', style: '简约', aspect: '9:16' });
@@ -225,11 +234,15 @@ describe('templates, decks, edits, history and export', () => {
     expect(r.status).toBe(200);
     deckId = r.json.project.id;
     expect((await waitJob(r.json.job.id)).status).toBe('done');
-    const call = mock.calls.at(-1)!;
+    const call = planCall();
     expect(call.text).toContain('所选模板');
-    expect(call.text).toContain('第1页标题'); // template html is embedded
+    expect(call.text).toContain('模板的样式文件已由系统复制到本项目');
     expect(call.text).toContain('2025,1200'); // csv text extracted
     expect(call.text).toMatch(/\/api\/assets\/[A-Za-z0-9_-]{21}/);
+    const pages = mock.calls.at(-1)!;
+    expect(pages.text).toContain('【模板版式页');
+    expect(pages.text).toContain('第1页标题'); // template html is embedded
+    expect(pages.text).toContain('公司简介：我们做AI路演工具');
     const p = await req('GET', `/api/projects/${deckId}`, adminCookie);
     expect(p.json.project.templateId).toBe(templateId);
     expect(p.json.template.name).toBe('科技蓝模板');

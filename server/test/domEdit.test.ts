@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { assignIds, type DeckDoc } from '../src/deck.js';
 import { editCss, editInPage, findCssRules, findInPage } from '../src/domEdit.js';
 import { createDraftTools, Draft } from '../src/draft.js';
+import { cssFiles } from '../src/files.js';
 
 const PAGE = `<section class="slide" data-page-id="p1" data-eid="e0">
 <h1 class="title" data-eid="e1">年度回顾</h1>
@@ -104,7 +105,7 @@ describe('structured draft tools', () => {
     const eid = draft.view().pages[1].html.match(/<h1[^>]*data-eid="([^"]+)"/)![1];
     expect(await run('edit_elements', { eids: [eid], text: '市场机会' })).toContain('第 2 页');
     expect(await run('replace_in_draft', { old_text: 'ACME', new_text: 'Acme 公司', all_pages: true })).toContain('已替换 2 处');
-    expect(await run('edit_css', { selector: '.title', set: { color: '#111827' } })).toContain('已修改规则：.title{color:#111827}');
+    expect(await run('edit_css', { selector: '.title', set: { color: '#111827' } })).toContain('已修改规则（styles/main.css）：.title{color:#111827}');
     expect(await run('find_css', { query: 'num' })).toContain('.num{font-size:40px}');
     expect(await run('duplicate_page', { page: 1 })).toContain('现共 4 页');
     expect(await run('move_page', { page: 4, to: 1 })).toContain('移到第 1 页');
@@ -113,7 +114,7 @@ describe('structured draft tools', () => {
     expect(out.pages.map((p) => p.html.replace(/<[^>]+>/g, ''))).toEqual(['封面', '第3页 Acme 公司30%', '第1页 Acme 公司10%', '第1页 Acme 公司10%', '市场机会20%']);
     expect(new Set(out.pages.map((p) => p.id)).size).toBe(5);
     expect(out.pages[2].html).toContain('style="color:green"');
-    expect(out.css).toBe('.title{color:#111827}\n.num{font-size:40px}');
+    expect(cssFiles(out.css)).toEqual([{ path: 'styles/main.css', css: '.title{color:#111827}\n.num{font-size:40px}' }]);
   });
 
   it('page edits keep the other pages and the shared CSS read-only', async () => {
@@ -126,7 +127,7 @@ describe('structured draft tools', () => {
     expect(await run('edit_elements', { selector: 'h1', text: '只改第二页' })).toContain('已修改 1 个元素（第 2 页）');
     expect(await run('edit_css', { selector: '.title', set: { color: 'blue' } })).toContain('共享样式');
     expect(await run('edit_css', { selector: '.p2-note', set: { color: 'blue' } })).toContain('已新建规则');
-    expect(await run('find_css', { query: 'title' })).toContain('［共享，只读］.title{color:red}');
+    expect(await run('find_css', { query: 'title' })).toContain('［styles/main.css，共享只读］.title{color:red}');
     expect(await run('insert_page', { after: 2, html: '<section class="slide"><h1>2b</h1></section>' })).toContain('现共 4 页');
     expect(await run('insert_page', { after: 4, html: '<section class="slide"><h1>x</h1></section>' })).toContain('只能在第 2–3 页之后');
     const out = draft.result(doc);

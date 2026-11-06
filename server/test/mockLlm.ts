@@ -48,6 +48,45 @@ ${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i =
 </body></html>
 \`\`\``;
 
+const PAGE = (n: number, layout: string, broken: boolean) =>
+  `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}</section>`;
+
+const README_DOC = (title: string, n: number, notes: string) => `# ${title}
+
+## 需求
+- 名称：${title}
+- MOCK-README-NEED
+- 其他要求：${notes}
+
+## 风格约定
+- 主色 --brand: #1e40af；标题 .title 96px，正文 .body 36px
+
+## 页面规划
+${Array.from({ length: n }, (_, i) => `${i + 1}. pages/${i === 0 ? 'cover' : `content-${i}`}.html ｜ ${i === 0 ? 'cover' : 'content'} ｜ 第${i + 1}页标题 ｜ 要点${i + 1}`).join('\n')}
+`;
+
+/** Plan step of a staged generation: README with the page plan and two style files. */
+const PLAN_REPLY = (title: string, n: number, notes = '') => `<file path="README.md">
+${README_DOC(title, n, notes)}
+</file>
+
+<file path="styles/theme.css">
+:root{--brand:#1e40af}
+</file>
+
+<file path="styles/components.css">
+.title{font-size:96px;color:var(--brand)}.body{font-size:36px}
+</file>`;
+
+/** Page step: the files listed under 【本批任务】. */
+function pagesReply(text: string, broken: boolean, stray: boolean): string {
+  const task = text.slice(text.indexOf('【本批任务】'));
+  const lines = [...task.matchAll(/^- 第 (\d+) 页：(pages\/[\w.-]+\.html) ｜ (\w+)/gm)];
+  return lines
+    .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken)}\n</file>`)
+    .join('\n\n');
+}
+
 /**
  * Scripted tool use: round 1 lists the files; round 2 inspects the first presentation (page image,
  * archive XML), searches for NEEDLE-42 and probes an unknown file and a non-existent write tool.
@@ -69,7 +108,7 @@ function mockToolRound(toolMsgs: { content: string }[]): { name: string; args: R
       { name: 'read_archive_entry', args: { file_id: deck?.file_id, path: 'ppt/slides/slide1.xml', max_chars: 3000 } },
       ...(html ? [{ name: 'read_raw', args: { file_id: html.file_id, max_chars: 2000 } }] : []),
       { name: 'read_text', args: { file_id: 'F99' } },
-      { name: 'write_file', args: { file_id: deck?.file_id, content: 'x' } },
+      { name: 'overwrite_reference', args: { file_id: deck?.file_id, content: 'x' } },
     ];
   }
   return null;
@@ -96,7 +135,7 @@ function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args:
   return null;
 }
 
-const EDIT_TOOLS = new Set(['edit_elements', 'edit_css', 'replace_in_draft', 'rewrite_page', 'insert_page', 'delete_page', 'duplicate_page', 'move_page']);
+const EDIT_TOOLS = new Set(['write_file', 'delete_file', 'edit_elements', 'edit_css', 'replace_in_draft', 'rewrite_page', 'insert_page', 'delete_page', 'duplicate_page', 'move_page']);
 
 /**
  * Scripted tool-first edit (the edit prompt has 【修改方式】): one round of structured edits, the same
@@ -184,6 +223,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
     const toolMsgs = body.messages.filter((m: any) => m.role === 'tool');
     const canCall = body.tools && body.tool_choice !== 'none';
     const toolEdit = !review && text.includes('【修改方式】') && !/FULL_REWRITE|NO_CHANGE/.test(text);
+    const planStep = text.includes('本次只输出 README.md 与样式文件');
+    const pageStep = text.includes('【本批任务】');
     const toolCalls = !canCall
       ? null
       : review
@@ -192,7 +233,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
           : null
         : toolEdit
           ? ((text.includes('USE_TOOLS') ? mockToolRound(toolMsgs) : null) ?? mockEditRound(text, body.messages))
-          : text.includes('USE_TOOLS')
+          : text.includes('USE_TOOLS') && !pageStep
             ? mockToolRound(toolMsgs)
             : null;
     if (toolCalls) {
@@ -201,7 +242,27 @@ export async function startMockLlm(opts: MockOptions = {}) {
     }
 
     let reply: string;
-    if (toolEdit) {
+    let finish = 'stop';
+    const title = (text.match(/【(?:模板|材料)名称】(.*)/)?.[1] ?? 'Mock').trim();
+    const broken = text.includes('FIX_DRAFT') || text.includes('BROKEN_ONLY');
+    const lastUser = [...body.messages].reverse().find((m: any) => m.role === 'user');
+    const continuing = typeof lastUser?.content === 'string' && lastUser.content.includes('你上一条回复没有完成');
+    if (planStep && !continuing && text.includes('TRUNCATE_PLAN')) {
+      reply = PLAN_REPLY(title, 3).slice(0, 120);
+      finish = 'length';
+    } else if (planStep) {
+      reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, (text.match(/【其他要求】(.*)/)?.[1] ?? '').trim());
+    } else if (pageStep) {
+      reply = pagesReply(text, broken, text.includes('STRAY_NAMES'));
+      if (text.includes('TRUNCATE_PAGES') && text.includes('（无，本批是第一批）')) {
+        const second = reply.indexOf('<file', 10);
+        reply = second > 0 ? reply.slice(0, second + 60) : reply.slice(0, 80);
+        finish = 'length';
+      }
+    } else if (typeof lastUser?.content === 'string' && lastUser.content.includes('请从中断处继续输出')) {
+      const full = FULL_DOC(title, 3, broken);
+      reply = full.slice(full.length / 2);
+    } else if (toolEdit) {
       reply = '已按要求修改。';
     } else if (text.includes('NO_CHANGE')) {
       reply = '我认为不需要修改。';
@@ -211,7 +272,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
       const px = images[0] ? firstPixel(images[0]) : null;
       reply = body.model.includes('textonly') || !px ? 'I cannot see images' : colourName(px);
     } else if (text.includes('只输出修改后的第')) {
-      const m = text.match(/【第 (\d+) 页当前 HTML】\n```html\n([\s\S]*?)\n```/);
+      const m = text.match(/【第 (\d+) 页当前 HTML[^】]*】\n```html\n([\s\S]*?)\n```/);
       let page = m ? m[2] : '<section class="slide"><h1>?</h1></section>';
       const target = text.match(/data-eid="(e[0-9a-z]{8})"，/);
       if (target) {
@@ -221,12 +282,15 @@ export async function startMockLlm(opts: MockOptions = {}) {
       }
       if (text.includes('FIX_DRAFT')) page = page.replace(/<\/section>\s*$/, `${OVERFLOW}</section>`);
       reply = `\`\`\`html\n<style>.added{color:red}</style>\n${page}\n\`\`\``;
-    } else if (text.includes('请输出修改后的【完整 HTML 文档】')) {
-      const m = text.match(/【当前完整 HTML】\n```html\n([\s\S]*?)\n```/);
-      reply = `\`\`\`html\n${(m ? m[1] : '').replace('--brand:#1e40af', '--brand:#111827')}\n\`\`\``;
+    } else if (text.includes('只输出需要修改或新增的文件')) {
+      const css = [...text.matchAll(/<file path="(styles\/[\w.-]+\.css)">\n([\s\S]*?)\n<\/file>/g)].find((m) => m[2].includes('--brand'));
+      reply = css ? `<file path="${css[1]}">\n${css[2].replace('--brand:#1e40af', '--brand:#111827')}\n</file>` : '（没有找到样式文件）';
     } else {
-      const title = text.match(/【(?:模板|材料)名称】(.*)/)?.[1] ?? 'Mock';
-      reply = FULL_DOC(title.trim(), 3, text.includes('FIX_DRAFT') || text.includes('BROKEN_ONLY'));
+      const full = FULL_DOC(title, 3, broken);
+      if (text.includes('TRUNCATE_SINGLE')) {
+        reply = full.slice(0, full.length / 2);
+        finish = 'length';
+      } else reply = full;
     }
     if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
     const usage = { prompt_tokens: Math.round(text.length / 2), completion_tokens: Math.round(reply.length / 2), cost: 0.0001 };
@@ -234,11 +298,11 @@ export async function startMockLlm(opts: MockOptions = {}) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const chunks = reply.match(/[\s\S]{1,200}/g) ?? [];
       for (const c of chunks) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }], usage })}\n\n`);
       res.end('data: [DONE]\n\n');
     } else {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content: reply }, finish_reason: 'stop' }], usage }));
+      res.end(JSON.stringify({ choices: [{ message: { content: reply }, finish_reason: finish }], usage }));
     }
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));

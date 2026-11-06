@@ -106,6 +106,10 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE jobs ADD COLUMN review TEXT;
   `,
+  // The old default output limit (32000) was too small for long decks; saved copies of it move to the new default.
+  `
+  UPDATE settings SET value = '65536' WHERE key = 'maxTokens' AND value = '32000';
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {
@@ -142,7 +146,10 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   attachScreenshots: true,
   selfCheck: true,
   selfCheckRounds: 10,
-  maxTokens: 32000,
+  maxTokens: 65536,
+  contextTokens: 200000,
+  generateMode: 'files',
+  genPagesPerCall: 3,
   temperature: 0.7,
   editMode: 'tools',
   editToolRounds: 12,

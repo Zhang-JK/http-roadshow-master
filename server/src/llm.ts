@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
+import { compactHistory, DEFAULT_CONTEXT_TOKENS, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
 
 export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
 export const DEFAULT_MAX_CALL_MINUTES = 120;
@@ -52,6 +53,8 @@ export interface ChatOptions {
   toolChoice?: 'auto' | 'none';
   /** Treat an empty reply as a valid answer instead of an endpoint failure. */
   allowEmpty?: boolean;
+  /** The model's context window; max_tokens is reduced (and long input compacted) to fit it. */
+  contextTokens?: number;
 }
 
 export interface ChatResult {
@@ -69,6 +72,7 @@ export class LlmError extends Error {
   constructor(
     message: string,
     public retryable: boolean,
+    public status?: number,
   ) {
     super(message);
   }
@@ -179,7 +183,7 @@ export async function chatWithEndpoint(
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       const retryable = res.status === 429 || res.status >= 500 || res.status === 408;
-      throw new LlmError(`接入点 ${ep.name} 返回 HTTP ${res.status}: ${text.slice(0, 500)}`, retryable);
+      throw new LlmError(`接入点 ${ep.name} 返回 HTTP ${res.status}: ${text.slice(0, 500)}`, retryable, res.status);
     }
     const result: ChatResult = { text: '', endpointId: ep.id, model: ep.model };
     if (!stream) {
@@ -266,12 +270,19 @@ async function readStream(ep: Endpoint, res: Response, result: ChatResult, opts:
   return result;
 }
 
-export function callTimeouts(db: DB): Pick<ChatOptions, 'idleTimeoutMs' | 'timeoutMs'> {
+export function callTimeouts(db: DB): Pick<ChatOptions, 'idleTimeoutMs' | 'timeoutMs' | 'contextTokens'> {
   const s = getSettings(db);
   return {
     idleTimeoutMs: (Number(s.llmIdleTimeoutSec) || DEFAULT_IDLE_TIMEOUT_SEC) * 1000,
     timeoutMs: (Number(s.llmMaxCallMinutes) || DEFAULT_MAX_CALL_MINUTES) * 60_000,
+    contextTokens: Number(s.contextTokens) || DEFAULT_CONTEXT_TOKENS,
   };
+}
+
+/** The endpoint rejected the request as too long for the model (input + max_tokens over the window). */
+export function isContextError(e: unknown): boolean {
+  if (!(e instanceof LlmError) || (e.status !== 400 && e.status !== 413 && e.status !== 422)) return false;
+  return /context|maximum.{0,40}tokens|max_tokens|too long|too large|token limit|exceed|上下文|长度/i.test(e.message);
 }
 
 function applyUsage(result: ChatResult, usage: any) {
@@ -287,15 +298,33 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   const userKey = `rs-user-${userId}`;
   const ranked = rankEndpointsForUser(endpoints, userKey);
   opts = { ...callTimeouts(db), ...opts };
+  const ctx = opts.contextTokens ?? DEFAULT_CONTEXT_TOKENS;
+  const budget = inputBudget(ctx, Math.min(opts.maxTokens ?? MIN_OUTPUT_TOKENS, 16_000));
+  if (requestTokens(messages, opts.tools) > budget) messages = compactHistory(messages, budget, { tools: opts.tools }).messages;
+  const fitted: ChatOptions = { ...opts, maxTokens: fitMaxTokens(ctx, requestTokens(messages, opts.tools), opts.maxTokens) };
   const errors: string[] = [];
   for (const ep of ranked) {
-    try {
-      return await chatWithEndpoint(ep, messages, userKey, opts);
-    } catch (e) {
-      errors.push((e as Error).message);
-      if (e instanceof LlmError && !e.retryable) break;
-      if (opts.signal?.aborted) break;
+    let o = fitted;
+    let msgs = messages;
+    let err: unknown;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await chatWithEndpoint(ep, msgs, userKey, o);
+      } catch (e) {
+        // Too long for this endpoint's model: ask for less output, and shrink the input as well.
+        if (isContextError(e) && attempt < 3) {
+          const out = Math.max(MIN_OUTPUT_TOKENS, Math.floor((o.maxTokens ?? 32_000) / 2));
+          msgs = compactHistory(msgs, Math.floor(requestTokens(msgs, o.tools) * 0.8), { tools: o.tools }).messages;
+          o = { ...o, maxTokens: out };
+          continue;
+        }
+        err = e;
+        break;
+      }
     }
+    errors.push((err as Error).message);
+    if (err instanceof LlmError && !err.retryable) break;
+    if (opts.signal?.aborted) break;
   }
   throw new LlmError(errors.join('\n'), false);
 }
@@ -311,6 +340,8 @@ export interface ToolLoopOptions extends ChatOptions {
   allowEmptyFinal?: boolean;
   /** Called with every round's result, so usage is accounted even if a later round fails. */
   onRound?: (r: ChatResult) => void;
+  /** Called when the conversation had to be compacted to fit the context window. */
+  onCompact?: (steps: string[]) => void;
 }
 
 export interface ToolLoopResult extends ChatResult {
@@ -326,8 +357,11 @@ export interface ToolLoopResult extends ChatResult {
  * The last round disables tools so the model has to answer.
  */
 export async function chatWithTools(db: DB, userId: number, messages: ChatMessage[], opts: ToolLoopOptions): Promise<ToolLoopResult> {
-  const { tools, execute, onTool, maxRounds = 10, maxImages = 24, allowEmptyFinal, onRound, ...chatOpts } = opts;
-  const history = [...messages];
+  const { tools, execute, onTool, maxRounds = 10, maxImages = 24, allowEmptyFinal, onRound, onCompact, ...chatOpts } = opts;
+  let history = [...messages];
+  const ctx = chatOpts.contextTokens ?? callTimeouts(db).contextTokens ?? DEFAULT_CONTEXT_TOKENS;
+  // Room kept for each reply: tool calls are short, but a rewritten page or file can be long.
+  const budget = inputBudget(ctx, Math.min(chatOpts.maxTokens ?? 24_000, 24_000));
   const total = { promptTokens: 0, completionTokens: 0, cost: 0, hasCost: false };
   let imagesLeft = maxImages;
   let toolCallCount = 0;
@@ -336,7 +370,12 @@ export async function chatWithTools(db: DB, userId: number, messages: ChatMessag
     if (last && round > 0) {
       history.push({ role: 'user', content: '（工具调用次数已用完：不要再调用或模拟调用任何工具，请直接给出最终答复。）' });
     }
-    const r = await chat(db, userId, history, { ...chatOpts, tools, toolChoice: last ? 'none' : 'auto', allowEmpty: allowEmptyFinal });
+    if (requestTokens(history, tools) > budget) {
+      const c = compactHistory(history, budget, { keepHead: messages.length, tools });
+      history = c.messages;
+      onCompact?.(c.steps);
+    }
+    const r = await chat(db, userId, history, { ...chatOpts, contextTokens: ctx, tools, toolChoice: last ? 'none' : 'auto', allowEmpty: allowEmptyFinal });
     onRound?.(r);
     total.promptTokens += r.promptTokens ?? 0;
     total.completionTokens += r.completionTokens ?? 0;
@@ -367,7 +406,12 @@ export async function chatWithTools(db: DB, userId: number, messages: ChatMessag
         onTool?.(tc.function.name, args, round + 1);
         out = await execute(tc.function.name, args);
       } catch (e) {
-        out = { content: `错误：工具参数无法解析（${(e as Error).message}），请传入合法的 JSON 参数` };
+        out = {
+          content:
+            r.finishReason === 'length'
+              ? '错误：回复达到「最大输出 tokens」上限被截断，这个工具调用的参数不完整，未执行。请把修改拆成更小的步骤（例如每次只写一个文件或一页，或用 edit_elements / replace_in_draft 做局部修改）。'
+              : `错误：工具参数无法解析（${(e as Error).message}），请传入合法的 JSON 参数`,
+        };
       }
       let content = out.content;
       for (const img of out.images ?? []) {

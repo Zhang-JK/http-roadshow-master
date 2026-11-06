@@ -162,13 +162,14 @@ describe('self-check agent loop', () => {
     expect(first.text).not.toContain('<section class="slide" data-layout'); // the draft HTML is not resent
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
       [
-        'check_layout', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
-        'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page',
+        'check_layout', 'delete_file', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
+        'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page', 'write_file',
       ],
     );
 
     const results = toolResults(calls[2]);
-    expect(results[1]).toContain('第 2 页［可修改］');
+    expect(results[1]).toContain('pages/content-1.html — 第 2 页［可修改］');
+    expect(results[1]).toContain('README.md');
     expect(results[2]).toContain('已渲染第 2 页');
     expect(results[3]).toContain('left:1800px');
     expect(results[4]).toContain('已在草稿第 2 页替换 1 处');
@@ -178,7 +179,7 @@ describe('self-check agent loop', () => {
 
     expect(job.review).toMatchObject({ before: { errors: 1 }, after: { errors: 0 }, passes: 1, edits: 1, toolCalls: 6 });
     expect(job.review.summary).toContain('已修复');
-    expect(job.cost).toBeCloseTo(0.0004, 6); // the draft plus three review rounds
+    expect(job.cost).toBeCloseTo(0.0005, 6); // the plan, one page batch and three review rounds
     expect(job.promptTokens).toBeGreaterThan(calls.reduce((n, c) => n + c.text.length / 2, 0) - 10);
     const doc = savedDoc(r.json.project.id);
     expect(doc.pages).toHaveLength(3);

@@ -92,6 +92,7 @@ afterAll(async () => {
 describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
   let templateId = '';
   let deckId = '';
+  const planCall = () => [...mock.calls].reverse().find((c) => c.text.includes('本次只输出 README.md 与样式文件'))!;
 
   it('slides-to-images exports every slide of a PPTX and of a PDF', async () => {
     const { exportSlides } = await import('../src/assets.js');
@@ -118,7 +119,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     expect(r.statusCode).toBe(200);
     templateId = r.json().project.id;
     expect((await waitJob(r.json().job.id)).status).toBe('done');
-    const call = mock.calls.at(-1)!;
+    const call = planCall();
     expect(call.images.filter((i) => i.startsWith('data:image/jpeg'))).toHaveLength(3);
     expect(call.images.filter((i) => i.startsWith('data:image/png'))).toHaveLength(2);
     expect(call.text).toContain('「参考.pptx」第 1 页');
@@ -145,9 +146,11 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const r = await app.inject({ method: 'POST', url: '/api/projects', payload: mp.payload, headers: mp.headers });
     deckId = r.json().project.id;
     expect((await waitJob(r.json().job.id)).status).toBe('done');
-    const call = mock.calls.at(-1)!;
+    const call = planCall();
     expect(call.images.filter((i) => i.startsWith('data:image/jpeg'))).toHaveLength(3);
     expect(call.text).toContain('视觉样式仍以所选模板为准');
+    // Page batches get a smaller share of the slide images.
+    expect(mock.calls.at(-1)!.images.filter((i) => i.startsWith('data:image/jpeg')).length).toBeLessThanOrEqual(4);
   });
 
   it('an edit can carry its own reference attachments', async () => {
@@ -208,7 +211,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const job = await waitJob(r.json().job.id);
     expect(job.status).toBe('done');
     const calls = mock.calls.slice(before);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4); // three rounds for the plan (two of them with tools), then one page batch
 
     const first = calls[0];
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
@@ -233,11 +236,11 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     expect(toolMsgs[3]).toContain('参考封面 ALPHA');
     expect(toolMsgs[4]).toContain('raw-marker');
     expect(toolMsgs[5]).toContain('没有编号为 F99 的文件');
-    expect(toolMsgs[6]).toContain('没有名为 write_file 的工具');
+    expect(toolMsgs[6]).toContain('没有名为 overwrite_reference 的工具');
     const imageMsg = calls[2].body.messages.find((m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.text?.includes('工具调用返回的图片'));
     expect(imageMsg.content.some((p: any) => p.type === 'image_url' && p.image_url.url.startsWith('data:image/jpeg'))).toBe(true);
     expect(calls[2].body.tool_choice).toBe('auto');
-    expect(job.cost).toBeCloseTo(0.0004, 6); // three draft rounds plus the self-check reply
+    expect(job.cost).toBeCloseTo(0.0005, 6); // three plan rounds, one page batch and the self-check reply
   });
 
   it('deleting a PPT asset removes its slide images', async () => {
