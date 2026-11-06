@@ -103,8 +103,9 @@ export function SystemPage() {
           const fresh = await load();
           if (r.status.state === 'success') {
             const changed = fresh.version.version !== startVersion.current;
-            toast(changed ? `更新完成，当前版本 ${fresh.version.version}` : r.status.message || '已是最新版本', 'success');
+            toast(changed ? `更新完成，当前版本 ${fresh.version.version}，即将刷新页面` : r.status.message || '已是最新版本', 'success');
             setCheck(null);
+            if (changed) setTimeout(() => location.reload(), 2500);
           } else {
             toast(`${STATE_LABELS[r.status.state]}：${r.status.message}`, 'error');
           }
