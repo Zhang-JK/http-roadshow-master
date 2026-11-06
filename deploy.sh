@@ -199,7 +199,10 @@ EOF
       echo "NODE_USE_ENV_PROXY=1"
     fi
     if [ "$TLS_INSECURE" = 1 ]; then echo "NODE_TLS_REJECT_UNAUTHORIZED=0"
-    elif [ -n "$CA_CERT" ]; then printf 'NODE_EXTRA_CA_CERTS=%q\n' "$CA_CERT"; fi
+    else
+      local nca; nca="$(node_ca_file || true)"
+      [ -n "$nca" ] && printf 'NODE_EXTRA_CA_CERTS=%q\n' "$nca"
+    fi
   } >> "$APP_ENV.tmp"
   [ -f "$SHARED/extra.env" ] && cat "$SHARED/extra.env" >> "$APP_ENV.tmp"
   mv -f "$APP_ENV.tmp" "$APP_ENV"
@@ -314,6 +317,14 @@ system_ca_bundle() {
   return 1
 }
 
+# Node.js trusts only its built-in roots, not the system store, where IT often installs the company
+# proxy's root certificate (curl then works, but Node.js downloads fail with "self-signed certificate").
+node_ca_file() {
+  if [ -n "$CA_CERT" ] && [ -f "$CERT_DIR/ca-bundle.pem" ]; then echo "$CERT_DIR/ca-bundle.pem"
+  elif [ -n "$CA_CERT" ] && [ -f "$CA_CERT" ]; then echo "$CA_CERT"
+  else system_ca_bundle; fi
+}
+
 build_ca_bundle() { # system roots + the extra CA: curl, git and npm replace (not extend) their trust store
   local sys; sys="$(system_ca_bundle || true)"
   { [ -n "$sys" ] && cat "$sys"; echo; cat "$CA_CERT"; } > "$CERT_DIR/ca-bundle.pem"
@@ -397,7 +408,7 @@ apply_network() {
     APT_NET+=(-o "Acquire::http::Proxy=$PROXY_URL" -o "Acquire::https::Proxy=$PROXY_URL")
     DNF_NET+=("--setopt=proxy=$PROXY_URL")
   fi
-  unset GIT_SSL_NO_VERIFY GIT_SSL_CAINFO npm_config_strict_ssl npm_config_cafile
+  unset GIT_SSL_NO_VERIFY GIT_SSL_CAINFO npm_config_strict_ssl npm_config_cafile NODE_EXTRA_CA_CERTS
   if [ "$TLS_INSECURE" = 1 ]; then
     CURL_TLS=(-k)
     export GIT_SSL_NO_VERIFY=true npm_config_strict_ssl=false
@@ -407,9 +418,13 @@ apply_network() {
     [ -f "$CERT_DIR/ca-bundle.pem" ] || build_ca_bundle 2>/dev/null || true
     local b="$CERT_DIR/ca-bundle.pem"
     CURL_TLS=(--cacert "$b")
-    export GIT_SSL_CAINFO="$b" npm_config_cafile="$b" NODE_EXTRA_CA_CERTS="$CA_CERT"
+    export GIT_SSL_CAINFO="$b" npm_config_cafile="$b"
     APT_NET+=(-o "Acquire::https::CAInfo=$b")
     DNF_NET+=("--setopt=sslcacert=$b")
+  fi
+  if [ "$TLS_INSECURE" != 1 ]; then
+    local nca; nca="$(node_ca_file || true)"
+    [ -n "$nca" ] && export NODE_EXTRA_CA_CERTS="$nca"
   fi
 }
 
@@ -731,10 +746,19 @@ ensure_browser() { # release dir
   if find_system_chrome >/dev/null; then ok "使用系统浏览器 $(find_system_chrome)（用于 PDF/PPT 导出）"; return 0; fi
   local cli="$1/server/node_modules/playwright-core/cli.js"
   export PLAYWRIGHT_BROWSERS_PATH="$SHARED/ms-playwright"
-  if compgen -G "$PLAYWRIGHT_BROWSERS_PATH/chromium*" >/dev/null; then return 0; fi
-  log "下载 Chromium（用于 PDF/PPT 导出）"
+  # Playwright skips browsers that are completely installed, and fetches the build a new version needs.
+  log "检查 / 下载 Chromium（用于 PDF/PPT 导出）"
   if is_root && [ "$(detect_pkg)" = apt ]; then "$NODE_BIN" "$cli" install-deps chromium >/dev/null 2>&1 || warn "Chromium 系统依赖安装失败"; fi
-  ( [ "$TLS_INSECURE" = 1 ] && export NODE_TLS_REJECT_UNAUTHORIZED=0; "$NODE_BIN" "$cli" install chromium >/dev/null ) || warn "Chromium 下载失败，PDF/PPT 导出将不可用（可设置 CHROME_PATH 指向已有浏览器）"
+  local err; err="$(mktemp)"
+  if ( [ "$TLS_INSECURE" = 1 ] && export NODE_TLS_REJECT_UNAUTHORIZED=0; "$NODE_BIN" "$cli" install chromium >/dev/null 2>"$err" ); then
+    rm -f "$err"; return 0
+  fi
+  grep -v '^[[:space:]]*$' "$err" | tail -n 8 | sed 's/^/    /' >&2
+  if grep -qiE 'self[- ]signed|certificate|UNABLE_TO_GET_ISSUER|unable to verify' "$err"; then
+    warn "Chromium 下载时 HTTPS 证书校验失败（公司代理重新签名了 HTTPS）：请重新执行并加上 --ca-cert 公司根证书.pem 或 --ca-cert auto；无法获得证书时可用 --insecure"
+  fi
+  rm -f "$err"
+  warn "Chromium 下载失败，PDF/PPT 导出将不可用（可安装系统 Chromium，或设置 CHROME_PATH 指向已有浏览器后执行 restart）"
 }
 
 # ---------------------------------------------------------------- versions & sources

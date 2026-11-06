@@ -109,7 +109,7 @@ sudo bash deploy.sh install --proxy http://proxy.corp:8080 --insecure
 - 不加 `--proxy` 时默认使用 `https_proxy`/`http_proxy` 环境变量（用 `sudo` 运行时也会读取调用者的这两个变量，以及 `no_proxy`）；两者都没有时沿用上次保存的代理（网页一键更新即依赖这一点）；`--proxy none` 表示直连。需要认证的代理写成 `http://用户:密码@proxy:8080`（日志中密码会被隐藏）；`--no-proxy .corp.local,10.0.0.0/8` 指定直连地址（本机总是直连）。
 - 证书会复制到 `shared/certs/`，与系统根证书合并后用于 curl、git、npm、apt/dnf、Node.js 下载与 Chrome 下载。
 - 有些代理只返回服务器证书而不带根证书，此时 `--ca-cert auto` 会尝试按证书中的「颁发者地址」下载；仍失败时会提示改用文件或 `--insecure`。
-- 这些设置保存在 `shared/deploy.conf`，之后的命令行更新和网页一键更新都会沿用，应用本身调用模型接口也走同一代理与证书（`NODE_USE_ENV_PROXY`、`NODE_EXTRA_CA_CERTS`，或 `--insecure` 时的 `NODE_TLS_REJECT_UNAUTHORIZED=0`）。修改时可执行 `sudo roadshow-studio update --force --proxy ... --ca-cert ...`，或用 `--secure` 恢复证书校验。
+- 这些设置保存在 `shared/deploy.conf`，之后的命令行更新和网页一键更新都会沿用，应用本身调用模型接口与下载 Chromium 也走同一代理与证书（`NODE_USE_ENV_PROXY`；`NODE_EXTRA_CA_CERTS` 指向系统根证书库，即使未指定 --ca-cert 也会信任 IT 已安装到系统中的公司根证书；`--insecure` 时为 `NODE_TLS_REJECT_UNAUTHORIZED=0`）。修改时可执行 `sudo roadshow-studio update --force --proxy ... --ca-cert ...`，或用 `--secure` 恢复证书校验。
 
 **目录结构**（`/opt/roadshow-studio`）：`releases/` 各版本、`current` 当前版本、`shared/data` 数据库与素材、`shared/backups` 数据库备份、`shared/logs` 应用与部署日志、`shared/deploy.conf` 部署配置（可修改端口、更新源等后执行 `roadshow-studio restart`）、`shared/extra.env` 额外环境变量（如 `CHROME_PATH`）。
 
