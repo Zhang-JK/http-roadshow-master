@@ -75,6 +75,19 @@ test('admin manages model endpoints and runs connectivity tests', async () => {
   await expect(page.locator('.panel-card').first()).toContainText('admin');
 });
 
+test('generation settings default to staged multi-file output within a 200K context', async () => {
+  await expect(page.locator('[data-testid=generate-mode]')).toHaveValue('files');
+  await expect(page.locator('[data-testid=pages-per-call]')).toHaveValue('3');
+  await expect(page.locator('[data-testid=max-tokens]')).toHaveValue('65536');
+  await expect(page.locator('[data-testid=context-tokens]')).toHaveValue('200000');
+  await page.selectOption('[data-testid=generate-mode]', 'single');
+  await expect(page.locator('[data-testid=pages-per-call]')).toHaveCount(0);
+  await page.selectOption('[data-testid=generate-mode]', 'files');
+  await expect(page.locator('[data-testid=pages-per-call]')).toBeVisible();
+  const s = await page.evaluate(() => fetch('/api/settings').then((r) => r.json()));
+  expect(s.settings.generateMode).toBe('files');
+});
+
 test('system update page shows version and explains dev-mode instances cannot self-update', async () => {
   await page.click('nav >> text=系统更新');
   await expect(page.locator('[data-testid=current-version]')).toContainText(/\d+\.\d+\.\d+/);
@@ -222,6 +235,7 @@ test('export HTML, PDF and PPTX downloads', async () => {
     ['导出 PDF（矢量', 'pdf', '%PDF'],
     ['导出 PDF（图片', 'pdf', '%PDF'],
     ['导出 PPT', 'pptx', 'PK'],
+    ['下载源文件', 'zip', 'PK'],
   ] as const) {
     await page.click('[data-testid=export-btn]');
     const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60_000 }), page.click(`.dropdown button:has-text("${label}")`)]);
@@ -230,6 +244,32 @@ test('export HTML, PDF and PPTX downloads', async () => {
     const head = fs.readFileSync(file).subarray(0, 16).toString('latin1');
     expect(head.startsWith(magic)).toBe(true);
   }
+});
+
+test('files tab shows README, styles and pages; README edits become a version', async () => {
+  await page.click('[data-testid=tab-files]');
+  const items = page.locator('[data-testid=file-item]');
+  await expect(items).toHaveCount(6);
+  await expect(items.nth(0)).toContainText('README.md');
+  await expect(items.nth(1)).toContainText('styles/theme.css');
+  await expect(items.nth(3)).toContainText('pages/cover.html');
+  await expect(page.locator('[data-testid=file-content]')).toContainText('MOCK-README-NEED');
+  await expect(page.locator('[data-testid=file-content]')).toContainText('## 页面规划');
+
+  await items.nth(4).click();
+  await expect(page.locator('[data-testid=file-content]')).toContainText('第2页标题');
+  await page.locator('[data-testid=page-thumb]').first().click();
+  await page.click('button:has-text("定位到此页")');
+  await expect(page.locator('[data-testid=page-indicator]')).toHaveText('第 2 / 3 页');
+
+  await items.nth(0).click();
+  await page.click('[data-testid=readme-edit]');
+  await page.fill('[data-testid=readme-text]', '# E2E 模板\n\n## 风格约定\n- 主色：墨绿 E2E-README');
+  await page.click('[data-testid=readme-save]');
+  await expect(page.locator('[data-testid=file-content]')).toContainText('E2E-README', { timeout: 10_000 });
+  await page.click('.tabs button:has-text("修改历史")');
+  await expect(historyItems().first()).toContainText('编辑 README');
+  await expect(historyItems().first()).toContainText('README 更新');
 });
 
 test('rename project from the editor title', async () => {
