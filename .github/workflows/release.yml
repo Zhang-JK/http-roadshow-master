@@ -1,0 +1,90 @@
+name: Prebuilt release
+
+# Every push to main publishes a self-contained package per architecture (compiled app, production
+# node_modules, Node.js runtime). Servers install it with deploy_from_action.sh and never run npm.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prebuilt-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Build server
+        working-directory: server
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc -p .
+          npm prune --omit=dev --no-audit --no-fund
+
+      - name: Build web
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Package
+        run: |
+          tag="r$(node -p "require('./package.json').version")-${GITHUB_SHA::7}"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag"
+          for arch in x64 arm64; do bash scripts/package-prebuilt.sh "$arch" release "$base"; done
+          ls -lh release
+
+      - name: Smoke test the x64 package
+        run: |
+          mkdir -p /tmp/smoke && tar -xzf release/*-linux-x64.tar.gz -C /tmp/smoke
+          cd /tmp/smoke/roadshow-studio/server
+          ../node/bin/node -e "new (require('better-sqlite3'))(':memory:').close()"
+          DATA_DIR=/tmp/smoke/data PORT=9399 HOST=127.0.0.1 ../node/bin/node dist/main.js > /tmp/smoke/app.log 2>&1 &
+          pid=$!
+          for _ in $(seq 30); do
+            if curl -fsS http://127.0.0.1:9399/api/health; then echo; kill "$pid"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/smoke/app.log
+          exit 1
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Prebuilt packages for commit ${GITHUB_SHA::7}. Install or update on a Linux server (no npm needed):
+
+          \`\`\`bash
+          curl -fsSLO https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/deploy_from_action.sh
+          sudo bash deploy_from_action.sh
+          \`\`\`
+
+          Offline: download the .tar.gz for your CPU (x64 or arm64) below, copy it to the server, then run \`sudo bash deploy_from_action.sh --file <package>.tar.gz\`."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.tar.gz release/latest-linux-*.json --clobber
+          else
+            gh release create "$TAG" release/*.tar.gz release/latest-linux-*.json \
+              --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" --latest
+          fi
+
+      - name: Keep the 10 newest releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName' \
+            | grep '^r' | tail -n +11 | xargs -r -n1 gh release delete --yes --cleanup-tag
