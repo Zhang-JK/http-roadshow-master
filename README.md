@@ -66,3 +66,4 @@ npm --prefix web run test:e2e   # 浏览器端到端测试（Playwright，自动
 - `web/e2e/app.spec.ts`：完整 UI 流程，包括单击/多选/选择上级/框选、三种修改范围、历史预览与恢复、导出下载、多用户协作归属。
 
 推荐模型：OpenRouter 的 `deepseek/deepseek-v4.1-flash-1017`（支持图像输入），附加参数 `{"reasoning":{"effort":"low"}}` 可缩短等待。实测生成 8 页材料约 60–70 秒、约 $0.01；单元素修改约 8 秒、约 $0.003。
+<!-- release test -->
