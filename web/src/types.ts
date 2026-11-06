@@ -96,8 +96,11 @@ export interface Asset {
   mime: string;
   size: number;
   kind: 'image' | 'document';
+  role: 'embed' | 'reference';
   url: string;
   hasText: boolean;
+  slideCount: number;
+  slideUrls: string[];
   createdAt: number;
 }
 

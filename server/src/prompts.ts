@@ -6,9 +6,88 @@ export interface AssetRef {
   filename: string;
   url: string;
   kind: 'image' | 'document';
+  /** embed: may be placed in pages via <img>; reference: shown to the model only. */
+  role?: 'embed' | 'reference';
   text?: string | null;
   dataUrl?: string;
+  /** Page images exported from a presentation / PDF upload. */
+  slides?: { page: number; dataUrl?: string }[];
 }
+
+export interface ImageBudget {
+  embed: number;
+  reference: number;
+  slides: number;
+}
+
+const CREATE_BUDGET: ImageBudget = { embed: 8, reference: 8, slides: 24 };
+const EDIT_BUDGET: ImageBudget = { embed: 4, reference: 6, slides: 12 };
+
+interface ImagePlan {
+  images: Set<string>;
+  slides: Map<string, number>;
+}
+
+/** Decides which images fit the per-request budget so the text block and the attached images agree. */
+function planImages(assets: AssetRef[], budget: ImageBudget): ImagePlan {
+  const plan: ImagePlan = { images: new Set(), slides: new Map() };
+  let embed = budget.embed;
+  let reference = budget.reference;
+  for (const a of assets) {
+    if (a.kind !== 'image' || !a.dataUrl) continue;
+    if (a.role === 'reference' ? reference-- > 0 : embed-- > 0) plan.images.add(a.id);
+  }
+  const decks = assets.filter((a) => a.slides?.some((s) => s.dataUrl));
+  let left = budget.slides;
+  decks.forEach((a, i) => {
+    const fair = Math.ceil(left / (decks.length - i));
+    const n = Math.min(a.slides!.length, fair);
+    plan.slides.set(a.id, n);
+    left -= n;
+  });
+  return plan;
+}
+
+function assetsBlock(assets: AssetRef[], plan?: ImagePlan): string {
+  if (!assets.length) return '（无）';
+  return assets
+    .map((a, i) => {
+      const attached = plan?.images.has(a.id);
+      if (a.kind === 'image') {
+        if (a.role === 'reference') {
+          return `${i + 1}. 参考图「${a.filename}」：仅供参考（借鉴其版式、风格、配色或内容），不要把它嵌入页面${attached ? '（附图见后）' : ''}`;
+        }
+        return `${i + 1}. 图片「${a.filename}」，可在页面中通过 <img src="${a.url}"> 使用${attached ? '（附图见后）' : ''}`;
+      }
+      const text = (a.text ?? '').trim();
+      const shown = plan?.slides.get(a.id) ?? 0;
+      const pages = a.slides?.length
+        ? `共导出 ${a.slides.length} 页图片${shown ? `，${shown < a.slides.length ? `其中前 ${shown} 页` : '全部'}已附在后面` : ''}。这些页面图片仅供参考（借鉴其版式、风格与内容结构），不要嵌入页面。\n`
+        : '';
+      return `${i + 1}. 文件「${a.filename}」${pages ? '，' : ''}${pages}文字内容如下：\n<<<\n${text || '（无法提取文字）'}\n>>>`;
+    })
+    .join('\n\n');
+}
+
+function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
+  const parts: ContentPart[] = [];
+  for (const a of assets) {
+    if (plan.images.has(a.id)) {
+      parts.push(
+        { type: 'text', text: a.role === 'reference' ? `参考图「${a.filename}」（仅供参考）：` : `素材图片「${a.filename}」（URL: ${a.url}）：` },
+        { type: 'image_url', image_url: { url: a.dataUrl! } },
+      );
+    }
+    const n = plan.slides.get(a.id) ?? 0;
+    for (const s of (a.slides ?? []).slice(0, n)) {
+      if (!s.dataUrl) continue;
+      parts.push({ type: 'text', text: `「${a.filename}」第 ${s.page} 页：` }, { type: 'image_url', image_url: { url: s.dataUrl } });
+    }
+  }
+  return parts;
+}
+
+const hasReferences = (assets: AssetRef[]) => assets.some((a) => a.role === 'reference' || a.slides?.length);
 
 const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>) => `
 【硬性技术规范 —— 必须严格遵守】
@@ -27,27 +106,6 @@ const SYSTEM = (doc: Pick<DeckDoc, 'width' | 'height'>) =>
   `你是一名顶级的演示文稿视觉设计师兼前端工程师，擅长制作投资路演、产品发布、商业汇报类的 HTML 演示材料。你的作品层次清晰、排版精致、配色专业，信息密度适中，适合投屏和打印。
 ${RULES(doc)}`;
 
-function assetsBlock(assets: AssetRef[]): string {
-  if (!assets.length) return '（无）';
-  return assets
-    .map((a, i) => {
-      if (a.kind === 'image') return `${i + 1}. 图片「${a.filename}」，可在页面中通过 <img src="${a.url}"> 使用（附图见后）`;
-      const text = (a.text ?? '').trim();
-      return `${i + 1}. 文档「${a.filename}」内容如下：\n<<<\n${text || '（无法提取文字）'}\n>>>`;
-    })
-    .join('\n\n');
-}
-
-function imageParts(assets: AssetRef[], max = 8): ContentPart[] {
-  return assets
-    .filter((a) => a.kind === 'image' && a.dataUrl)
-    .slice(0, max)
-    .flatMap((a) => [
-      { type: 'text' as const, text: `素材图片「${a.filename}」（URL: ${a.url}）：` },
-      { type: 'image_url' as const, image_url: { url: a.dataUrl! } },
-    ]);
-}
-
 export interface TemplateBrief {
   name: string;
   style: string;
@@ -59,6 +117,7 @@ export interface TemplateBrief {
 }
 
 export function buildTemplatePrompt(doc: DeckDoc, brief: TemplateBrief, assets: AssetRef[]): ChatMessage[] {
+  const plan = planImages(assets, CREATE_BUDGET);
   const text = `请设计一套可复用的「路演材料模板」，以完整 HTML 文档形式输出。
 
 【模板名称】${brief.name}
@@ -72,13 +131,17 @@ export function buildTemplatePrompt(doc: DeckDoc, brief: TemplateBrief, assets: 
 - 模板是后续生成具体路演材料的“版式库”，请提供约 ${brief.pageCount || 8} 页代表性版式，例如：封面、目录/议程、章节过渡页、图文内容页、数据/KPI 页、图表页（SVG）、对比或时间线页、团队介绍页、结束/联系方式页，可根据用途调整。
 - 每页 <section> 上添加 data-layout 属性标明版式类型（如 data-layout="cover"），并在页面中使用占位性质但真实可信的示例文案（不要写 lorem ipsum）。
 - 样式系统要完整：用 CSS 变量定义主色、辅色、强调色、字体、圆角、间距，并为标题、正文、卡片、列表、图表、页脚页码等定义可复用的 class，便于后续材料复用。
-- 每页右下角或页脚包含统一的页码/品牌区域。
+- 每页右下角或页脚包含统一的页码/品牌区域。${
+    hasReferences(assets)
+      ? '\n- 用户上传了参考图片/参考 PPT：请仔细观察这些页面的视觉风格（配色、字体气质、版式结构、装饰元素、信息层级），让模板在整体风格上与之贴近，同时满足上面的技术规范；不要直接嵌入参考截图。'
+      : ''
+  }
 
 【可用素材】
-${assetsBlock(assets)}`;
+${assetsBlock(assets, plan)}`;
   return [
     { role: 'system', content: SYSTEM(doc) },
-    { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets)] },
+    { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
   ];
 }
 
@@ -92,6 +155,7 @@ export interface DeckBrief {
 }
 
 export function buildDeckPrompt(doc: DeckDoc, template: DeckDoc | null, brief: DeckBrief, assets: AssetRef[]): ChatMessage[] {
+  const plan = planImages(assets, CREATE_BUDGET);
   const templateBlock = template
     ? `【所选模板】
 以下是用户选择的模板 HTML。请严格沿用它的 <style> 样式系统（可原样复制全部 CSS 后按需少量扩展）、配色、字体、版式结构和页脚设计，根据内容选择合适的版式页并复制其结构来填充真实内容。模板中的示例文案必须全部替换为本次路演的真实内容。
@@ -110,17 +174,21 @@ ${brief.content}
 【其他要求】${brief.notes || '无'}
 
 【支持材料】
-${assetsBlock(assets)}
+${assetsBlock(assets, plan)}
 
 ${templateBlock}
 
 【制作要求】
 - 内容组织要有路演逻辑（如：痛点→方案→产品→市场→商业模式→竞争→团队→财务→融资计划），但以用户提供的内容为准，不要编造关键事实数据；缺少数据时用合理的定性表述或明显的占位提示。
 - 每页一个核心观点，标题提炼结论；数据用 KPI 卡片或 SVG 图表可视化。
-- 用户提供的图片素材应在合适的页面中使用。`;
+- 用户提供的可嵌入图片素材应在合适的页面中使用。${
+    hasReferences(assets)
+      ? '\n- 用户上传了参考图片/参考 PPT 页面：请从中提取内容要点、数据和页面结构作为依据（例如沿用其章节顺序和关键信息），视觉样式仍以所选模板为准；不要直接嵌入这些参考截图。'
+      : ''
+  }`;
   return [
     { role: 'system', content: SYSTEM(doc) },
-    { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets)] },
+    { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
   ];
 }
 
@@ -133,17 +201,24 @@ export interface EditRequest {
   pageHtml?: string;
   elements?: ElementInfo[];
   screenshot?: string;
+  /** Files attached to this particular edit request (with image data). */
+  attachments?: AssetRef[];
 }
 
 export function buildEditPrompt(doc: DeckDoc, req: EditRequest, assets: AssetRef[], kind: 'template' | 'deck'): ChatMessage[] {
   const what = kind === 'template' ? '路演模板' : '路演材料';
   const parts: ContentPart[] = [];
+  const attachments = req.attachments ?? [];
+  const plan = planImages(attachments, EDIT_BUDGET);
+  const attachBlock = attachments.length
+    ? `\n\n【本次修改附带的参考文件】（用户随这次修改上传，请结合修改要求使用：可嵌入的图片可以用 <img> 放进页面；参考图和 PPT/PDF 页面截图用于借鉴风格、版式或内容，不要直接嵌入）\n${assetsBlock(attachments, plan)}`
+    : '';
   let text: string;
   if (req.scope === 'global') {
     text = `下面是当前的${what}（共 ${doc.pages.length} 页）。用户要求对【整份材料】进行调整。
 
 【修改要求】
-${req.prompt}
+${req.prompt}${attachBlock}
 
 【当前完整 HTML】
 \`\`\`html
@@ -175,7 +250,7 @@ ${req.elements
 ${target}
 
 【修改要求】
-${req.prompt}
+${req.prompt}${attachBlock}
 
 【全局样式（只读参考，不要整体输出）】
 \`\`\`css
@@ -199,6 +274,6 @@ ${assetsBlock(assets)}
   }
   return [
     { role: 'system', content: SYSTEM(doc) },
-    { role: 'user', content: [{ type: 'text', text }, ...parts, ...imageParts(assets, 4)] },
+    { role: 'user', content: [{ type: 'text', text }, ...parts, ...imageParts(attachments, plan)] },
   ];
 }

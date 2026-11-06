@@ -16,7 +16,7 @@ import { versionInfo } from './system.js';
 export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: boolean } = {}) {
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 20 * 1024 * 1024 });
   await app.register(cookie);
-  await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024, files: 20 } });
+  await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024, files: 20 } });
 
   app.addHook('onRequest', async (req) => {
     req.user = userFromToken(db, req.cookies[SESSION_COOKIE]);

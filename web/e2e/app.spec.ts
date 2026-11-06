@@ -1,9 +1,24 @@
+import { createRequire } from 'node:module';
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs';
 
 test.describe.configure({ mode: 'serial' });
 
 let page: Page;
+let deckUrl = '';
+
+const PNG_1x1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+async function makePptx(slides: number): Promise<Buffer> {
+  const require = createRequire(new URL('../../server/package.json', import.meta.url));
+  const PptxGenJS = require('pptxgenjs');
+  const p = new PptxGenJS();
+  for (let i = 1; i <= slides; i++) p.addSlide().addText(`参考第 ${i} 页`, { x: 1, y: 1, w: 8, h: 1, fontSize: 32 });
+  return (await p.write({ outputType: 'nodebuffer' })) as Buffer;
+}
 
 async function login(username: string, password: string) {
   await page.goto('/login');
@@ -234,12 +249,23 @@ test('create a deck: choose template, describe content, attach materials', async
   await page.fill('input[name=name]', 'E2E 路演');
   await expect(page.locator('[data-testid=submit-create]')).toBeDisabled();
   await page.fill('textarea[name=content]', '公司简介、产品、市场、团队、融资计划');
-  await page.locator('[data-testid=file-input]').setInputFiles({ name: 'facts.txt', mimeType: 'text/plain', buffer: Buffer.from('ARR 1200 万') });
+  await page.locator('[data-testid=file-input]').setInputFiles([
+    { name: 'facts.txt', mimeType: 'text/plain', buffer: Buffer.from('ARR 1200 万') },
+    { name: 'old-deck.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await makePptx(3) },
+    { name: 'mood.png', mimeType: 'image/png', buffer: PNG_1x1 },
+  ]);
+  const list = page.locator('[data-testid=ref-file-list]');
+  await expect(list).toContainText('逐页转图片参考');
+  await list.locator('li:has-text("mood.png") button:has-text("仅参考")').click();
+  await expect(list.locator('li:has-text("mood.png") button.on')).toHaveText('仅参考');
   await page.click('[data-testid=submit-create]');
   await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(3, { timeout: 30_000 });
   await expect(page.locator('.editor-top')).toContainText('模板：E2E 模板 · 改名');
   await page.click('.tabs button:has-text("素材")');
   await expect(page.locator('.asset-list')).toContainText('facts.txt');
+  await expect(page.locator('.asset-list li:has-text("old-deck.pptx")')).toContainText('3 页图片');
+  await expect(page.locator('.asset-list li:has-text("mood.png")')).toContainText('仅参考');
+  deckUrl = page.url();
 });
 
 test('a second user edits the same deck and history attributes the change', async () => {
@@ -261,4 +287,24 @@ test('a second user edits the same deck and history attributes the change', asyn
   await expect(historyItems().last()).toContainText('管理员');
   await page.goto('/models');
   await expect(page).toHaveURL(/\/templates/);
+});
+
+test('attach a PPT to an edit from the prompt bar', async () => {
+  await page.goto('/decks');
+  await logout();
+  await login('admin', 'admin123');
+  await page.goto(deckUrl);
+  await page.locator('[data-testid=attach-input]').setInputFiles({
+    name: 'competitor.pptx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    buffer: await makePptx(2),
+  });
+  await expect(page.locator('.composer [data-testid=ref-file-list]')).toContainText('competitor.pptx');
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await page.fill('[data-testid=prompt-input]', '参考附件调整');
+  await page.click('[data-testid=send-btn]');
+  await expect(page.locator('.composer [data-testid=ref-file-list]')).toHaveCount(0);
+  await expect(historyItems()).toHaveCount(3, { timeout: 30_000 });
+  await page.click('.tabs button:has-text("素材")');
+  await expect(page.locator('.asset-list li:has-text("competitor.pptx")')).toContainText('2 页图片');
 });

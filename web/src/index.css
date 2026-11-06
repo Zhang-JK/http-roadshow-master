@@ -242,6 +242,15 @@ textarea { resize: vertical; min-height: 40px; }
 .seg { display: inline-flex; background: #eef0f5; border-radius: 8px; padding: 2px; }
 .seg button { border: 0; background: none; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; color: #4a5168; }
 .seg button.on { background: #fff; color: var(--primary); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.ref-files li .seg, .ref-files li .tag { flex: none; }
+.ref-files li span.ref-name { flex: 1; }
+.composer .ref-files { margin: 0 0 8px; max-height: 120px; overflow: auto; }
+.seg-xs button { padding: 2px 8px; font-size: 11px; }
+.tag { font-size: 11px; color: #4a5168; background: #eef0f5; border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+.attach-btn { display: flex; align-items: center; justify-content: center; width: 40px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; font-size: 18px; background: #fafbfd; }
+.attach-btn:hover { border-color: var(--primary); background: #f3f4ff; }
+.attach-btn input { display: none; }
+.asset-role { margin: 8px 0 4px; align-items: center; }
 .composer-row { display: flex; gap: 10px; }
 .composer-row textarea { flex: 1; min-height: 64px; max-height: 200px; }
 .send-btn { height: auto; flex-direction: column; gap: 0; width: 110px; }

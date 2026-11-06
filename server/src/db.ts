@@ -97,6 +97,12 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_jobs_project ON jobs(project_id, created_at);
   `,
+  `
+  ALTER TABLE assets ADD COLUMN parent_id TEXT REFERENCES assets(id) ON DELETE CASCADE;
+  ALTER TABLE assets ADD COLUMN page_no INTEGER;
+  ALTER TABLE assets ADD COLUMN role TEXT NOT NULL DEFAULT 'embed';
+  CREATE INDEX idx_assets_parent ON assets(parent_id, page_no);
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {

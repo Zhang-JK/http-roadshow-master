@@ -7,6 +7,7 @@ import { SlideFrame } from '../components/SlideFrame';
 import { useToast } from '../components/Toast';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { AssetsPanel } from '../components/AssetsPanel';
+import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
 import { TYPE_LABELS } from '../lib/format';
 
 interface ProjectResponse {
@@ -29,6 +30,7 @@ export function EditorPage() {
   const [selection, setSelection] = useState<SelectedElement[]>([]);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('global');
   const [prompt, setPrompt] = useState('');
+  const [attachments, setAttachments] = useState<RefFile[]>([]);
   const [sending, setSending] = useState(false);
   const [tab, setTab] = useState<'history' | 'assets'>('history');
   const [preview, setPreview] = useState<{ version: Version; doc: DeckDoc } | null>(null);
@@ -160,12 +162,18 @@ export function EditorPage() {
     if (!prompt.trim() || !project) return;
     setSending(true);
     try {
+      const attachmentIds = attachments.length ? await uploadRefFiles(api.post, project.id, attachments) : [];
       const r = await api.post<{ job: Job }>(`/api/projects/${project.id}/edit`, {
         prompt: prompt.trim(),
         scope: effectiveScope,
         pageId: effectiveScope === 'global' ? undefined : currentPage?.id,
         elementIds: effectiveScope === 'element' ? selection.map((s) => s.eid) : [],
+        attachmentIds,
       });
+      if (attachmentIds.length) {
+        setAttachments([]);
+        loadProject();
+      }
       myJobs.current.add(r.job.id);
       setJobs((j) => [...j, { ...r.job, userName: user?.displayName }]);
       setPrompt('');
@@ -424,7 +432,21 @@ export function EditorPage() {
                     </div>
                   )}
                 </div>
+                <RefFileList files={attachments} onChange={setAttachments} />
                 <div className="composer-row">
+                  <label className="attach-btn" title="附加参考图片 / PPT / PDF：图片可嵌入页面或仅作参考，PPT/PDF 逐页转成图片交给 AI">
+                    <input
+                      type="file"
+                      multiple
+                      accept={`image/*,${SLIDES_ACCEPT}`}
+                      data-testid="attach-input"
+                      onChange={(e) => {
+                        setAttachments(addFiles(attachments, e.target.files, 'embed'));
+                        e.target.value = '';
+                      }}
+                    />
+                    📎
+                  </label>
                   <textarea
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
@@ -444,7 +466,7 @@ export function EditorPage() {
                     data-testid="prompt-input"
                   />
                   <button className="btn btn-primary send-btn" disabled={!prompt.trim() || sending} onClick={send} data-testid="send-btn">
-                    {sending ? '提交中…' : '发送'}
+                    {sending ? (attachments.length ? '上传中…' : '提交中…') : '发送'}
                     <small>⌘/Ctrl + Enter</small>
                   </button>
                 </div>

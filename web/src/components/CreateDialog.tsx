@@ -4,7 +4,7 @@ import type { Project, ProjectType } from '../types';
 import { Modal } from './Modal';
 import { SlideFrame } from './SlideFrame';
 import { useToast } from './Toast';
-import { fileSize } from '../lib/format';
+import { addFiles, RefFileList, SLIDES_ACCEPT, TEXT_ACCEPT, isSlidesFile, type AssetRole, type RefFile } from './RefFiles';
 
 const STYLE_PRESETS = ['极简商务', '科技深色', '清新活力', '高端金融', '学术严谨', '国潮东方', '杂志排版', '渐变玻璃拟态'];
 const PURPOSE_PRESETS = ['融资路演', '产品发布会', '年度工作汇报', '项目立项评审', '招商推介', '课程/培训'];
@@ -42,7 +42,7 @@ function Chips({ options, value, onPick }: { options: string[]; value: string; o
   );
 }
 
-function FilePicker({ files, setFiles, accept, hint }: { files: File[]; setFiles: (f: File[]) => void; accept: string; hint: string }) {
+function FilePicker({ files, setFiles, accept, hint, defaultRole }: { files: RefFile[]; setFiles: (f: RefFile[]) => void; accept: string; hint: string; defaultRole: AssetRole }) {
   return (
     <div className="file-picker">
       <label className="file-drop">
@@ -52,24 +52,14 @@ function FilePicker({ files, setFiles, accept, hint }: { files: File[]; setFiles
           accept={accept}
           data-testid="file-input"
           onChange={(e) => {
-            setFiles([...files, ...Array.from(e.target.files ?? [])].slice(0, 12));
+            setFiles(addFiles(files, e.target.files, defaultRole));
             e.target.value = '';
           }}
         />
         <span>📎 点击选择文件</span>
         <small>{hint}</small>
       </label>
-      {files.length > 0 && (
-        <ul className="file-list">
-          {files.map((f, i) => (
-            <li key={i}>
-              <span>{f.type.startsWith('image/') ? '🖼' : '📄'} {f.name}</span>
-              <small>{fileSize(f.size)}</small>
-              <button type="button" className="icon-btn" onClick={() => setFiles(files.filter((_, j) => j !== i))}>✕</button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <RefFileList files={files} onChange={setFiles} />
     </div>
   );
 }
@@ -92,7 +82,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
     width: '1920',
     height: '1080',
   });
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<RefFile[]>([]);
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof f) => (v: string) => setF((s) => ({ ...s, [k]: v }));
 
@@ -116,7 +106,8 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
       fd.append('type', type);
       Object.entries(f).forEach(([k, v]) => fd.append(k, v));
       if (type === 'deck') fd.append('templateId', templateId);
-      files.forEach((file) => fd.append('files', file, file.name));
+      fd.append('fileRoles', JSON.stringify(files.map((x) => x.role)));
+      files.forEach((x) => fd.append('files', x.file, x.file.name));
       const r = await api.post<{ project: Project }>('/api/projects', fd);
       toast('已创建，AI 正在生成…', 'success');
       onCreated(r.project.id);
@@ -183,7 +174,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
           <div className="spacer" />
           <button className="btn" onClick={onClose}>取消</button>
           <button className="btn btn-primary" disabled={!canSubmit} onClick={submit} data-testid="submit-create">
-            {busy ? '提交中…' : '开始生成'}
+            {busy ? (files.some((x) => isSlidesFile(x.file)) ? '上传并转换 PPT…' : '提交中…') : '开始生成'}
           </button>
         </>
       }
@@ -267,12 +258,17 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
           <textarea name="notes" rows={2} value={f.notes} onChange={(e) => set('notes')(e.target.value)} placeholder="例如：每页都要有公司 logo；避免使用红色；语言用英文……" />
         </label>
         <div className="field full">
-          <span>{type === 'template' ? '参考图片 / Logo（可选）' : '支持材料（可选）'}</span>
+          <span>{type === 'template' ? '参考图片 / 参考 PPT / Logo（可选）' : '支持材料与参考（可选）'}</span>
           <FilePicker
             files={files}
             setFiles={setFiles}
-            accept={type === 'template' ? 'image/*' : 'image/*,.pdf,.txt,.md,.csv,.json,.html,.xml,.yaml,.yml'}
-            hint={type === 'template' ? '图片会作为风格参考或嵌入模板（最多 12 个）' : '图片可嵌入页面；PDF / 文本 / CSV 会被提取文字作为内容依据'}
+            defaultRole={type === 'template' ? 'reference' : 'embed'}
+            accept={`image/*,${SLIDES_ACCEPT}${type === 'deck' ? `,${TEXT_ACCEPT}` : ''}`}
+            hint={
+              type === 'template'
+                ? '参考图或 PPT/PDF 会逐页转成图片交给 AI 模仿风格；Logo 等可切换为“嵌入页面”（最多 12 个）'
+                : '图片可嵌入页面或仅作参考；PPT/PDF 会逐页转成图片并提取文字供 AI 参考；文本 / CSV 提取文字作为依据'
+            }
           />
         </div>
       </div>

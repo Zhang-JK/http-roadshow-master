@@ -221,13 +221,21 @@ ensure_system_deps() {
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y -qq || warn "apt-get update 失败"
       apt-get install -y -qq git curl ca-certificates tar xz-utils unzip fonts-noto-cjk >/dev/null || warn "部分依赖安装失败"
+      # PPT/PDF reference uploads are exported page by page to images.
+      apt-get install -y -qq --no-install-recommends libreoffice-impress libreoffice-writer poppler-utils >/dev/null \
+        || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
       ;;
     dnf|yum)
       "$pm" install -y -q git curl ca-certificates tar xz unzip google-noto-sans-cjk-ttc-fonts >/dev/null 2>&1 \
         || "$pm" install -y -q git curl tar xz unzip >/dev/null || warn "部分依赖安装失败"
+      "$pm" install -y -q libreoffice-impress libreoffice-writer poppler-utils >/dev/null 2>&1 \
+        || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
       ;;
-    zypper) zypper -n -q install git curl tar xz unzip noto-sans-sc-fonts >/dev/null || warn "部分依赖安装失败" ;;
-    *) warn "未识别的包管理器，请手动安装 git curl tar xz unzip 与中文字体" ;;
+    zypper)
+      zypper -n -q install git curl tar xz unzip noto-sans-sc-fonts >/dev/null || warn "部分依赖安装失败"
+      zypper -n -q install libreoffice-impress libreoffice-writer poppler-tools >/dev/null || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
+      ;;
+    *) warn "未识别的包管理器，请手动安装 git curl tar xz unzip、中文字体、LibreOffice 与 poppler-utils" ;;
   esac
 }
 

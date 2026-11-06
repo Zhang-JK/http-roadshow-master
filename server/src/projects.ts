@@ -14,7 +14,7 @@ import {
 } from './deck.js';
 import { chat, type ChatMessage } from './llm.js';
 import { buildDeckPrompt, buildEditPrompt, buildTemplatePrompt, type DeckBrief, type EditScope, type TemplateBrief } from './prompts.js';
-import { makeAssetResolver, projectAssets, toAssetRefs } from './assets.js';
+import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs } from './assets.js';
 import { renderPageImages } from './render.js';
 
 export interface ProjectRow {
@@ -55,6 +55,8 @@ export interface EditInput {
   scope: EditScope;
   pageId?: string;
   elementIds?: string[];
+  /** Project assets uploaded together with this edit; sent to the model with their images. */
+  attachmentIds?: string[];
 }
 
 /** Live progress of running jobs (characters streamed so far); kept in memory only. */
@@ -224,7 +226,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       updateJob(db, job.id, { status: 'running' });
       db.prepare(`UPDATE projects SET status='generating', error=NULL WHERE id=?`).run(projectId);
       const base = projectDoc(project)!;
-      const assets = toAssetRefs(projectAssets(db, projectId), true);
+      const assets = toAssetRefs(db, projectAssets(db, projectId), true);
       let messages: ChatMessage[];
       if (project.type === 'template') {
         messages = buildTemplatePrompt(base, meta.brief, assets);
@@ -277,7 +279,13 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
       updateJob(db, job.id, { status: 'running' });
       const settings = getSettings(db);
       const snapshot = projectDoc(getProject(db, projectId)!)!;
-      const assets = toAssetRefs(projectAssets(db, projectId), false);
+      const attachmentIds = input.attachmentIds ?? [];
+      const attachments = toAssetRefs(db, assetsByIds(db, projectId, attachmentIds), true);
+      const assets = toAssetRefs(
+        db,
+        projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id)),
+        false,
+      );
       const resolver = makeAssetResolver(db);
       let pageIndex: number | undefined;
       let elements: ReturnType<typeof findElements> = [];
@@ -313,6 +321,7 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           pageHtml: pageIndex !== undefined ? snapshot.pages[pageIndex].html : undefined,
           elements,
           screenshot,
+          attachments,
         },
         assets,
         project.type,

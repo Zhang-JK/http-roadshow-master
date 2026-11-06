@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { DB } from '../db.js';
 import { HttpError, requireUser } from '../auth.js';
 import { ASPECTS, assembleHtml, deletePage, duplicatePage, movePage, type DeckDoc } from '../deck.js';
-import { assetPath, assetUrl, makeAssetResolver, projectAssets, saveAsset, type AssetRow } from '../assets.js';
+import { assetPath, assetUrl, deleteAsset, makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRole, type AssetRow } from '../assets.js';
 import {
   applyManual,
   commitVersion,
@@ -70,16 +70,24 @@ function publicJob(j: JobRow) {
   };
 }
 
-const publicAsset = (a: AssetRow) => ({
-  id: a.id,
-  filename: a.filename,
-  mime: a.mime,
-  size: a.size,
-  kind: a.kind,
-  url: assetUrl(a.id),
-  hasText: !!a.extracted_text,
-  createdAt: a.created_at,
-});
+const publicAsset = (db: DB, a: AssetRow) => {
+  const slides = a.kind === 'document' ? slideAssets(db, a.id) : [];
+  return {
+    id: a.id,
+    filename: a.filename,
+    mime: a.mime,
+    size: a.size,
+    kind: a.kind,
+    role: a.role,
+    url: assetUrl(a.id),
+    hasText: !!a.extracted_text,
+    slideCount: slides.length,
+    slideUrls: slides.map((s) => assetUrl(s.id)),
+    createdAt: a.created_at,
+  };
+};
+
+const parseRole = (v: unknown): AssetRole => (v === 'reference' ? 'reference' : 'embed');
 
 function mustProject(db: DB, id: string): ProjectRow {
   const p = getProject(db, id);
@@ -187,7 +195,16 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       templateId,
       brief: brief as any,
     });
-    for (const f of files) await saveAsset(db, project.id, user.id, f.filename, f.mime, f.buf);
+    let roles: unknown[] = [];
+    try {
+      roles = JSON.parse(fields.fileRoles || '[]');
+    } catch {
+      /* default roles */
+    }
+    const defaultRole: AssetRole = type === 'template' ? 'reference' : 'embed';
+    for (const [i, f] of files.entries()) {
+      await saveAsset(db, project.id, user.id, f.filename, f.mime, f.buf, roles[i] === undefined ? defaultRole : parseRole(roles[i]));
+    }
     const job = startGeneration(db, project.id, user.id);
     return { project: publicProject(getProject(db, project.id)!, userNames(db), false), job: publicJob(job) };
   });
@@ -200,7 +217,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     return {
       project: publicProject(p, names, true),
       template: template ? { id: template.id, name: template.name } : null,
-      assets: projectAssets(db, p.id).map(publicAsset),
+      assets: projectAssets(db, p.id).map((a) => publicAsset(db, a)),
     };
   });
 
@@ -228,7 +245,8 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       const used = db.prepare('SELECT COUNT(*) AS c FROM projects WHERE template_id = ?').get(p.id) as { c: number };
       if (used.c > 0) throw new HttpError(409, `该模板已被 ${used.c} 份路演材料使用，无法删除`);
     }
-    for (const a of projectAssets(db, p.id)) fs.rmSync(assetPath(a.id), { force: true });
+    const ids = db.prepare('SELECT id FROM assets WHERE project_id = ?').all(p.id) as { id: string }[];
+    for (const a of ids) fs.rmSync(assetPath(a.id), { force: true });
     db.prepare('DELETE FROM projects WHERE id = ?').run(p.id);
     return { ok: true };
   });
@@ -245,18 +263,22 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     const user = requireUser(req);
     const p = mustProject(db, (req.params as any).id);
     const saved: AssetRow[] = [];
-    for await (const part of req.files()) {
+    let role: AssetRole = 'embed';
+    for await (const part of req.parts()) {
+      if (part.type !== 'file') {
+        if (part.fieldname === 'role') role = parseRole(part.value);
+        continue;
+      }
       const buf = await part.toBuffer();
-      if (buf.length) saved.push(await saveAsset(db, p.id, user.id, part.filename, part.mimetype, buf));
+      if (buf.length) saved.push(await saveAsset(db, p.id, user.id, part.filename, part.mimetype, buf, role));
     }
-    return { assets: saved.map(publicAsset) };
+    return { assets: saved.map((a) => publicAsset(db, a)) };
   });
 
   app.delete('/api/projects/:id/assets/:assetId', async (req) => {
     requireUser(req);
     const { id, assetId } = req.params as any;
-    db.prepare('DELETE FROM assets WHERE id = ? AND project_id = ?').run(assetId, id);
-    fs.rmSync(assetPath(assetId), { force: true });
+    deleteAsset(db, id, assetId);
     return { ok: true };
   });
 
@@ -273,6 +295,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
         scope,
         pageId: body.pageId,
         elementIds: Array.isArray(body.elementIds) ? body.elementIds.map(String).slice(0, 30) : [],
+        attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(String).slice(0, 12) : [],
       });
       return { job: publicJob(job) };
     } catch (e) {
