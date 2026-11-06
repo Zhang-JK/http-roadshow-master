@@ -24,7 +24,7 @@
 #
 # Network options (install/update/nettest; saved and reused by later updates and by the app itself):
 #   --proxy URL                  HTTP(S) 代理，如 http://proxy.corp:8080 或 http://用户:密码@proxy:8080；
-#                                未指定时依次读取 https_proxy/http_proxy 环境变量、/etc/environment、apt 代理配置；
+#                                未指定时使用 https_proxy/http_proxy 环境变量（sudo 时请加 -E），都没有则沿用上次保存的设置；
 #                                --proxy none 表示不使用代理
 #   --no-proxy LIST              不走代理的地址（逗号分隔，如 .corp.local,10.0.0.0/8；本机地址总是直连）
 #   --ca-cert FILE|auto|none     额外信任的根证书（公司代理解密 HTTPS 时使用，PEM 或 DER）；
@@ -249,23 +249,17 @@ url_port() { local u="${1#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) 
 proxy_hostport() { local u="${PROXY_URL#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) ;; *) u="$u:80" ;; esac; printf '%s' "$u"; }
 proxy_cred() { local u="${PROXY_URL#*://}"; u="${u%%/*}"; case "$u" in *@*) printf '%s' "${u%@*}" ;; esac; }
 
-# Explicit option > deploy.conf > environment > /etc/environment > apt's proxy (sudo drops the caller's environment).
+# --proxy > https_proxy/http_proxy from the environment > the proxy saved in deploy.conf, which keeps
+# updates started from the web page (no login environment) on the proxy used at install time.
 detect_proxy() {
-  if [ -n "$PROXY_URL" ]; then PROXY_SOURCE="$([ -n "$OPT_PROXY" ] && echo 命令行参数 || echo "$CONF")"; return 0; fi
+  [ -n "$PROXY_SOURCE" ] && return 0
+  if [ -n "$OPT_PROXY" ]; then PROXY_SOURCE=命令行参数; return 0; fi
   local v p
-  for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
+  for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY; do
     p="${!v:-}"
     if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE="环境变量 $v"; return 0; fi
   done
-  if [ -r /etc/environment ]; then
-    p="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?(https_proxy|HTTPS_PROXY|http_proxy|HTTP_PROXY)=["'\'']?([^"'\'' ]+).*/\3/p' /etc/environment | head -1)"
-    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE=/etc/environment; return 0; fi
-  fi
-  if have apt-config; then
-    p="$(apt-config dump 2>/dev/null | sed -nE 's/^Acquire::https?::Proxy "([^"]+)";$/\1/p' | grep -viE '^(direct|false)$' | head -1 || true)"
-    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE="apt 配置"; fi
-  fi
-  return 0
+  if [ -n "$PROXY_URL" ]; then PROXY_SOURCE="上次保存的设置 $CONF"; else PROXY_SOURCE=无; fi
 }
 
 system_ca_bundle() {
