@@ -50,7 +50,8 @@ export function HistoryPanel({ versions, currentVersionNo, previewId, onPreview,
           s.elementsChanged?.length ? `修改 ${s.elementsChanged.length} 个元素` : '',
           s.elementsAdded?.length && v.action !== 'create' ? `新增 ${s.elementsAdded.length} 个元素` : '',
           s.elementsRemoved?.length ? `移除 ${s.elementsRemoved.length} 个元素` : '',
-          s.cssChanged ? '样式变更' : '',
+          s.cssChanged ? (s.stylesChanged?.length ? `样式变更（${s.stylesChanged.join('、')}）` : '样式变更') : '',
+          s.readmeChanged && v.action !== 'create' ? 'README 更新' : '',
         ].filter(Boolean);
         const isOpen = open === v.id;
         return (

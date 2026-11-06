@@ -546,7 +546,7 @@ export function buildPagesPrompt(
   const what = kind === 'template' ? '路演模板' : '路演材料';
   const sample = done.at(-1);
   const first = plan.findIndex((p) => p.path === batch[0].path) + 1;
-  const text = `你正在分批制作这份${what}的页面文件：共 ${plan.length} 页，本批是第 ${first}–${first + batch.length - 1} 页。README 与样式文件已经完成，页面必须遵守其中的风格约定，只使用已有的 class 与 CSS 变量。
+  const text = `你正在分批制作这份${what}的页面文件：共 ${plan.length} 页，本批是第 ${batch.length > 1 ? `${first}–${first + batch.length - 1}` : first} 页。README 与样式文件已经完成，页面必须遵守其中的风格约定，只使用已有的 class 与 CSS 变量。
 
 ${readmeBlock(doc)}
 

@@ -9,6 +9,7 @@ export interface User {
 export interface DeckPage {
   id: string;
   html: string;
+  file?: string;
 }
 
 export interface DeckDoc {
@@ -18,6 +19,7 @@ export interface DeckDoc {
   head: string;
   css: string;
   pages: DeckPage[];
+  readme?: string;
 }
 
 export type ProjectType = 'template' | 'deck';
@@ -89,6 +91,8 @@ export interface DiffSummary {
   pagesRemoved: string[];
   pagesChanged: number[];
   cssChanged: boolean;
+  readmeChanged?: boolean;
+  stylesChanged?: string[];
   elementsChanged: ElementRef[];
   elementsAdded: ElementRef[];
   elementsRemoved: ElementRef[];
@@ -107,6 +111,16 @@ export interface Version {
   prompt: string;
   summary: DiffSummary;
   createdAt: number;
+}
+
+export interface ProjectFile {
+  path: string;
+  kind: 'readme' | 'css' | 'page';
+  chars: number;
+  page?: number;
+  title?: string;
+  pageId?: string;
+  content: string;
 }
 
 export interface Asset {

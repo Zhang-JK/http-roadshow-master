@@ -8,6 +8,7 @@ import { SlideFrame } from '../components/SlideFrame';
 import { useToast } from '../components/Toast';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { AssetsPanel } from '../components/AssetsPanel';
+import { FilesPanel } from '../components/FilesPanel';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
 import { elapsed, TYPE_LABELS } from '../lib/format';
 
@@ -39,7 +40,7 @@ export function EditorPage() {
   const [prompt, setPrompt] = useState('');
   const [attachments, setAttachments] = useState<RefFile[]>([]);
   const [sending, setSending] = useState(false);
-  const [tab, setTab] = useState<'history' | 'assets'>('history');
+  const [tab, setTab] = useState<'history' | 'files' | 'assets'>('history');
   const [preview, setPreview] = useState<{ version: Version; doc: DeckDoc } | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportMenu, setExportMenu] = useState(false);
@@ -204,7 +205,7 @@ export function EditorPage() {
     }
   };
 
-  const doExport = async (format: 'html' | 'pdf' | 'pdf-image' | 'pptx') => {
+  const doExport = async (format: 'html' | 'pdf' | 'pdf-image' | 'pptx' | 'zip') => {
     if (!project) return;
     setExportMenu(false);
     setExporting(format === 'pdf-image' ? 'pdf' : format);
@@ -297,6 +298,7 @@ export function EditorPage() {
               <button onClick={() => doExport('pdf')}>导出 PDF（矢量，可选中文字）</button>
               <button onClick={() => doExport('pdf-image')}>导出 PDF（图片，与预览完全一致）</button>
               <button onClick={() => doExport('pptx')}>导出 PPT（.pptx）</button>
+              <button onClick={() => doExport('zip')} data-testid="export-zip">下载源文件（.zip：README、样式、分页 HTML）</button>
             </div>
           )}
         </div>
@@ -485,9 +487,18 @@ export function EditorPage() {
           <aside className="side-panel">
             <div className="tabs">
               <button className={tab === 'history' ? 'on' : ''} onClick={() => setTab('history')}>修改历史 <span className="muted">{versions.length}</span></button>
+              <button className={tab === 'files' ? 'on' : ''} onClick={() => setTab('files')} data-testid="tab-files">文件</button>
               <button className={tab === 'assets' ? 'on' : ''} onClick={() => setTab('assets')}>素材 <span className="muted">{data?.assets.length ?? 0}</span></button>
             </div>
-            {tab === 'history' ? (
+            {tab === 'files' ? (
+              <FilesPanel
+                projectId={project.id}
+                versionNo={project.versionNo}
+                previewVersionId={preview?.version.id}
+                onLocatePage={(pid) => setPageId(pid)}
+                onChange={loadProject}
+              />
+            ) : tab === 'history' ? (
               <HistoryPanel
                 versions={versions}
                 currentVersionNo={project.versionNo}

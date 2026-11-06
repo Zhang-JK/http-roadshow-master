@@ -221,6 +221,8 @@ export interface AssembleOptions {
   extraBody?: string;
   presenter?: boolean;
   assetResolver?: (html: string) => string;
+  /** Link these style files instead of inlining doc.css (source bundle export). */
+  cssHrefs?: string[];
 }
 
 export function assembleHtml(doc: DeckDoc, opts: AssembleOptions = {}): string {
@@ -234,9 +236,7 @@ export function assembleHtml(doc: DeckDoc, opts: AssembleOptions = {}): string {
 <title>${escapeHtml(doc.title)}</title>
 ${doc.head}
 <style>${BASE_CSS(doc.width, doc.height)}</style>
-<style>
-${hoistImports(doc.css)}
-</style>
+${opts.cssHrefs ? opts.cssHrefs.map((h) => `<link rel="stylesheet" href="${escapeHtml(h)}">`).join('\n') : `<style>\n${hoistImports(doc.css)}\n</style>`}
 ${opts.extraHead ?? ''}
 </head>
 <body>

@@ -14,10 +14,15 @@ import {
   startEdit,
   startGeneration,
   withProjectLock,
+  withReadme,
   type JobRow,
   type ProjectRow,
 } from '../projects.js';
 import { renderImagePdf, renderPdf, renderPptx } from '../render.js';
+import { exportBundle } from '../bundle.js';
+import { cssFiles, fileTree, nameFiles } from '../files.js';
+
+const MAX_README = 50_000;
 
 const MAX_UPLOAD_FILES = 12;
 
@@ -406,6 +411,43 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     return { versionId: r.versionId };
   });
 
+  /** The project as files (README, styles, pages) with their content, for the current or a past version. */
+  app.get('/api/projects/:id/files', async (req) => {
+    requireUser(req);
+    const p = mustProject(db, (req.params as any).id);
+    const { version } = req.query as { version?: string };
+    const raw = version ? versionDoc(p.id, Number(version)) : projectDoc(p);
+    if (!raw) throw new HttpError(404, '暂无内容');
+    const doc = withReadme(p, raw);
+    const css = new Map(cssFiles(doc.css).map((f) => [f.path, f.css]));
+    const pages = new Map(nameFiles(doc.pages).map((pg) => [pg.file!, pg]));
+    return {
+      generatedReadme: !raw.readme?.trim(),
+      files: fileTree(doc).map((e) => ({
+        ...e,
+        pageId: e.kind === 'page' ? pages.get(e.path)!.id : undefined,
+        content: e.kind === 'readme' ? doc.readme : e.kind === 'css' ? css.get(e.path) : pages.get(e.path)!.html,
+      })),
+    };
+  });
+
+  app.put('/api/projects/:id/readme', async (req) => {
+    const user = requireUser(req);
+    const p = mustProject(db, (req.params as any).id);
+    const readme = String(((req.body ?? {}) as any).readme ?? '').trim();
+    if (!readme) throw new HttpError(400, 'README 不能为空');
+    if (readme.length > MAX_README) throw new HttpError(400, `README 过长（最多 ${MAX_README} 字符）`);
+    try {
+      const r = await applyManual(db, p.id, user.id, { action: 'readme', scope: 'global', prompt: '编辑 README（生成说明）' }, (d: DeckDoc) => ({
+        ...d,
+        readme: `${readme}\n`,
+      }));
+      return { versionId: r.versionId };
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
+  });
+
   /** Rendered HTML for iframes (thumbnails, previews). */
   app.get('/api/projects/:id/html', async (req, reply) => {
     requireUser(req);
@@ -434,6 +476,10 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     }
     if (format === 'pdf') return sendFile(reply, await renderPdf(doc, resolver), 'application/pdf', `${base}.pdf`);
     if (format === 'pdf-image') return sendFile(reply, await renderImagePdf(doc, resolver), 'application/pdf', `${base}.pdf`);
+    if (format === 'zip') {
+      const full = withReadme(p, doc);
+      return sendFile(reply, await exportBundle(db, full, full.readme ?? ''), 'application/zip', `${base}.zip`);
+    }
     if (format === 'pptx') {
       return sendFile(
         reply,

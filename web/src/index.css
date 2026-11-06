@@ -293,6 +293,20 @@ textarea { resize: vertical; min-height: 40px; }
 .el-page { font-size: 10px; font-weight: 700; color: #fff; background: #64748b; border-radius: 3px; padding: 0 4px; }
 .el-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #4a5168; }
 .assets { padding: 12px; overflow: auto; }
+.files { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: auto; }
+.file-tree { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; max-height: 40%; overflow: auto; flex: none; }
+.file-group-title { margin: 2px 4px; }
+.file-item { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; text-align: left; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.file-item code { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item:hover { background: #f1f5ff; }
+.file-item.on { background: #e8eefc; color: var(--primary); }
+.file-view { padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.file-view-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.file-note { margin: 0; }
+.file-content { margin: 0; background: #f6f7fb; border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 60vh; }
+.file-content.readme { font-family: inherit; font-size: 13px; }
+.readme-editor { display: flex; flex-direction: column; gap: 8px; }
+.readme-editor textarea { width: 100%; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
 .asset-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
 .asset-list li { display: flex; align-items: center; gap: 10px; }
 .asset-list img, .doc-icon { width: 48px; height: 36px; object-fit: cover; border-radius: 4px; background: #f1f3f8; display: grid; place-items: center; flex: none; }

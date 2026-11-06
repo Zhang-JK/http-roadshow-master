@@ -463,8 +463,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
 }
 
 /** The saved document, with a README written from the creation brief when the project predates READMEs. */
-export function withReadme(project: ProjectRow): DeckDoc {
-  const doc = projectDoc(project)!;
+export function withReadme(project: ProjectRow, doc: DeckDoc = projectDoc(project)!): DeckDoc {
   if (doc.readme?.trim()) return doc;
   const meta = JSON.parse(project.meta || '{}');
   return { ...doc, readme: readmeFromBrief(project.type, project.name, meta.brief) };
@@ -548,10 +547,10 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
         await editWithTools(db, job.id, userId, draft, messages, ft?.tools);
       } else {
         const text = await runLlm(db, job.id, userId, messages, ft?.tools);
-        draft =
-          scope === 'global'
-            ? Draft.fromDocument(text, { width: snapshot.width, height: snapshot.height, title: snapshot.title })
-            : Draft.fromFragment(text, snapshot, input.pageId!);
+        if (scope === 'global') {
+          draft = Draft.ofDocument(snapshot);
+          if (!draft.replaceFromText(text)) throw new Error(`模型没有输出任何文件修改${cleanSummary(text) ? `：${cleanSummary(text)}` : ''}`);
+        } else draft = Draft.fromFragment(text, snapshot, input.pageId!);
       }
       await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools');
       jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });

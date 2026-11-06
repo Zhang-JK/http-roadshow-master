@@ -50,6 +50,9 @@ export function ModelsPage() {
     llmMaxCallMinutes: number;
     editMode: 'tools' | 'rewrite';
     editToolRounds: number;
+    contextTokens: number;
+    generateMode: 'files' | 'single';
+    genPagesPerCall: number;
   } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
@@ -204,6 +207,19 @@ export function ModelsPage() {
                 <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
                 <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存</span>
               </label>
+              <label className="field inline" title="分步生成：先写 README（需求、风格约定、页面规划）与样式文件，再每次生成几页，单次输出短、被截断也只需重做一页；单次生成：一次输出整份 HTML">
+                <span>生成方式</span>
+                <select value={settings.generateMode} onChange={(e) => saveSettings({ generateMode: e.target.value as 'files' | 'single' })} data-testid="generate-mode">
+                  <option value="files">分步生成多文件（推荐）</option>
+                  <option value="single">单次生成整份 HTML</option>
+                </select>
+              </label>
+              {settings.generateMode !== 'single' && (
+                <label className="field inline" title="分步生成时每次调用生成的页数；模型较慢或页面复杂时调小">
+                  <span>每次生成页数</span>
+                  <input type="number" min="1" max="10" defaultValue={settings.genPagesPerCall} onBlur={(e) => saveSettings({ genPagesPerCall: Number(e.target.value) })} data-testid="pages-per-call" />
+                </label>
+              )}
               <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">
                 <span>AI 修改方式</span>
                 <select value={settings.editMode} onChange={(e) => saveSettings({ editMode: e.target.value as 'tools' | 'rewrite' })} data-testid="edit-mode">
@@ -223,7 +239,11 @@ export function ModelsPage() {
               </label>
               <label className="field inline">
                 <span>最大输出 tokens</span>
-                <input type="number" defaultValue={settings.maxTokens} onBlur={(e) => saveSettings({ maxTokens: Number(e.target.value) })} />
+                <input type="number" defaultValue={settings.maxTokens} onBlur={(e) => saveSettings({ maxTokens: Number(e.target.value) })} data-testid="max-tokens" />
+              </label>
+              <label className="field inline" title="模型的上下文窗口（输入 + 输出）。每次调用会自动把输出上限收窄到剩余空间，对话过长时自动压缩早先的工具结果与截图">
+                <span>模型上下文 tokens</span>
+                <input type="number" min="8000" defaultValue={settings.contextTokens} onBlur={(e) => saveSettings({ contextTokens: Number(e.target.value) })} data-testid="context-tokens" />
               </label>
               <label className="field inline">
                 <span>Temperature</span>
@@ -238,7 +258,7 @@ export function ModelsPage() {
                 <input type="number" min="5" max="1440" defaultValue={settings.llmMaxCallMinutes} onBlur={(e) => saveSettings({ llmMaxCallMinutes: Number(e.target.value) })} />
               </label>
               <p className="muted small">
-                只要模型还在持续输出就不会中止。按输出速度估算：「最大输出 tokens」÷ 每秒 tokens 数 ≈ 一次调用的最长耗时，例如 32000 tokens 在 20 tokens/秒 下约 27 分钟；单次调用上限应大于该值。
+                只要模型还在持续输出就不会中止。按输出速度估算：「最大输出 tokens」÷ 每秒 tokens 数 ≈ 一次调用的最长耗时，例如 65536 tokens 在 20 tokens/秒 下约 55 分钟；单次调用上限应大于该值。分步生成时每次只输出几页（通常几千 tokens），回复被截断时会自动续写或重做缺失的页面。
               </p>
             </div>
           )}

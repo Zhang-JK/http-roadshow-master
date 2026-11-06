@@ -31,6 +31,7 @@ export const ACTION_LABELS: Record<string, string> = {
   page_duplicate: '复制页面',
   page_move: '移动页面',
   rename: '重命名',
+  readme: '编辑 README',
 };
 
 export const SCOPE_LABELS: Record<string, string> = {

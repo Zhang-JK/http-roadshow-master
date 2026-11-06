@@ -139,7 +139,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     // Pages written under other names fill the planned files that are still missing, in order.
     for (const b of strays) {
       const slot = batch.find((p) => !done.has(p.path));
-      if (!slot || !/<section/i.test(b.content)) break;
+      if (!slot) break;
       got += addFile(slot.path, b.content) ? 1 : 0;
     }
     if (got) {

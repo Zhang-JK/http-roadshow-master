@@ -314,11 +314,9 @@ export class Draft {
     this.edits++;
   }
 
+  /** The file name the model sees for a page (names derived for unnamed pages stick once shown). */
   private pageFile(page: number): string | undefined {
-    if (this.mode === 'doc') return this.doc.pages[page - 1]?.file;
-    const first = this.firstEditable;
-    if (page >= first && page < first + this.pages.length) return this.pages[page - first].file;
-    return undefined;
+    return this.view().pages[page - 1]?.file;
   }
 
   /** Exact find/replace inside one editable page (or the editable CSS when page is 0). */
