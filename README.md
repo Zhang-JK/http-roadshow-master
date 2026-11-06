@@ -67,3 +67,4 @@ npm --prefix web run test:e2e   # 浏览器端到端测试（Playwright，自动
 
 推荐模型：OpenRouter 的 `deepseek/deepseek-v4.1-flash-1017`（支持图像输入），附加参数 `{"reasoning":{"effort":"low"}}` 可缩短等待。实测生成 8 页材料约 60–70 秒、约 $0.01；单元素修改约 8 秒、约 $0.003。
 <!-- release test -->
+<!-- release test 2 -->
