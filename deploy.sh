@@ -33,7 +33,13 @@ c_info=$'\033[36m'; c_ok=$'\033[32m'; c_warn=$'\033[33m'; c_err=$'\033[31m'; c_o
 log()  { printf '%s[%s]%s %s\n' "$c_info" "$(date '+%F %T')" "$c_off" "$*"; }
 ok()   { printf '%s[%s] ✔ %s%s\n' "$c_ok" "$(date '+%F %T')" "$*" "$c_off"; }
 warn() { printf '%s[%s] ⚠ %s%s\n' "$c_warn" "$(date '+%F %T')" "$*" "$c_off" >&2; }
-die()  { printf '%s[%s] ✘ %s%s\n' "$c_err" "$(date '+%F %T')" "$*" "$c_off" >&2; set_status failed "$*" || true; exit 1; }
+die()  {
+  printf '%s[%s] ✘ %s%s\n' "$c_err" "$(date '+%F %T')" "$*" "$c_off" >&2
+  set_status failed "$*" || true
+  # Drop a release that failed before it was switched in.
+  if [ -n "${BUILDING_REL:-}" ] && [ "$BUILDING_REL" != "$(current_release)" ]; then rm -rf "$BUILDING_REL"; fi
+  exit 1
+}
 is_root() { [ "$(id -u)" -eq 0 ]; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -247,7 +253,8 @@ npm_cmd() { # runs npm from the selected node
   local npm_cli; npm_cli="$(dirname "$NODE_BIN")/../lib/node_modules/npm/bin/npm-cli.js"
   local reg=(); [ -n "$NPM_REGISTRY" ] && reg=(--registry "$NPM_REGISTRY")
   local runner=("$NODE_BIN" "$npm_cli"); [ -f "$npm_cli" ] || runner=(npm)
-  PATH="$(dirname "$NODE_BIN"):$PATH" npm_config_cache="$SHARED/npm-cache" \
+  # In-app updates inherit NODE_ENV=production from the app, which would make npm skip build tools.
+  env -u NODE_ENV PATH="$(dirname "$NODE_BIN"):$PATH" npm_config_cache="$SHARED/npm-cache" \
     "${runner[@]}" "$@" "${reg[@]}" --no-audit --no-fund --no-update-notifier --loglevel=error
 }
 
@@ -409,12 +416,12 @@ build_release() { # dir
   local dir="$1"
   log "安装后端依赖并编译"
   ( cd "$dir/server"
-    if [ -f package-lock.json ]; then npm_cmd ci; else npm_cmd install; fi
+    if [ -f package-lock.json ]; then npm_cmd ci --include=dev; else npm_cmd install --include=dev; fi
     "$NODE_BIN" node_modules/typescript/bin/tsc -p . || "$NODE_BIN" node_modules/.bin/tsc -p .
     npm_cmd prune --omit=dev ) || die "后端构建失败"
   log "安装前端依赖并构建"
   ( cd "$dir/web"
-    if [ -f package-lock.json ]; then npm_cmd ci; else npm_cmd install; fi
+    if [ -f package-lock.json ]; then npm_cmd ci --include=dev; else npm_cmd install --include=dev; fi
     PATH="$(dirname "$NODE_BIN"):$PATH" npm_cmd run build
     rm -rf node_modules ) || die "前端构建失败"
   [ -f "$dir/server/dist/main.js" ] && [ -f "$dir/web/dist/index.html" ] || die "构建产物缺失"
@@ -589,6 +596,7 @@ deploy_release() {
   id="$(date +%Y%m%d-%H%M%S)"
   rel="$RELEASES/$id"
   rm -rf "$rel"
+  BUILDING_REL="$rel"
   fetch_source "$rel"
   STATUS_TO="$SRC_VERSION"
   set_status running "构建 $SRC_VERSION"
@@ -601,6 +609,7 @@ deploy_release() {
   set_status running "切换版本并重启"
   write_app_env
   switch_current "$rel"
+  BUILDING_REL=""
   [ -n "$prev" ] && echo "$prev" > "$RUN_DIR/previous"
   [ -n "$backup" ] && echo "$backup" > "$RUN_DIR/last-backup"
   fix_owner
