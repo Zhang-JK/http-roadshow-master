@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { api } from './api';
+import { SystemPage } from './pages/System';
 import { useAuth } from './auth';
 import { LoginPage } from './pages/Login';
 import { ProjectsPage } from './pages/Projects';
@@ -12,6 +14,10 @@ function Shell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const [pwd, setPwd] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [sys, setSys] = useState<{ version: { version: string }; updateAvailable: boolean } | null>(null);
+  useEffect(() => {
+    api.get<typeof sys>('/api/system/info').then(setSys).catch(() => {});
+  }, []);
   return (
     <div className="app">
       <header className="topnav">
@@ -24,6 +30,11 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/decks">路演材料</NavLink>
           <NavLink to="/users">用户管理</NavLink>
           {user?.isAdmin && <NavLink to="/models">模型接入</NavLink>}
+          {user?.isAdmin && (
+            <NavLink to="/system">
+              系统更新{sys?.updateAvailable && <span className="nav-dot" title="有新版本" data-testid="update-dot" />}
+            </NavLink>
+          )}
         </nav>
         <div className="user-menu">
           <button className="user-chip" onClick={() => setMenu((m) => !m)} data-testid="user-menu">
@@ -33,6 +44,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           </button>
           {menu && (
             <div className="dropdown" onMouseLeave={() => setMenu(false)}>
+              {sys && <div className="dropdown-note">版本 {sys.version.version}</div>}
               <button onClick={() => { setPwd(true); setMenu(false); }}>修改密码</button>
               <button onClick={logout}>退出登录</button>
             </div>
@@ -61,6 +73,7 @@ export default function App() {
       <Route path="/decks" element={<Shell><ProjectsPage type="deck" /></Shell>} />
       <Route path="/users" element={<Shell><UsersPage /></Shell>} />
       <Route path="/models" element={<Shell>{user.isAdmin ? <ModelsPage /> : <Navigate to="/templates" />}</Shell>} />
+      <Route path="/system" element={<Shell>{user.isAdmin ? <SystemPage /> : <Navigate to="/templates" />}</Shell>} />
       <Route path="*" element={<Navigate to="/templates" replace />} />
     </Routes>
   );

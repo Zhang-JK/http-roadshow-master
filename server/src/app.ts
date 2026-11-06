@@ -10,6 +10,8 @@ import { HttpError, SESSION_COOKIE, userFromToken } from './auth.js';
 import { authRoutes } from './routes/auth.js';
 import { llmRoutes } from './routes/llm.js';
 import { projectRoutes } from './routes/projects.js';
+import { systemRoutes } from './routes/system.js';
+import { versionInfo } from './system.js';
 
 export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: boolean } = {}) {
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 20 * 1024 * 1024 });
@@ -26,10 +28,11 @@ export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: bool
     reply.status(status).send({ error: err.message || '服务器错误' });
   });
 
-  app.get('/api/health', async () => ({ ok: true }));
+  app.get('/api/health', async () => ({ ok: true, version: versionInfo().version }));
   authRoutes(app, db);
   llmRoutes(app, db);
   projectRoutes(app, db);
+  systemRoutes(app);
 
   if (opts.serveWeb !== false && fs.existsSync(config.webDist)) {
     await app.register(fastifyStatic, { root: config.webDist, prefix: '/' });

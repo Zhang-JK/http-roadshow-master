@@ -9,5 +9,6 @@
     "dev:web": "npm --prefix web run dev",
     "test": "npm --prefix server test && npm --prefix web run test:e2e",
     "typecheck": "npm --prefix server run typecheck && cd web && npx tsc -b"
-  }
+  },
+  "version": "1.1.0"
 }

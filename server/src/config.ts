@@ -9,6 +9,7 @@ function findChrome(): string | undefined {
   const candidates = [
     '/usr/local/bin/google-chrome',
     '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -17,8 +18,10 @@ function findChrome(): string | undefined {
   return candidates.find((c) => fs.existsSync(c));
 }
 
+const appRoot = path.resolve(import.meta.dirname, '../..');
+
 export const config = {
-  port: Number(process.env.PORT ?? 8787),
+  port: Number(process.env.PORT ?? 9090),
   host: process.env.HOST ?? '0.0.0.0',
   dataDir,
   dbFile: process.env.DB_FILE ?? path.join(dataDir, 'roadshow.db'),
@@ -29,6 +32,10 @@ export const config = {
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
   chromePath: findChrome(),
   llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 600_000),
+  appRoot,
+  /** Set by deploy.sh; when absent the app was not installed by the deploy tool and cannot self-update. */
+  baseDir: process.env.RS_BASE_DIR,
+  runDir: process.env.RS_RUN_DIR,
 };
 
 fs.mkdirSync(config.assetDir, { recursive: true });
