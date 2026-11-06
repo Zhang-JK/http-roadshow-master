@@ -96,6 +96,33 @@ function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args:
   return null;
 }
 
+const EDIT_TOOLS = new Set(['edit_elements', 'edit_css', 'replace_in_draft', 'rewrite_page', 'insert_page', 'delete_page', 'duplicate_page', 'move_page']);
+
+/**
+ * Scripted tool-first edit (the edit prompt has 【修改方式】): one round of structured edits, the same
+ * changes the rewrite-mode replies below make, then a short summary.
+ */
+function mockEditRound(text: string, messages: any[]): { name: string; args: Record<string, unknown> }[] | null {
+  const done = messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((c: any) => EDIT_TOOLS.has(c.function.name)));
+  if (done) return null;
+  const overflow = text.includes('FIX_DRAFT') ? [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: OVERFLOW } } }] : [];
+  const eids = text.match(/选中元素的 data-eid：([^（]+)（/)?.[1].split('、');
+  if (eids) {
+    return [
+      ...eids.map((eid) => ({ name: 'edit_elements', args: { eids: [eid], text: `已修改：${text.includes('MARK') ? 'MARK' : 'X'}` } })),
+      { name: 'edit_css', args: { selector: '.added', set: { color: 'red' } } },
+      ...overflow,
+    ];
+  }
+  if (text.includes('本次只能修改草稿第')) {
+    return [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: '<p class="body">整页新增段落</p>' } } }, ...overflow];
+  }
+  return [
+    { name: 'find_css', args: { query: '--brand' } },
+    { name: 'edit_css', args: { selector: ':root', set: { '--brand': '#111827' } } },
+  ];
+}
+
 function streamToolCalls(res: http.ServerResponse, toolCalls: { name: string; args: Record<string, unknown> }[], text: string, stream: boolean) {
   const usage = { prompt_tokens: Math.round(text.length / 2), completion_tokens: 20, cost: 0.0001 };
   if (!stream) {
@@ -156,22 +183,29 @@ export async function startMockLlm(opts: MockOptions = {}) {
 
     const toolMsgs = body.messages.filter((m: any) => m.role === 'tool');
     const canCall = body.tools && body.tool_choice !== 'none';
+    const toolEdit = !review && text.includes('【修改方式】') && !/FULL_REWRITE|NO_CHANGE/.test(text);
     const toolCalls = !canCall
       ? null
       : review
         ? text.includes('FIX_DRAFT')
           ? mockReviewRound(toolMsgs)
           : null
-        : text.includes('USE_TOOLS')
-          ? mockToolRound(toolMsgs)
-          : null;
+        : toolEdit
+          ? ((text.includes('USE_TOOLS') ? mockToolRound(toolMsgs) : null) ?? mockEditRound(text, body.messages))
+          : text.includes('USE_TOOLS')
+            ? mockToolRound(toolMsgs)
+            : null;
     if (toolCalls) {
       streamToolCalls(res, toolCalls, text, !!body.stream);
       return;
     }
 
     let reply: string;
-    if (review) {
+    if (toolEdit) {
+      reply = '已按要求修改。';
+    } else if (text.includes('NO_CHANGE')) {
+      reply = '我认为不需要修改。';
+    } else if (review) {
       reply = text.includes('EMPTY_FINAL') ? '' : text.includes('FIX_DRAFT') ? '已修复：把超出页面右边界的文字移回页面内。' : '无需修改。';
     } else if (text.includes('Connectivity test')) {
       const px = images[0] ? firstPixel(images[0]) : null;

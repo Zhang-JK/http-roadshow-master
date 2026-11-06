@@ -1,5 +1,5 @@
 import type { ChatMessage, ContentPart } from './llm.js';
-import { assembleHtml, type DeckDoc, type ElementInfo } from './deck.js';
+import { assembleHtml, pageText, type DeckDoc, type ElementInfo } from './deck.js';
 
 export interface AssetRef {
   id: string;
@@ -117,7 +117,7 @@ function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
 
 const hasReferences = (assets: AssetRef[]) => assets.some((a) => a.role === 'reference' || a.slides?.length);
 
-const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>) => `
+const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>, output: 'tools' | 'rewrite') => `
 【硬性技术规范 —— 必须严格遵守】
 1. 材料以“页”为单位。每一页是一个 <section class="slide"> 元素，所有页面依次直接放在 <body> 下，不能嵌套。
 2. 每页画幅固定为 ${doc.width}×${doc.height} 像素（${doc.width > doc.height ? '横向' : doc.width < doc.height ? '竖向' : '方形'}）。所有内容必须完全容纳在页面内，禁止溢出、禁止滚动，字号与留白要按这个像素尺寸设计（正文通常 28–40px，标题 56–110px）。
@@ -128,11 +128,30 @@ const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>) => `
 7. 图片：只能使用用户提供的素材 URL（见素材列表），或使用 CSS 渐变、内联 SVG 图形、emoji/图标字符做装饰。禁止编造外部图片链接。
 8. 不要使用 position:fixed，不要依赖视口单位（vw/vh），一律使用 px 或 %。材料需要导出为 PDF/PPT，因此不要使用 background-clip:text 渐变文字和 mix-blend-mode（导出时会出现瑕疵），强调文字请用纯色、text-shadow 或色块背景。
 9. 已有元素上的 data-eid 与 data-page-id 属性是系统用于追踪修改历史的标识，修改时必须原样保留在对应元素上；新增元素不需要添加 data-eid。
-10. 输出内容只包含一个 \`\`\`html 代码块，不要输出任何解释文字。`;
+10. ${
+  output === 'tools'
+    ? '本次通过工具直接修改已载入的草稿，不要在回复中输出 HTML 代码块；全部修改完成后，用一两句话说明做了哪些修改。'
+    : '输出内容只包含一个 ```html 代码块，不要输出任何解释文字。'
+}`;
 
-const SYSTEM = (doc: Pick<DeckDoc, 'width' | 'height'>) =>
+/** How the model delivers its work: a complete HTML block, or edits made with the draft tools. */
+export type EditMode = 'tools' | 'rewrite';
+
+const SYSTEM = (doc: Pick<DeckDoc, 'width' | 'height'>, output: EditMode = 'rewrite') =>
   `你是一名顶级的演示文稿视觉设计师兼前端工程师，擅长制作投资路演、产品发布、商业汇报类的 HTML 演示材料。你的作品层次清晰、排版精致、配色专业，信息密度适中，适合投屏和打印。
-${RULES(doc)}`;
+${RULES(doc, output)}`;
+
+/** Larger documents are listed page by page instead of sent in full; the model reads what it needs. */
+const INLINE_DOC_CHARS = 60_000;
+
+const TOOL_GUIDE = (scope: EditScope) => `【修改方式】
+草稿已载入为当前内容，请用工具直接修改，只改与要求相关的部分，不要重新输出整份 HTML：
+- 改文字、样式、属性，增删元素：edit_elements（用 data-eid 精确指定${scope === 'element' ? '，选中元素见上' : ''}，也可用 selector / contains；一次可改多个元素）
+- 改样式规则或主题色：find_css 查找，edit_css 修改（CSS 变量在 :root 中）${scope === 'global' ? '' : '；共享样式只读，本页的样式请用内联 style 或新的 class'}
+- 多处相同文字：replace_in_draft（all_pages=true 时所有可修改页面一起替换）
+- ${scope === 'global' ? '增删、复制、移动页面：insert_page / delete_page / duplicate_page / move_page；' : '本页内容过多时可用 rewrite_page 拆成多页，或用 insert_page 在后面加页；'}只有需要重新设计整页时才用 rewrite_page
+- 修改后可用 render_pages 查看效果
+全部完成后用一两句话说明做了哪些修改。`;
 
 export interface TemplateBrief {
   name: string;
@@ -233,7 +252,14 @@ export interface EditRequest {
   attachments?: AssetRef[];
 }
 
-export function buildEditPrompt(doc: DeckDoc, req: EditRequest, assets: AssetRef[], kind: 'template' | 'deck'): ChatMessage[] {
+export function buildEditPrompt(
+  doc: DeckDoc,
+  req: EditRequest,
+  assets: AssetRef[],
+  kind: 'template' | 'deck',
+  mode: EditMode = 'rewrite',
+): ChatMessage[] {
+  const tools = mode === 'tools';
   const what = kind === 'template' ? '路演模板' : '路演材料';
   const parts: ContentPart[] = [];
   const attachments = req.attachments ?? [];
@@ -248,15 +274,16 @@ export function buildEditPrompt(doc: DeckDoc, req: EditRequest, assets: AssetRef
 【修改要求】
 ${req.prompt}${attachBlock}
 
-【当前完整 HTML】
-\`\`\`html
-${assembleHtml(doc)}
-\`\`\`
+${docBlock(doc, tools)}
 
 【可用素材】
 ${assetsBlock(assets)}
 
-请输出修改后的【完整 HTML 文档】（包含全部页面，未涉及修改的页面保持原样，所有已有 data-eid / data-page-id 属性保留）。如用户要求增删页面，可以增删 <section class="slide">。${toolsNote([...assets, ...attachments])}`;
+${
+      tools
+        ? TOOL_GUIDE('global')
+        : '请输出修改后的【完整 HTML 文档】（包含全部页面，未涉及修改的页面保持原样，所有已有 data-eid / data-page-id 属性保留）。如用户要求增删页面，可以增删 <section class="slide">。'
+    }${toolsNote([...assets, ...attachments])}`;
   } else {
     const n = req.pageIndex! + 1;
     const target =
@@ -280,7 +307,7 @@ ${target}
 【修改要求】
 ${req.prompt}${attachBlock}
 
-【全局样式（只读参考，不要整体输出）】
+【全局样式（${tools ? '共享，只读' : '只读参考，不要整体输出'}）】
 \`\`\`css
 ${doc.css}
 \`\`\`
@@ -293,15 +320,28 @@ ${req.pageHtml}
 【可用素材】
 ${assetsBlock(assets)}
 
-【输出格式】
-只输出修改后的第 ${n} 页 <section class="slide" ...> 完整元素（保留 data-page-id 与所有已有 data-eid）。如果用户明确要求把这一页拆分成多页，可以连续输出多个 <section>。如需新增 CSS 规则，可在 section 之前附加一个 <style> 块，其中只写新增规则，它会被追加到全局样式中；不要重复输出已有的全局样式。全部放在一个 \`\`\`html 代码块中。${toolsNote([...assets, ...attachments])}`;
+${
+      tools
+        ? `本次只能修改草稿第 ${n} 页${
+            req.scope === 'element' && req.elements?.length ? `，选中元素的 data-eid：${req.elements.map((e) => e.eid).join('、')}（edit_elements 传 eids）` : ''
+          }。\n${TOOL_GUIDE(req.scope)}`
+        : `【输出格式】
+只输出修改后的第 ${n} 页 <section class="slide" ...> 完整元素（保留 data-page-id 与所有已有 data-eid）。如果用户明确要求把这一页拆分成多页，可以连续输出多个 <section>。如需新增 CSS 规则，可在 section 之前附加一个 <style> 块，其中只写新增规则，它会被追加到全局样式中；不要重复输出已有的全局样式。全部放在一个 \`\`\`html 代码块中。`
+    }${toolsNote([...assets, ...attachments])}`;
     if (req.screenshot) {
       parts.push({ type: 'text', text: `第 ${n} 页当前渲染截图${req.scope === 'element' ? '（红框为选中元素）' : ''}：` });
       parts.push({ type: 'image_url', image_url: { url: req.screenshot } });
     }
   }
   return [
-    { role: 'system', content: SYSTEM(doc) },
+    { role: 'system', content: SYSTEM(doc, mode) },
     { role: 'user', content: [{ type: 'text', text }, ...parts, ...imageParts(attachments, plan)] },
   ];
+}
+
+function docBlock(doc: DeckDoc, tools: boolean): string {
+  const full = assembleHtml(doc);
+  if (!tools || full.length <= INLINE_DOC_CHARS) return `【当前完整 HTML】\n\`\`\`html\n${full}\n\`\`\``;
+  const outline = doc.pages.map((p, i) => `第 ${i + 1} 页：${pageText(p).split('\n')[0]?.slice(0, 40) ?? ''}`).join('\n');
+  return `【页面目录】（材料较长，未附上全部源码：请用 read_draft、find_elements、find_css 查看需要修改的部分）\n${outline}`;
 }

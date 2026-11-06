@@ -269,7 +269,7 @@ describe('templates, decks, edits, history and export', () => {
     const p = await req('GET', `/api/projects/${deckId}`, adminCookie);
     expect(p.json.project.versionNo).toBe(2);
     expect(p.json.project.doc.pages[1].html).toContain('已修改：MARK');
-    expect(p.json.project.doc.css).toContain('.added{color:red}');
+    expect(p.json.project.doc.css).toMatch(/\.added\s*\{\s*color:\s*red/);
     expect(p.json.project.doc.pages[0].html).toBe(doc.pages[0].html);
     const v = await req('GET', `/api/projects/${deckId}/versions`, adminCookie);
     const latest = v.json.versions[0];
@@ -299,6 +299,44 @@ describe('templates, decks, edits, history and export', () => {
   it('rejects bad edit requests', async () => {
     expect((await req('POST', `/api/projects/${deckId}/edit`, adminCookie, { prompt: '', scope: 'global' })).status).toBe(400);
     expect((await req('POST', `/api/projects/${deckId}/edit`, adminCookie, { prompt: 'x', scope: 'page', pageId: 'nope' })).status).toBe(400);
+  });
+
+  it('edits go through the structured tools by default, with fallbacks and the rewrite mode', async () => {
+    const c = await req('POST', '/api/projects', adminCookie, { type: 'template', name: '工具编辑', style: '简约' });
+    expect((await waitJob(c.json.job.id)).status).toBe('done');
+    const id = c.json.project.id;
+    const doc0 = (await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc;
+    const edit = async (body: Record<string, unknown>) => waitJob((await req('POST', `/api/projects/${id}/edit`, adminCookie, body)).json.job.id);
+
+    const before = mock.calls.length;
+    expect((await edit({ prompt: '加一段', scope: 'page', pageId: doc0.pages[0].id })).status).toBe('done');
+    const [first, last] = mock.calls.slice(before);
+    expect(mock.calls.length).toBe(before + 2);
+    expect(first.text).toContain('【修改方式】');
+    expect(first.text).not.toContain('只输出修改后的第');
+    expect(first.body.tools.map((t: any) => t.function.name)).toEqual(expect.arrayContaining(['edit_elements', 'edit_css', 'find_elements']));
+    expect(last.body.messages.find((m: any) => m.role === 'tool').content).toContain('已修改 1 个元素（第 1 页）');
+    let doc = (await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc;
+    expect(doc.pages[0].html).toContain('整页新增段落');
+    expect(doc.pages.slice(1)).toEqual(doc0.pages.slice(1));
+
+    const none = await edit({ prompt: 'NO_CHANGE 随便看看', scope: 'global' });
+    expect(none.status).toBe('error');
+    expect(none.error).toContain('模型没有做任何修改：我认为不需要修改');
+
+    expect((await edit({ prompt: 'FULL_REWRITE 重做', scope: 'global' })).status).toBe('done');
+    doc = (await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc;
+    expect(doc.pages[0].html).not.toContain('整页新增段落');
+
+    await req('PUT', '/api/settings', adminCookie, { editMode: 'rewrite' });
+    const b2 = mock.calls.length;
+    expect((await edit({ prompt: '加一段', scope: 'page', pageId: doc.pages[1].id })).status).toBe('done');
+    expect(mock.calls.length).toBe(b2 + 1);
+    expect(mock.calls.at(-1)!.text).toContain('只输出修改后的第');
+    expect(mock.calls.at(-1)!.body.tools).toBeUndefined();
+    expect((await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc.pages[1].html).toContain('整页新增段落');
+    expect((await req('PUT', '/api/settings', adminCookie, { editMode: 'tools', editToolRounds: 99 })).json.settings).toMatchObject({ editMode: 'tools', editToolRounds: 40 });
+    expect((await req('DELETE', `/api/projects/${id}`, adminCookie)).status).toBe(200);
   });
 
   it('concurrent edits by two users on different pages are both applied', async () => {

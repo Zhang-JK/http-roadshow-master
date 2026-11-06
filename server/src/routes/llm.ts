@@ -182,6 +182,8 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     if (body.selfCheckRounds !== undefined) patch.selfCheckRounds = Math.max(1, Math.min(20, Math.floor(Number(body.selfCheckRounds)) || 10));
     if (body.maxTokens !== undefined) patch.maxTokens = Math.max(1000, Math.min(200000, Number(body.maxTokens) || 32000));
     if (body.temperature !== undefined) patch.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
+    if (body.editMode !== undefined) patch.editMode = body.editMode === 'rewrite' ? 'rewrite' : 'tools';
+    if (body.editToolRounds !== undefined) patch.editToolRounds = Math.max(2, Math.min(40, Math.floor(Number(body.editToolRounds)) || 12));
     if (body.llmIdleTimeoutSec !== undefined) patch.llmIdleTimeoutSec = Math.max(30, Math.min(7200, Math.floor(Number(body.llmIdleTimeoutSec)) || 600));
     if (body.llmMaxCallMinutes !== undefined) patch.llmMaxCallMinutes = Math.max(5, Math.min(1440, Math.floor(Number(body.llmMaxCallMinutes)) || 120));
     setSettings(db, patch);

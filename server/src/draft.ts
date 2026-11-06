@@ -1,6 +1,20 @@
 import * as cheerio from 'cheerio';
 import type { DB } from './db.js';
 import { assignIds, cloneDoc, pageText, parseFragment, parseFullHtmlRaw, replacePage, type DeckDoc, type DeckPage } from './deck.js';
+import {
+  countInPage,
+  editCss,
+  editInPage,
+  findCssRules,
+  findInPage,
+  hasCssRule,
+  listMatches,
+  tooMany,
+  type CssEdit,
+  type ElementEdit,
+  type ElementMatch,
+  type ElementTarget,
+} from './domEdit.js';
 import { sliceText, type FileTools, type ToolDef, type ToolOutput } from './fileTools.js';
 import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart } from './llm.js';
 import { inspectLayout, renderContactSheets, renderPageImages, type PageReport } from './render.js';
@@ -16,6 +30,13 @@ function splitSections(html: string): DeckPage[] {
     pages.push({ id: $(el).attr('data-page-id') ?? '', html: $.html(el) });
   });
   return pages;
+}
+
+function withoutIds(html: string): string {
+  const $ = cheerio.load(html, null, false);
+  $('[data-eid]').removeAttr('data-eid');
+  $('[data-page-id]').removeAttr('data-page-id');
+  return $.html();
 }
 
 /**
@@ -37,6 +58,18 @@ export class Draft {
   static fromDocument(text: string, base: Pick<DeckDoc, 'width' | 'height' | 'title'>): Draft {
     const doc = parseFullHtmlRaw(text, base);
     return new Draft('doc', doc);
+  }
+
+  /** Start from the saved document, to be changed with the tools (whole-document edits). */
+  static ofDocument(snapshot: DeckDoc): Draft {
+    return new Draft('doc', cloneDoc(snapshot));
+  }
+
+  /** Start from one saved page, to be changed with the tools (page and element edits). */
+  static ofPage(snapshot: DeckDoc, pageId: string): Draft {
+    const page = snapshot.pages.find((p) => p.id === pageId);
+    if (!page) throw new Error('目标页面不存在');
+    return new Draft('fragment', snapshot, [{ ...page }], '', pageId);
   }
 
   static fromFragment(text: string, snapshot: DeckDoc, pageId: string): Draft {
@@ -134,6 +167,95 @@ export class Draft {
     if (page === 0) this.setCss(next);
     else this.setPage(page, next);
     return all ? count : 1;
+  }
+
+  /** The same exact replacement in every editable page; returns the count per page. */
+  replaceEverywhere(oldText: string, newText: string): { page: number; count: number }[] {
+    if (!oldText) throw new Error('old_text 不能为空');
+    const hits = this.editablePages()
+      .map((page) => ({ page, count: this.pageSource(page).split(oldText).length - 1 }))
+      .filter((h) => h.count > 0);
+    if (!hits.length) throw new Error('所有可修改的页面中都没有找到 old_text');
+    for (const h of hits) this.setPage(h.page, this.pageSource(h.page).split(oldText).join(newText));
+    return hits;
+  }
+
+  private pagesToSearch(page?: number): number[] {
+    if (page === undefined || page === null || Number.isNaN(page)) return Array.from({ length: this.pageCount }, (_, i) => i + 1);
+    if (page < 1 || page > this.pageCount) throw new Error(`页码超出范围（共 ${this.pageCount} 页）`);
+    return [page];
+  }
+
+  findElements(target: ElementTarget, page?: number): (ElementMatch & { page: number; editable: boolean })[] {
+    return this.pagesToSearch(page).flatMap((p) =>
+      findInPage(this.pageSource(p), target).map((m) => ({ ...m, page: p, editable: this.isEditable(p) })),
+    );
+  }
+
+  /** Apply a structured edit to matching elements of the editable pages (or of one page). */
+  editElements(target: ElementTarget, edit: ElementEdit, all: boolean, page?: number): { page: number; count: number }[] {
+    const pages = this.pagesToSearch(page);
+    const counts = pages.map((p) => ({ page: p, count: countInPage(this.pageSource(p), target) })).filter((c) => c.count > 0);
+    const locked = counts.filter((c) => !this.isEditable(c.page));
+    const open = counts.filter((c) => this.isEditable(c.page));
+    if (!open.length) {
+      if (locked.length) throw new Error(`匹配的元素在第 ${locked.map((c) => c.page).join('、')} 页，该页是只读的；本次只能修改第 ${this.describeEditable()} 页`);
+      throw new Error('没有匹配的元素；请先用 find_elements 或 read_draft 确认 data-eid / 选择器');
+    }
+    const total = open.reduce((n, c) => n + c.count, 0);
+    const exact = !!target.eids?.length && total === target.eids.length;
+    if (total > 1 && !all && !exact) throw tooMany(open.flatMap((c) => findInPage(this.pageSource(c.page), target).map((m) => ({ ...m, page: c.page }))));
+    for (const c of open) this.setPage(c.page, editInPage(this.pageSource(c.page), target, edit, true).html);
+    return open;
+  }
+
+  findCss(query: string): string[] {
+    if (this.mode === 'doc') return findCssRules(this.doc.css, query);
+    return [...findCssRules(this.doc.css, query, '［共享，只读］'), ...findCssRules(this.extraCss, query, '［本次追加］')];
+  }
+
+  editCss(edit: CssEdit): ReturnType<typeof editCss> {
+    if (this.mode === 'fragment' && hasCssRule(this.doc.css, edit.selector, edit.media) && !hasCssRule(this.extraCss, edit.selector, edit.media)) {
+      throw new Error(
+        `规则 ${edit.selector} 属于共享样式，修改会影响所有页面，而本次只能修改第 ${this.describeEditable()} 页：请用 edit_elements 的 style / add_class 修改本页元素，或新建一个只用于本页的 class`,
+      );
+    }
+    const r = editCss(this.editableCss(), edit);
+    this.setCss(r.css);
+    return r;
+  }
+
+  /** New pages after page `after` (0 = before the first); ids are dropped so the copies get fresh ones. */
+  insertPages(after: number, html: string): number {
+    const sections = splitSections(html).map((s) => ({ id: '', html: withoutIds(s.html) }));
+    if (!sections.length) throw new Error('内容中没有 <section class="slide"> 页面元素');
+    if (this.mode === 'doc') {
+      if (after < 0 || after > this.doc.pages.length) throw new Error(`after 超出范围（0–${this.doc.pages.length}）`);
+      const pages = [...this.doc.pages];
+      pages.splice(after, 0, ...sections);
+      this.doc = { ...this.doc, pages };
+    } else {
+      if (!this.isEditable(after)) throw new Error(`本次只能在第 ${this.describeEditable()} 页之后插入新页`);
+      this.pages.splice(after - this.firstEditable + 1, 0, ...sections);
+    }
+    this.edits++;
+    return sections.length;
+  }
+
+  duplicatePage(page: number): void {
+    if (this.mode !== 'doc') throw new Error('只有修改整份材料时才能复制页面');
+    this.insertPages(page, this.pageSource(page));
+  }
+
+  movePage(page: number, to: number): void {
+    if (this.mode !== 'doc') throw new Error('只有修改整份材料时才能移动页面');
+    const n = this.doc.pages.length;
+    if (page < 1 || page > n || to < 1 || to > n) throw new Error(`页码超出范围（共 ${n} 页）`);
+    const pages = [...this.doc.pages];
+    const [p] = pages.splice(page - 1, 1);
+    pages.splice(to - 1, 0, p);
+    this.doc = { ...this.doc, pages };
+    this.edits++;
   }
 
   /** Accept a complete re-output in the final answer; returns false when the text holds no usable HTML. */
@@ -236,13 +358,82 @@ function draftToolDefs(draft: Draft): ToolDef[] {
     {
       type: 'function',
       function: {
-        name: 'replace_in_draft',
+        name: 'find_elements',
         description:
-          '在草稿某一页（page=0 表示 CSS）的源码中做精确替换：old_text 必须与源码逐字一致且唯一（或设 replace_all=true）。这是最省 token 的修改方式。只修改草稿，不会改动任何参考文件。',
+          '在草稿中查找元素，返回所在页码、标签、class、data-eid 和文字摘要。selector 为 CSS 选择器（如 ".kpi-card h3"、"h1"、"[data-eid=\\"e1a2b3c4d\\"]"）；contains 按文字查找（返回包含该文字的最内层元素）。不传 page 则搜索所有页。',
         parameters: {
           type: 'object',
-          properties: { page: intParam, old_text: { type: 'string' }, new_text: { type: 'string' }, replace_all: { type: 'boolean' } },
-          required: ['page', 'old_text', 'new_text'],
+          properties: { selector: { type: 'string' }, contains: { type: 'string' }, page: pageParam },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'edit_elements',
+        description:
+          '结构化修改元素（最省 token，优先使用）。用 eids（data-eid 列表）、selector 或 contains 指定元素，可限定 page；匹配多个元素时需 all=true。修改项可组合：text 替换纯文字（元素含子元素时请改子元素）；html 替换内部 HTML；outer_html 替换整个元素；attrs 设置属性（值为 null 删除）；style 合并内联样式（值为 null 删除该属性）；add_class / remove_class；remove=true 删除元素；insert={position: before|after|prepend|append, html} 插入新内容。',
+        parameters: {
+          type: 'object',
+          properties: {
+            eids: { type: 'array', items: { type: 'string' } },
+            selector: { type: 'string' },
+            contains: { type: 'string' },
+            page: pageParam,
+            all: { type: 'boolean' },
+            text: { type: 'string' },
+            html: { type: 'string' },
+            outer_html: { type: 'string' },
+            attrs: { type: 'object', additionalProperties: { type: ['string', 'null'] } },
+            style: { type: 'object', additionalProperties: { type: ['string', 'null'] }, description: '如 {"color": "#1e40af", "font-size": "48px"}' },
+            add_class: { type: 'string' },
+            remove_class: { type: 'string' },
+            remove: { type: 'boolean' },
+            insert: {
+              type: 'object',
+              properties: { position: { type: 'string', enum: ['before', 'after', 'prepend', 'append'] }, html: { type: 'string' } },
+              required: ['position', 'html'],
+            },
+          },
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'find_css',
+        description: '查找草稿 CSS 中选择器或属性包含 query 的规则（如 "kpi"、"--brand"、"font-size"），返回完整规则；比读取整份 CSS 更省。',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'edit_css',
+        description:
+          '修改一条 CSS 规则：selector 必须与现有规则的选择器一致才会修改它，否则新建规则；set 中的属性会被设置（值为 null 删除该属性，可带 !important）；remove=true 删除整条规则；media 指定 @media 条件（如 "(max-width: 800px)"）。修改 CSS 变量请用 selector=":root"。',
+        parameters: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string' },
+            set: { type: 'object', additionalProperties: { type: ['string', 'null'] }, description: '如 {"--brand": "#111827", "border-radius": "24px"}' },
+            remove: { type: 'boolean' },
+            media: { type: 'string' },
+          },
+          required: ['selector'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'replace_in_draft',
+        description:
+          '在草稿某一页（page=0 表示 CSS）的源码中做精确替换：old_text 必须与源码逐字一致且唯一（或设 replace_all=true）。all_pages=true 时在所有可修改的页面中全部替换（如统一改名）。只修改草稿，不会改动任何参考文件。',
+        parameters: {
+          type: 'object',
+          properties: { page: intParam, old_text: { type: 'string' }, new_text: { type: 'string' }, replace_all: { type: 'boolean' }, all_pages: { type: 'boolean' } },
+          required: ['old_text', 'new_text'],
         },
       },
     },
@@ -251,21 +442,102 @@ function draftToolDefs(draft: Draft): ToolDef[] {
       function: {
         name: 'rewrite_page',
         description:
-          '用新的 HTML 整体替换草稿第 n 页。html 中可包含多个 <section class="slide">，用于把内容过多的一页拆成几页。保留原有的 data-eid 属性。',
+          '用新的 HTML 整体替换草稿第 n 页（输出量大，只在需要重新设计整页时使用）。html 中可包含多个 <section class="slide">，用于把内容过多的一页拆成几页。保留原有的 data-eid 属性。',
         parameters: { type: 'object', properties: { page: pageParam, html: { type: 'string' } }, required: ['page', 'html'] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'insert_page',
+        description: `在第 after 页之后插入新页面（html 为一个或多个 <section class="slide">${draft.mode === 'doc' ? '；after=0 插在最前面' : '；只能插在可修改的页面之后'}）。`,
+        parameters: { type: 'object', properties: { after: intParam, html: { type: 'string' } }, required: ['after', 'html'] },
       },
     },
   ];
   if (draft.mode === 'doc') {
-    defs.push({
-      type: 'function',
-      function: { name: 'delete_page', description: '删除草稿中的第 n 页。', parameters: { type: 'object', properties: { page: pageParam }, required: ['page'] } },
-    });
+    defs.push(
+      {
+        type: 'function',
+        function: { name: 'delete_page', description: '删除草稿中的第 n 页。', parameters: { type: 'object', properties: { page: pageParam }, required: ['page'] } },
+      },
+      {
+        type: 'function',
+        function: { name: 'duplicate_page', description: '复制第 n 页，副本插在它后面（之后可用 edit_elements 修改副本）。', parameters: { type: 'object', properties: { page: pageParam }, required: ['page'] } },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'move_page',
+          description: '把第 page 页移动到第 to 页的位置。',
+          parameters: { type: 'object', properties: { page: pageParam, to: pageParam }, required: ['page', 'to'] },
+        },
+      },
+    );
   }
   return defs;
 }
 
-export const DRAFT_TOOL_NAMES = new Set(['render_pages', 'check_layout', 'read_draft', 'replace_in_draft', 'rewrite_page', 'delete_page']);
+export const DRAFT_TOOL_NAMES = new Set([
+  'render_pages',
+  'check_layout',
+  'read_draft',
+  'find_elements',
+  'edit_elements',
+  'find_css',
+  'edit_css',
+  'replace_in_draft',
+  'rewrite_page',
+  'insert_page',
+  'delete_page',
+  'duplicate_page',
+  'move_page',
+]);
+
+/** Tool names that change the draft (the rest only look at it). */
+export const DRAFT_EDIT_TOOLS = new Set(['edit_elements', 'edit_css', 'replace_in_draft', 'rewrite_page', 'insert_page', 'delete_page', 'duplicate_page', 'move_page']);
+
+const asStrings = (v: unknown): string[] | undefined =>
+  Array.isArray(v) ? v.map(String).filter(Boolean) : typeof v === 'string' && v ? v.split(/[,\s]+/).filter(Boolean) : undefined;
+
+const asMap = (v: unknown): Record<string, string | null> | undefined => {
+  if (typeof v === 'string' && v.trim().startsWith('{')) {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      throw new Error('无法解析对象参数（需要 JSON 对象）');
+    }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, x === null ? null : String(x)]));
+};
+
+function targetOf(args: Record<string, unknown>): ElementTarget {
+  return {
+    eids: asStrings(args.eids),
+    selector: typeof args.selector === 'string' && args.selector.trim() ? args.selector.trim() : undefined,
+    text: typeof args.contains === 'string' && args.contains ? args.contains : undefined,
+  };
+}
+
+function editOf(args: Record<string, unknown>): ElementEdit {
+  const str = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : undefined);
+  let insert = args.insert as ElementEdit['insert'] | string | undefined;
+  if (typeof insert === 'string') insert = JSON.parse(insert);
+  return {
+    text: str('text'),
+    html: str('html'),
+    outer_html: str('outer_html'),
+    attrs: asMap(args.attrs),
+    style: asMap(args.style),
+    add_class: str('add_class'),
+    remove_class: str('remove_class'),
+    remove: args.remove === true,
+    insert: insert && typeof insert === 'object' ? { position: insert.position, html: String(insert.html ?? '') } : undefined,
+  };
+}
+
+const optPage = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Math.floor(Number(v)));
 
 /** Tools over the in-memory draft: rendering and inspection are read-only; edits change only the draft. */
 export function createDraftTools(draft: Draft, resolver: Resolver): FileTools {
@@ -312,7 +584,46 @@ export function createDraftTools(draft: Draft, resolver: Resolver): FileTools {
             const text = n === 0 ? draft.cssSource() : draft.pageSource(n);
             return { content: sliceText(text, args.offset, args.max_chars, n === 0 ? '草稿 CSS' : `草稿第 ${n} 页${draft.isEditable(n) ? '' : '（只读）'}`) };
           }
+          case 'find_elements': {
+            const target = targetOf(args);
+            if (!target.selector && !target.text && !target.eids) return { content: '错误：请给出 selector 或 contains' };
+            const found = draft.findElements(target, optPage(args.page));
+            const locked = found.filter((m) => !m.editable).length;
+            return { content: `${listMatches(found)}${locked && draft.mode === 'fragment' ? `\n（其中 ${locked} 个在只读页面上）` : ''}` };
+          }
+          case 'edit_elements': {
+            const hits = draft.editElements(targetOf(args), editOf(args), args.all === true, optPage(args.page));
+            const n = hits.reduce((s, h) => s + h.count, 0);
+            return { content: `已修改 ${n} 个元素（第 ${hits.map((h) => h.page).join('、')} 页）。需要时用 render_pages 查看效果。` };
+          }
+          case 'find_css': {
+            const rules = draft.findCss(String(args.query ?? ''));
+            if (!rules.length) return { content: '没有匹配的 CSS 规则。' };
+            const text = rules.join('\n');
+            return { content: `共 ${rules.length} 条规则：\n${text.length > 6000 ? `${text.slice(0, 6000)}\n…（结果过长已截断，请用更具体的 query）` : text}` };
+          }
+          case 'edit_css': {
+            const r = draft.editCss({ selector: String(args.selector ?? ''), media: typeof args.media === 'string' && args.media ? args.media : undefined, set: asMap(args.set), remove: args.remove === true });
+            const verb = { updated: '已修改', created: '已新建', removed: '已删除' }[r.action];
+            return { content: `${verb}规则：${r.rule}` };
+          }
+          case 'insert_page': {
+            const added = draft.insertPages(pageNo(args.after), String(args.html ?? ''));
+            return { content: `已在第 ${pageNo(args.after)} 页之后插入 ${added} 页，后续页码顺延；现共 ${draft.pageCount} 页。` };
+          }
+          case 'duplicate_page': {
+            draft.duplicatePage(pageNo(args.page));
+            return { content: `已复制第 ${pageNo(args.page)} 页，副本为第 ${pageNo(args.page) + 1} 页；现共 ${draft.pageCount} 页。` };
+          }
+          case 'move_page': {
+            draft.movePage(pageNo(args.page), pageNo(args.to));
+            return { content: `已把第 ${pageNo(args.page)} 页移到第 ${pageNo(args.to)} 页。` };
+          }
           case 'replace_in_draft': {
+            if (args.all_pages === true) {
+              const hits = draft.replaceEverywhere(String(args.old_text ?? ''), String(args.new_text ?? ''));
+              return { content: `已替换 ${hits.reduce((s, h) => s + h.count, 0)} 处（${hits.map((h) => `第 ${h.page} 页 ${h.count} 处`).join('，')}）。` };
+            }
             const n = pageNo(args.page);
             const count = draft.replace(n, String(args.old_text ?? ''), String(args.new_text ?? ''), Boolean(args.replace_all));
             return { content: `已在草稿${n === 0 ? ' CSS ' : `第 ${n} 页`}替换 ${count} 处。建议用 render_pages 复查效果。` };
@@ -389,7 +700,7 @@ function reviewPrompt(draft: Draft, view: DeckDoc, report: string): string {
 请像设计师交付前一样自检并修复：
 1. 报告中的「✗ 错误」（文字超出页面、内容被裁切、图片无法加载等）必须修复；「△ 提醒」请判断是否需要处理（例如有意叠放的装饰大字可以保留）。
 2. 对照缩略图检查视觉问题：拥挤或大片空白、对比度不足、元素错位、各页风格不统一、与要求或参考不符。
-3. 用 render_pages 渲染指定页看细节（可 full_size），用 read_draft 查看源码，用 replace_in_draft（精确替换片段，最省）或 rewrite_page 修改；改完用 render_pages 或 check_layout 复查。
+3. 用 render_pages 渲染指定页看细节（可 full_size），用 find_elements / read_draft / find_css 查看源码；优先用 edit_elements（按 data-eid 改文字、样式、属性）、edit_css 或 replace_in_draft 做局部修改，只有需要重新排版整页时才用 rewrite_page；改完用 render_pages 或 check_layout 复查。
 4. 修改只作用于草稿；参考文件始终只读。
 5. 确认无误后，直接用一两句话总结你做了哪些修改（或“无需修改”），不要再输出完整 HTML。${scope}
 
@@ -398,8 +709,8 @@ ${report}`;
 }
 
 /** The model's closing remark, without any tool-call markup it may have written out as text. */
-function cleanSummary(text: string): string | undefined {
-  const cut = text.search(/<\/?(parameter|invoke|function|tool_call|replace_in_draft|rewrite_page|render_pages|read_draft|check_layout|delete_page)\b/i);
+export function cleanSummary(text: string): string | undefined {
+  const cut = text.search(new RegExp(`</?(parameter|invoke|function|tool_call|${[...DRAFT_TOOL_NAMES].join('|')})\\b`, 'i'));
   const s = (cut >= 0 ? text.slice(0, cut) : text).replace(/<\/?[a-z_]+>/gi, '').replace(/\s+/g, ' ').trim();
   return s ? s.slice(0, 300) : undefined;
 }
@@ -423,6 +734,8 @@ export interface ReviewOptions extends ChatOptions {
   onTool?: (name: string, args: Record<string, unknown>) => void;
   onStage?: (stage: string) => void;
   onUsage?: (u: ChatResult) => void;
+  /** Skip the model's review when the automatic check finds no errors (small, already inspected edits). */
+  skipIfClean?: boolean;
 }
 
 /**
@@ -432,7 +745,8 @@ export interface ReviewOptions extends ChatOptions {
  * stands is kept.
  */
 export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): Promise<ReviewLog> {
-  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, ...chatOpts } = opts;
+  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, ...chatOpts } = opts;
+  const editsBefore = draft.edits;
   const focus = () => (draft.mode === 'fragment' ? draft.editablePages() : undefined);
   const inspect = async () => {
     const view = draft.view();
@@ -445,6 +759,7 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
     onStage?.('自检：渲染并检查初稿');
     const first = await inspect();
     log.before = log.after = countIssues(first.reports);
+    if (skipIfClean && !log.before.errors) return log;
     const labels = first.view.pages.map((_, i) => `第 ${i + 1} 页${draft.mode === 'fragment' && !draft.isEditable(i + 1) ? '（只读）' : ''}`);
     const sheets = await renderContactSheets(first.view, resolver, { labels });
     const images: ContentPart[] = sheets.flatMap((s, i) => [
@@ -495,6 +810,6 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
   } catch (e) {
     log.error = (e as Error).message;
   }
-  log.edits = draft.edits;
+  log.edits = draft.edits - editsBefore;
   return log;
 }

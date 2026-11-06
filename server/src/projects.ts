@@ -10,11 +10,11 @@ import {
   type DiffSummary,
 } from './deck.js';
 import { chat, chatWithTools, type ChatMessage } from './llm.js';
-import { buildDeckPrompt, buildEditPrompt, buildTemplatePrompt, type DeckBrief, type EditScope, type TemplateBrief } from './prompts.js';
+import { buildDeckPrompt, buildEditPrompt, buildTemplatePrompt, type DeckBrief, type EditMode, type EditScope, type TemplateBrief } from './prompts.js';
 import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
-import { DRAFT_TOOL_NAMES, Draft, reviewDraft, type ReviewLog } from './draft.js';
+import { cleanSummary, combineTools, createDraftTools, DRAFT_EDIT_TOOLS, DRAFT_TOOL_NAMES, Draft, reviewDraft, type ReviewLog } from './draft.js';
 
 export interface ProjectRow {
   id: string;
@@ -181,6 +181,20 @@ function describeTool(name: string, args: Record<string, unknown>): string {
       return `重写草稿第 ${args.page} 页`;
     case 'delete_page':
       return `删除草稿第 ${args.page} 页`;
+    case 'find_elements':
+      return `查找元素 ${String(args.selector ?? args.contains ?? '').slice(0, 30)}`;
+    case 'edit_elements':
+      return `修改元素${args.page ? `（第 ${args.page} 页）` : ''}`;
+    case 'find_css':
+      return `查找样式 ${String(args.query ?? '').slice(0, 30)}`;
+    case 'edit_css':
+      return `修改样式 ${String(args.selector ?? '').slice(0, 30)}`;
+    case 'insert_page':
+      return `在第 ${args.after} 页后插入页面`;
+    case 'duplicate_page':
+      return `复制第 ${args.page} 页`;
+    case 'move_page':
+      return `把第 ${args.page} 页移到第 ${args.to} 页`;
     case 'list_files':
       return '列出参考文件';
     case 'read_text':
@@ -207,8 +221,8 @@ function fileToolsFor(db: DB, rows: AssetRow[]): { tools: FileTools; ids: Map<st
   return { tools: createFileTools(db, files), ids: new Map([...files].map(([fid, r]) => [r.id, fid])) };
 }
 
-const toolStage = (name: string, args: Record<string, unknown>) =>
-  `${DRAFT_TOOL_NAMES.has(name) ? '自检' : '读取参考文件'}：${describeTool(name, args)}`;
+const toolStage = (name: string, args: Record<string, unknown>, phase = '自检') =>
+  `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
 
 /** Adds one model call's usage to the job's running totals. */
 function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptTokens?: number; completionTokens?: number; cost?: number }) {
@@ -235,7 +249,15 @@ function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptToken
  * Self-check loop: render the draft in headless Chrome, inspect its layout and let the model fix it
  * with the draft tools. Skipped when disabled in the settings.
  */
-async function selfReview(db: DB, jobId: string, userId: number, draft: Draft, prompt: ChatMessage[], fileTools?: FileTools): Promise<ReviewLog | null> {
+async function selfReview(
+  db: DB,
+  jobId: string,
+  userId: number,
+  draft: Draft,
+  prompt: ChatMessage[],
+  fileTools?: FileTools,
+  skipIfClean = false,
+): Promise<ReviewLog | null> {
   const settings = getSettings(db);
   if (!settings.selfCheck) return null;
   const log = await reviewDraft(db, userId, {
@@ -250,6 +272,7 @@ async function selfReview(db: DB, jobId: string, userId: number, draft: Draft, p
     onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
     onStage: (stage) => jobProgress.set(jobId, { chars: 0, stage }),
     onUsage: (u) => recordUsage(db, jobId, u),
+    skipIfClean,
   });
   updateJob(db, jobId, { review: JSON.stringify(log) });
   return log;
@@ -278,6 +301,33 @@ async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessa
     throw new Error('模型输出达到长度上限被截断，请提高「最大输出 tokens」设置或减少页数后重试');
   }
   return result.text;
+}
+
+/**
+ * Tool-first edit: the model changes the loaded draft with the structured tools instead of re-typing
+ * whole pages, which matters most for slow models. A reply with complete HTML is still accepted.
+ */
+async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft, messages: ChatMessage[], fileTools?: FileTools) {
+  const settings = getSettings(db);
+  const tools = combineTools(createDraftTools(draft, makeAssetResolver(db)), fileTools);
+  jobProgress.set(jobId, { chars: 0, stage: '模型修改中' });
+  const r = await chatWithTools(db, userId, messages, {
+    maxTokens: Number(settings.maxTokens) || undefined,
+    temperature: Number(settings.temperature),
+    onDelta: (_c, total) => jobProgress.set(jobId, { chars: total, stage: '模型修改中' }),
+    onReasoning: (total) => jobProgress.set(jobId, { chars: total, stage: '模型思考中' }),
+    tools: tools.defs,
+    execute: tools.execute,
+    onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args, DRAFT_EDIT_TOOLS.has(name) ? '修改' : '查看') }),
+    onRound: (round) => recordUsage(db, jobId, round),
+    maxRounds: Number(settings.editToolRounds) || 12,
+    allowEmptyFinal: true,
+  });
+  if (draft.edits) return;
+  if (r.text && draft.replaceFromText(r.text)) return;
+  if (r.finishReason === 'length') throw new Error('模型输出达到长度上限被截断，请提高「最大输出 tokens」设置后重试');
+  const why = r.text ? cleanSummary(r.text) : undefined;
+  throw new Error(`模型没有做任何修改${why ? `：${why}` : ''}`);
 }
 
 export interface CreateInput {
@@ -410,6 +460,7 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           }
         }
       }
+      const mode: EditMode = settings.editMode === 'rewrite' ? 'rewrite' : 'tools';
       const messages = buildEditPrompt(
         snapshot,
         {
@@ -423,14 +474,21 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
         },
         assets,
         project.type,
+        mode,
       );
-      const text = await runLlm(db, job.id, userId, messages, ft?.tools);
-      const draft =
-        scope === 'global'
-          ? Draft.fromDocument(text, { width: snapshot.width, height: snapshot.height, title: snapshot.title })
-          : Draft.fromFragment(text, snapshot, input.pageId!);
-      await selfReview(db, job.id, userId, draft, messages, ft?.tools);
-      jobProgress.set(job.id, { chars: text.length, stage: '解析与保存' });
+      let draft: Draft;
+      if (mode === 'tools') {
+        draft = scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
+        await editWithTools(db, job.id, userId, draft, messages, ft?.tools);
+      } else {
+        const text = await runLlm(db, job.id, userId, messages, ft?.tools);
+        draft =
+          scope === 'global'
+            ? Draft.fromDocument(text, { width: snapshot.width, height: snapshot.height, title: snapshot.title })
+            : Draft.fromFragment(text, snapshot, input.pageId!);
+      }
+      await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools');
+      jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });
       const { versionId } = await withProjectLock(projectId, () => {
         const latest = projectDoc(getProject(db, projectId)!)!;
         let next: DeckDoc;

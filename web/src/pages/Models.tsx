@@ -48,6 +48,8 @@ export function ModelsPage() {
     temperature: number;
     llmIdleTimeoutSec: number;
     llmMaxCallMinutes: number;
+    editMode: 'tools' | 'rewrite';
+    editToolRounds: number;
   } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
@@ -202,6 +204,19 @@ export function ModelsPage() {
                 <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
                 <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存</span>
               </label>
+              <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">
+                <span>AI 修改方式</span>
+                <select value={settings.editMode} onChange={(e) => saveSettings({ editMode: e.target.value as 'tools' | 'rewrite' })} data-testid="edit-mode">
+                  <option value="tools">工具修改（推荐，只改相关部分）</option>
+                  <option value="rewrite">整页重写</option>
+                </select>
+              </label>
+              {settings.editMode === 'tools' && (
+                <label className="field inline">
+                  <span>修改最多工具轮数</span>
+                  <input type="number" min="2" max="40" defaultValue={settings.editToolRounds} onBlur={(e) => saveSettings({ editToolRounds: Number(e.target.value) })} />
+                </label>
+              )}
               <label className="field inline">
                 <span>自检最多工具轮数</span>
                 <input type="number" min="1" max="20" defaultValue={settings.selfCheckRounds} onBlur={(e) => saveSettings({ selfCheckRounds: Number(e.target.value) })} />

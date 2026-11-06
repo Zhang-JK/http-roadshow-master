@@ -25,6 +25,7 @@
     "nanoid": "^6.0.2",
     "pdf-parse": "^1.1.1",
     "playwright-core": "^1.65.0",
+    "postcss": "^8.5.32",
     "pptxgenjs": "^4.0.1",
     "undici": "^7.30.2"
   },

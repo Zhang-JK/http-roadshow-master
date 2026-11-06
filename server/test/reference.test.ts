@@ -159,7 +159,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const r = await req('POST', `/api/projects/${deckId}/edit`, { prompt: '参考附件改版', scope: 'global', attachmentIds: [attachment.id] });
     expect((await waitJob(r.json.job.id)).status).toBe('done');
     const call = mock.calls.at(-1)!;
-    expect(mock.calls.length).toBe(before + 1);
+    expect(mock.calls.length).toBe(before + 2); // one round of edit tools, then the summary
     expect(call.text).toContain('本次修改附带的参考文件');
     expect(call.text).toContain('「竞品.pptx」第 1 页');
     expect(call.text).toContain('竞品页 DELTA');
@@ -170,7 +170,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const r2 = await req('POST', `/api/projects/${deckId}/edit`, { prompt: 'USE_TOOLS 按附件改版', scope: 'global', attachmentIds: [attachment.id] });
     const job2 = await waitJob(r2.json.job.id);
     expect(job2.status).toBe('done');
-    expect(mock.calls.length).toBe(before2 + 3);
+    expect(mock.calls.length).toBe(before2 + 4);
     const files = JSON.parse(mock.calls.at(-1)!.body.messages.find((m: any) => m.role === 'tool').content);
     expect(files.find((f: any) => f.name === '竞品.pptx')).toMatchObject({ type: 'presentation', pages: 1, archive: true });
   });

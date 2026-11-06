@@ -161,7 +161,10 @@ describe('self-check agent loop', () => {
     expect(first.images.filter((i) => i.startsWith('data:image/jpeg'))).toHaveLength(1);
     expect(first.text).not.toContain('<section class="slide" data-layout'); // the draft HTML is not resent
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
-      ['check_layout', 'delete_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page'],
+      [
+        'check_layout', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
+        'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page',
+      ],
     );
 
     const results = toolResults(calls[2]);
