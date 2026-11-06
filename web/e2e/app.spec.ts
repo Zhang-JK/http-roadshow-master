@@ -60,6 +60,13 @@ test('admin manages model endpoints and runs connectivity tests', async () => {
   await expect(page.locator('.panel-card').first()).toContainText('admin');
 });
 
+test('system update page shows version and explains dev-mode instances cannot self-update', async () => {
+  await page.click('nav >> text=系统更新');
+  await expect(page.locator('[data-testid=current-version]')).toContainText(/\d+\.\d+\.\d+/);
+  await expect(page.locator('.notice')).toContainText('deploy.sh install');
+  await expect(page.locator('[data-testid=check-update]')).toHaveCount(0);
+});
+
 test('admin creates another user', async () => {
   await page.click('nav >> text=用户管理');
   await page.click('[data-testid=add-user]');
@@ -241,6 +248,7 @@ test('a second user edits the same deck and history attributes the change', asyn
   await logout();
   await login('carol', 'carol123');
   await expect(page.locator('.topnav')).not.toContainText('模型接入');
+  await expect(page.locator('.topnav')).not.toContainText('系统更新');
   await page.click('nav >> text=用户管理');
   await expect(page.locator('[data-testid=add-user]')).toHaveCount(0);
   await page.goto(url);
