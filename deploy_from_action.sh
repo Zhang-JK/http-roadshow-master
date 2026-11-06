@@ -144,7 +144,9 @@ if [ -n "$FILE" ]; then
   PKG="$FILE"
   log "使用本地安装包：$FILE"
 else
-  log "连接测试：发布清单 $MANIFEST_URL（${EFFECTIVE_PROXY:+经代理 $(printf '%s' "$EFFECTIVE_PROXY" | sed -E 's#(://)[^/@]+@#\1***@#')}${EFFECTIVE_PROXY:-直连}）"
+  route=直连
+  [ -n "$EFFECTIVE_PROXY" ] && route="经代理 $(printf '%s' "$EFFECTIVE_PROXY" | sed -E 's#(://)[^/@]+@#\1***@#')"
+  log "连接测试：发布清单 $MANIFEST_URL（$route）"
   rc=0; "${CURL[@]}" -sS --max-time 60 -o "$WORK/manifest.json" "$MANIFEST_URL" 2>"$WORK/err" || rc=$?
   [ "$rc" = 0 ] || die "无法获取发布清单 $MANIFEST_URL：$(explain "$rc" "$WORK/err")"
   version="$(field version "$WORK/manifest.json")"; url="$(field url "$WORK/manifest.json")"; sha="$(field sha256 "$WORK/manifest.json")"
