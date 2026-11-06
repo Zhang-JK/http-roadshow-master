@@ -91,7 +91,7 @@ sudo bash deploy.sh install --proxy http://proxy.corp:8080 --ca-cert auto
 sudo bash deploy.sh install --proxy http://proxy.corp:8080 --insecure
 ```
 
-- 不加 `--proxy` 时默认使用 `https_proxy`/`http_proxy` 环境变量（`sudo` 默认会丢掉它们，请用 `sudo -E`）；两者都没有时沿用上次保存的代理（网页一键更新即依赖这一点）；`--proxy none` 表示直连。需要认证的代理写成 `http://用户:密码@proxy:8080`（日志中密码会被隐藏）；`--no-proxy .corp.local,10.0.0.0/8` 指定直连地址（本机总是直连）。
+- 不加 `--proxy` 时默认使用 `https_proxy`/`http_proxy` 环境变量（用 `sudo` 运行时也会读取调用者的这两个变量，以及 `no_proxy`）；两者都没有时沿用上次保存的代理（网页一键更新即依赖这一点）；`--proxy none` 表示直连。需要认证的代理写成 `http://用户:密码@proxy:8080`（日志中密码会被隐藏）；`--no-proxy .corp.local,10.0.0.0/8` 指定直连地址（本机总是直连）。
 - 证书会复制到 `shared/certs/`，与系统根证书合并后用于 curl、git、npm、apt/dnf、Node.js 下载与 Chrome 下载。
 - 有些代理只返回服务器证书而不带根证书，此时 `--ca-cert auto` 会尝试按证书中的「颁发者地址」下载；仍失败时会提示改用文件或 `--insecure`。
 - 这些设置保存在 `shared/deploy.conf`，之后的命令行更新和网页一键更新都会沿用，应用本身调用模型接口也走同一代理与证书（`NODE_USE_ENV_PROXY`、`NODE_EXTRA_CA_CERTS`，或 `--insecure` 时的 `NODE_TLS_REJECT_UNAUTHORIZED=0`）。修改时可执行 `sudo roadshow-studio update --force --proxy ... --ca-cert ...`，或用 `--secure` 恢复证书校验。

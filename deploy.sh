@@ -24,7 +24,7 @@
 #
 # Network options (install/update/nettest; saved and reused by later updates and by the app itself):
 #   --proxy URL                  HTTP(S) 代理，如 http://proxy.corp:8080 或 http://用户:密码@proxy:8080；
-#                                未指定时使用 https_proxy/http_proxy 环境变量（sudo 时请加 -E），都没有则沿用上次保存的设置；
+#                                未指定时使用 https_proxy/http_proxy 环境变量（sudo 运行时读取调用者的），都没有则沿用上次保存的设置；
 #                                --proxy none 表示不使用代理
 #   --no-proxy LIST              不走代理的地址（逗号分隔，如 .corp.local,10.0.0.0/8；本机地址总是直连）
 #   --ca-cert FILE|auto|none     额外信任的根证书（公司代理解密 HTTPS 时使用，PEM 或 DER）；
@@ -249,16 +249,52 @@ url_port() { local u="${1#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) 
 proxy_hostport() { local u="${PROXY_URL#*://}"; u="${u##*@}"; u="${u%%/*}"; case "$u" in *:*) ;; *) u="$u:80" ;; esac; printf '%s' "$u"; }
 proxy_cred() { local u="${PROXY_URL#*://}"; u="${u%%/*}"; case "$u" in *@*) printf '%s' "${u%@*}" ;; esac; }
 
-# --proxy > https_proxy/http_proxy from the environment > the proxy saved in deploy.conf, which keeps
-# updates started from the web page (no login environment) on the proxy used at install time.
+# sudo's env_reset strips proxy variables from the command, but the sudo process itself (an ancestor of
+# this script, also when the script re-runs itself through sudo) still carries the caller's environment.
+SUDO_ENV=""
+load_sudo_env() {
+  is_root && [ -n "${SUDO_USER:-}" ] || return 0
+  local pid=$PPID
+  for _ in 1 2 3 4 5 6; do
+    [ -r "/proc/$pid/comm" ] || break
+    if [ "$(cat "/proc/$pid/comm")" = sudo ]; then
+      SUDO_ENV="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -E '^(https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)=' || true)"
+      [ -n "$SUDO_ENV" ] && break
+    fi
+    pid="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+}
+sudo_caller_env() { [ -z "$SUDO_ENV" ] || printf '%s\n' "$SUDO_ENV" | sed -n "s/^$1=//p" | head -1; }
+
+# --proxy > https_proxy/http_proxy from the environment (including the caller's, under sudo) >
+# the proxy saved in deploy.conf, which keeps updates started from the web page on the install-time proxy.
 detect_proxy() {
   [ -n "$PROXY_SOURCE" ] && return 0
   if [ -n "$OPT_PROXY" ]; then PROXY_SOURCE=命令行参数; return 0; fi
-  local v p
+  local v p from=""
   for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY; do
     p="${!v:-}"
-    if [ -n "$p" ]; then PROXY_URL="$p"; PROXY_SOURCE="环境变量 $v"; return 0; fi
+    [ -n "$p" ] && break
   done
+  if [ -z "$p" ]; then
+    load_sudo_env
+    for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY; do
+      p="$(sudo_caller_env "$v")"
+      [ -n "$p" ] && { from=sudo; break; }
+    done
+  fi
+  if [ -n "$p" ] && [ "$p" != none ]; then
+    PROXY_URL="$p"; PROXY_SOURCE="环境变量 $v${from:+（sudo 调用者）}"
+    if [ -z "$OPT_NO_PROXY" ]; then
+      local np="${no_proxy:-${NO_PROXY:-}}"
+      [ -n "$np" ] || np="$(sudo_caller_env no_proxy || true)"
+      [ -n "$np" ] || np="$(sudo_caller_env NO_PROXY || true)"
+      np="$(printf '%s' "$np" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -vxE 'localhost|127\.0\.0\.1|::1|' | paste -sd, - || true)"
+      [ -n "$np" ] && NO_PROXY_LIST="$np"
+    fi
+    return 0
+  fi
   if [ -n "$PROXY_URL" ]; then PROXY_SOURCE="上次保存的设置 $CONF"; else PROXY_SOURCE=无; fi
 }
 
@@ -442,7 +478,7 @@ net_preflight() {
     if timeout 8 bash -c ': </dev/tcp/"$1"/"$2"' _ "${hp%:*}" "${hp##*:}" 2>/dev/null; then ok "  代理服务器 $hp：可连接"
     else NET_FAIL=$((NET_FAIL + 1)); printf '%s[%s] ✘   代理服务器 %s 无法连接，请检查 --proxy 地址与端口%s\n' "$c_err" "$(date '+%F %T')" "$hp" "$c_off" >&2; fi
   else
-    log "  代理：未使用（公司网络需代理时用 --proxy http://代理:端口；sudo 默认不传递 https_proxy 环境变量，可改用 sudo -E）"
+    log "  代理：未使用（未检测到 https_proxy/http_proxy 环境变量，请确认已用 export 设置；也可用 --proxy http://代理:端口 指定）"
   fi
   if [ "$TLS_INSECURE" = 1 ]; then warn "  HTTPS 证书校验：已关闭（--insecure）"
   elif [ -n "$CA_CERT" ]; then log "  HTTPS 证书校验：系统根证书 + $CA_CERT"
