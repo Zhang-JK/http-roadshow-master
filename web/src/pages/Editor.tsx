@@ -56,7 +56,11 @@ export function EditorPage() {
   const [exportMenu, setExportMenu] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
+  const [textEditing, setTextEditing] = useState(false);
+  const [frameNonce, setFrameNonce] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  /** eid of the element being typed into in the stage; while set, polling must not reload the frame. */
+  const textEditRef = useRef<string | null>(null);
   const versionRef = useRef(-1);
   const myJobs = useRef(new Set<string>());
   const seenJobs = useRef(new Set<string>());
@@ -80,7 +84,7 @@ export function EditorPage() {
   }, [id]);
 
   const loadProject = useCallback(async () => {
-    if (!id) return;
+    if (!id || textEditRef.current) return;
     try {
       const r = await api.get<ProjectResponse>(`/api/projects/${id}`);
       if (r.project.versionNo !== versionRef.current) {
@@ -158,18 +162,53 @@ export function EditorPage() {
     if (!pages.some((p) => p.id === pageId)) setPageId(pages[0].id);
   }, [pages, pageId]);
 
+  const endTextEdit = () => {
+    textEditRef.current = null;
+    setTextEditing(false);
+  };
+
   useEffect(() => {
     setSelection([]);
+    endTextEdit();
   }, [pageId, preview]);
+
+  const saveText = useCallback(
+    async (m: { eid: string; pageId: string; text: string; oldText: string }) => {
+      try {
+        const r = await api.put<{ versionNo?: number; unchanged?: boolean }>(
+          `/api/projects/${id}/pages/${encodeURIComponent(m.pageId)}/elements/${encodeURIComponent(m.eid)}/text`,
+          { text: m.text, oldText: m.oldText },
+        );
+        if (!r.unchanged) toast(`文字已保存（v${r.versionNo}）`, 'success');
+      } catch (e) {
+        toast(`文字没有保存：${(e as Error).message}`, 'error');
+        endTextEdit();
+        setFrameNonce((n) => n + 1);
+      }
+      loadProject();
+    },
+    [id, toast, loadProject],
+  );
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      if (e.data?.source !== 'rs-frame' || e.source !== frameRef.current?.contentWindow) return;
-      setSelection(e.data.items as SelectedElement[]);
+      const m = e.data;
+      if (m?.source !== 'rs-frame' || e.source !== frameRef.current?.contentWindow) return;
+      if (m.type === 'selection') setSelection(m.items as SelectedElement[]);
+      else if (m.type === 'text-edit-start') {
+        textEditRef.current = m.eid;
+        setTextEditing(true);
+      } else if (m.type === 'text-edit-commit' || m.type === 'text-edit-cancel') {
+        if (textEditRef.current === m.eid) endTextEdit();
+        if (m.type === 'text-edit-commit') saveText(m);
+        else if (m.empty) toast('文字不能为空，已恢复原来的文字；如需删除这个元素，请用 AI 修改', 'info');
+      } else if (m.type === 'text-edit-denied') {
+        toast(`这个${m.label}里还有图片、图标或其他元素，不能直接改字：可以双击里面的单段文字，或在下方描述修改交给 AI`, 'info');
+      }
     };
     window.addEventListener('message', onMsg);
     return () => window.removeEventListener('message', onMsg);
-  }, []);
+  }, [saveText, toast]);
 
   const goPage = useCallback(
     (delta: number) => {
@@ -296,7 +335,7 @@ export function EditorPage() {
 
   const createJob = jobs.find((j) => j.kind === 'create');
   const editJobs = jobs.filter((j) => j.kind === 'edit');
-  const initialSelection = useMemo(() => selection.map((s) => s.eid), [doc]); // eslint-disable-line react-hooks/exhaustive-deps
+  const initialSelection = useMemo(() => selection.map((s) => s.eid), [doc, frameNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!project) return <div className="center-screen"><div className="spinner" /></div>;
   const backTo = project.type === 'template' ? '/templates' : '/decks';
@@ -427,13 +466,13 @@ export function EditorPage() {
               <span className="page-indicator" data-testid="page-indicator">第 {pageIndex + 1} / {pages.length} 页</span>
               <button className="btn btn-sm" onClick={() => goPage(1)} disabled={pageIndex >= pages.length - 1}>下一页 ›</button>
               <div className="spacer" />
-              {!preview && <span className="muted small hint">单击选择元素 · Shift/⌘ 多选 · 拖动框选 · Esc 取消</span>}
+              {!preview && <span className="muted small hint">单击选择元素 · 双击直接改文字 · Shift/⌘ 多选 · 拖动框选 · Esc 取消</span>}
             </div>
             <div className="stage">
               {currentPage && (
                 <SlideFrame
                   ref={frameRef}
-                  key={preview ? `pv-${preview.version.id}` : 'live'}
+                  key={preview ? `pv-${preview.version.id}` : `live-${frameNonce}`}
                   doc={doc}
                   pageId={currentPage.id}
                   width={doc!.width}
@@ -469,6 +508,19 @@ export function EditorPage() {
                     ))}
                   </div>
                 )}
+                {textEditing ? (
+                  <div className="scope-bar text-edit-bar" data-testid="text-edit-bar">
+                    <span className="scope-chip scope-text">✎ 正在第 {pageIndex + 1} 页直接改字</span>
+                    <span className="muted small">Enter 保存 · Shift+Enter 换行 · Esc 取消 · 点别处也会保存；不经过 AI，保存后记入修改历史</span>
+                    {/* preventDefault on mousedown keeps focus (and the caret) inside the frame. */}
+                    <button className="btn btn-xs btn-primary" data-testid="text-edit-save" onMouseDown={(e) => e.preventDefault()} onClick={() => postToFrame({ type: 'rs-text-commit' })}>
+                      保存
+                    </button>
+                    <button className="btn btn-xs btn-ghost" data-testid="text-edit-cancel" onMouseDown={(e) => e.preventDefault()} onClick={() => postToFrame({ type: 'rs-text-cancel' })}>
+                      取消
+                    </button>
+                  </div>
+                ) : (
                 <div className="scope-bar">
                   <span className="muted small">修改范围：</span>
                   {selection.length && !pageOnlySelected ? (
@@ -480,6 +532,11 @@ export function EditorPage() {
                           {s.text && <em>“{s.text.slice(0, 14)}{s.text.length > 14 ? '…' : ''}”</em>}
                         </span>
                       ))}
+                      {selection.length === 1 && selection[0].textOnly && (
+                        <button className="btn btn-xs" data-testid="edit-text-btn" title="不经过 AI，直接在页面上修改这段文字（也可以双击文字）" onClick={() => postToFrame({ type: 'rs-edit-text', eid: selection[0].eid })}>
+                          ✎ 直接改字
+                        </button>
+                      )}
                       <button className="btn btn-xs" onClick={() => postToFrame({ type: 'rs-select-parent' })}>选择上级</button>
                       <button className="btn btn-xs btn-ghost" onClick={clearSelection}>✕ 取消选择</button>
                     </>
@@ -494,6 +551,7 @@ export function EditorPage() {
                     </div>
                   )}
                 </div>
+                )}
                 <RefFileList files={attachments} onChange={setAttachments} />
                 <div className="composer-row">
                   <label className="attach-btn" title="附加参考图片 / PPT / PDF / HTML：图片可嵌入页面或仅作参考，PPT/PDF/HTML 逐页转成图片交给 AI，并可只读查阅原文件">

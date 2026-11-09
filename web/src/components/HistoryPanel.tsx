@@ -15,6 +15,8 @@ interface Props {
   onLocate: (page: number | undefined, eid: string) => void;
 }
 
+const cut = (s: string, full: boolean) => (s.length > 160 && !full ? `${s.slice(0, 160)}…` : s);
+
 function ElementList({ title, items, onLocate, kind }: { title: string; items: ElementRef[]; onLocate?: Props['onLocate']; kind: string }) {
   if (!items.length) return null;
   return (
@@ -135,7 +137,15 @@ export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, c
               <span className={`scope-tag scope-${v.scope}`}>{SCOPE_LABELS[v.scope]}</span> {target}
               {v.versionNo === currentVersionNo && <span className="badge badge-current">当前</span>}
             </div>
-            {v.prompt && <div className="hist-prompt">{v.prompt.length > 160 && !isOpen ? `${v.prompt.slice(0, 160)}…` : v.prompt}</div>}
+            {s.textEdit ? (
+              <button className="hist-text" data-testid="hist-text" title="定位到该元素" onClick={() => onLocate(s.textEdit!.page, s.textEdit!.eid)}>
+                <del>{cut(s.textEdit.before, isOpen)}</del>
+                <span className="hist-arrow">→</span>
+                <ins>{cut(s.textEdit.after, isOpen)}</ins>
+              </button>
+            ) : (
+              v.prompt && <div className="hist-prompt">{cut(v.prompt, isOpen)}</div>
+            )}
             {counts.length > 0 && <div className="hist-counts">{counts.join(' · ')}</div>}
             {v.jobId && <div className="hist-cost" data-testid="hist-cost">{costText(v.durationMs, v.stats)}</div>}
             {isOpen && (

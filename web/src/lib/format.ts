@@ -49,6 +49,7 @@ export function fileSize(n: number): string {
 export const ACTION_LABELS: Record<string, string> = {
   create: '生成',
   edit: 'AI 修改',
+  text_edit: '直接改字',
   revert: '恢复版本',
   page_delete: '删除页面',
   page_duplicate: '复制页面',

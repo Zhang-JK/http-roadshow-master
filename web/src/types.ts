@@ -149,6 +149,8 @@ export interface DiffSummary {
   elementsChanged: ElementRef[];
   elementsAdded: ElementRef[];
   elementsRemoved: ElementRef[];
+  /** Text typed straight into one element in the editor, without the model. */
+  textEdit?: { eid: string; page: number; before: string; after: string };
 }
 
 export interface Version {
@@ -201,6 +203,8 @@ export interface SelectedElement {
   text: string;
   label: string;
   isPage: boolean;
+  /** Holds only text (and line breaks), so it can be edited in place without the model. */
+  textOnly?: boolean;
   rect: { x: number; y: number; w: number; h: number };
 }
 
