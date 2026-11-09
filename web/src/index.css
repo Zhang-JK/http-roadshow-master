@@ -153,6 +153,10 @@ textarea { resize: vertical; min-height: 40px; }
 .user-chip { display: flex; align-items: center; gap: 8px; border: 0; background: none; cursor: pointer; padding: 4px 8px; border-radius: 8px; }
 .user-chip:hover { background: #f1f3f8; }
 .user-menu .dropdown { left: auto; right: 0; }
+.dropdown-author { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 8px 8px 4px 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.dropdown-author a { display: inline-flex; padding: 4px; border-radius: 6px; color: #24292f; }
+.dropdown-author a:hover { background: #f1f3f8; color: #000; }
+.dropdown-author svg { width: 18px; height: 18px; }
 .avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #818cf8, #4f46e5); color: #fff; display: inline-grid; place-items: center; font-weight: 700; font-size: 13px; flex: none; }
 .avatar.sm { width: 22px; height: 22px; font-size: 11px; vertical-align: middle; }
 .main { min-height: calc(100vh - 56px); }

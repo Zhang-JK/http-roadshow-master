@@ -52,6 +52,17 @@ test('login rejects bad credentials and accepts admin', async () => {
   await expect(page.locator('.topnav')).toContainText('模型接入');
 });
 
+test('the user menu credits the author and links to the GitHub repository', async () => {
+  await page.click('[data-testid=user-menu]');
+  await expect(page.locator('[data-testid=author]')).toContainText('Author: Zhang Jiekai');
+  const link = page.locator('[data-testid=github-link]');
+  await expect(link).toHaveAttribute('href', 'https://github.com/Zhang-JK/http-roadshow-master');
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(link.locator('svg')).toBeVisible();
+  await page.click('[data-testid=user-menu]');
+  await expect(link).toHaveCount(0);
+});
+
 test('admin manages model endpoints and runs connectivity tests', async () => {
   await page.click('nav >> text=模型接入');
   const row = page.locator('[data-testid=endpoint-row]').first();
