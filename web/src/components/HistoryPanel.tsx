@@ -1,9 +1,13 @@
 import { useState } from 'react';
-import type { ElementRef, Version } from '../types';
-import { ACTION_LABELS, SCOPE_LABELS, fullTime, timeAgo } from '../lib/format';
+import type { ElementRef, Job, Version } from '../types';
+import { ACTION_LABELS, SCOPE_LABELS, costText, fullTime, timeAgo } from '../lib/format';
 
 interface Props {
   versions: Version[];
+  /** Requests that failed: listed among the versions, and anyone may run them again. */
+  failedJobs?: Job[];
+  pages?: { id: string }[];
+  onRetry?: (j: Job) => void;
   currentVersionNo: number;
   previewId?: number;
   onPreview: (v: Version) => void;
@@ -32,12 +36,75 @@ function ElementList({ title, items, onLocate, kind }: { title: string; items: E
   );
 }
 
-export function HistoryPanel({ versions, currentVersionNo, previewId, onPreview, onRevert, onLocate }: Props) {
+function FailedItem({ job, pages, canRetry, onRetry }: { job: Job; pages: { id: string }[]; canRetry: boolean; onRetry?: (j: Job) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const scope = (job.request.scope ?? 'global') as Version['scope'];
+  const pageNo = job.request.pageId ? pages.findIndex((p) => p.id === job.request.pageId) + 1 : 0;
+  const target =
+    job.kind === 'create'
+      ? '首次生成'
+      : scope === 'global'
+        ? '整份材料'
+        : `${pageNo ? `第 ${pageNo} 页` : '已删除的页面'}${scope === 'element' ? ` · ${job.request.elementIds?.length ?? 0} 个选中元素` : ''}`;
+  const error = job.error ?? '未知错误';
+  const at = job.finishedAt ?? job.updatedAt;
+  return (
+    <div className="hist-item hist-failed" data-testid="history-failed">
+      <div className="hist-head">
+        <span className="hist-v err">失败</span>
+        <span className="avatar sm">{(job.userName ?? '?').slice(0, 1).toUpperCase()}</span>
+        <span className="hist-user">{job.userName ?? '某用户'}</span>
+        <span className="hist-action">{ACTION_LABELS[job.kind] ?? job.kind}</span>
+        <span className="spacer" />
+        <span className="muted small" title={fullTime(at)}>{timeAgo(at)}</span>
+      </div>
+      <div className="hist-target">
+        <span className={`scope-tag scope-${scope}`}>{job.kind === 'create' ? '生成' : SCOPE_LABELS[scope]}</span> {target}
+      </div>
+      {job.request.prompt && <div className="hist-prompt">{job.request.prompt}</div>}
+      <div className="hist-error" title={error}>{error.length > 200 && !open ? `${error.slice(0, 200)}…` : error}</div>
+      <div className="hist-cost" data-testid="hist-cost">{costText(job.durationMs, job.stats)}</div>
+      <div className="hist-actions">
+        {error.length > 200 && <button className="link" onClick={() => setOpen(!open)}>{open ? '收起' : '完整错误'}</button>}
+        {job.retriedBy ? (
+          <span className="muted small" data-testid="retried">已重试</span>
+        ) : (
+          canRetry && (
+            <button
+              className="link"
+              disabled={busy}
+              data-testid="retry-btn"
+              onClick={async () => {
+                setBusy(true);
+                await onRetry?.(job);
+                setBusy(false);
+              }}
+            >
+              {busy ? '提交中…' : '重试'}
+            </button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, currentVersionNo, previewId, onPreview, onRevert, onLocate }: Props) {
   const [open, setOpen] = useState<number | null>(null);
-  if (!versions.length) return <div className="panel-empty muted">暂无历史记录</div>;
+  if (!versions.length && !failedJobs.length) return <div className="panel-empty muted">暂无历史记录</div>;
+  const items = [
+    ...versions.map((v) => ({ at: v.createdAt, v })),
+    ...failedJobs.map((j) => ({ at: j.finishedAt ?? j.updatedAt, j })),
+  ].sort((a, b) => b.at - a.at);
   return (
     <div className="history" data-testid="history">
-      {versions.map((v) => {
+      {items.map((item) => {
+        if ('j' in item) {
+          const j = item.j;
+          return <FailedItem key={j.id} job={j} pages={pages} canRetry={j.kind === 'edit' || currentVersionNo === 0} onRetry={onRetry} />;
+        }
+        const v = item.v;
         const s = v.summary;
         const target =
           v.scope === 'global'
@@ -70,6 +137,7 @@ export function HistoryPanel({ versions, currentVersionNo, previewId, onPreview,
             </div>
             {v.prompt && <div className="hist-prompt">{v.prompt.length > 160 && !isOpen ? `${v.prompt.slice(0, 160)}…` : v.prompt}</div>}
             {counts.length > 0 && <div className="hist-counts">{counts.join(' · ')}</div>}
+            {v.jobId && <div className="hist-cost" data-testid="hist-cost">{costText(v.durationMs, v.stats)}</div>}
             {isOpen && (
               <div className="hist-detail">
                 {s.pagesRemoved?.length > 0 && <div className="small">删除页面：{s.pagesRemoved.join('、')}</div>}

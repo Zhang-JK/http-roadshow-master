@@ -13,6 +13,28 @@ export function elapsed(ts: number): string {
   return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss.padStart(5, '0')}` : mmss;
 }
 
+/** A length of time in words, e.g. 45 秒, 3 分 05 秒, 1 小时 02 分. */
+export function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`;
+  return `${Math.floor(s / 3600)} 小时 ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')} 分`;
+}
+
+export const num = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-US');
+
+export const speed = (tps: number | null | undefined) => (tps ? `${tps.toFixed(1)} tok/s` : '—');
+
+/** Totals of a finished job, e.g. 耗时 3 分 05 秒 · 输入 12,000 / 输出 3,400 tokens · 21.5 tok/s. */
+export function costText(durationMs: number | null | undefined, stats: { calls: number; promptTokens: number; completionTokens: number; estimated: boolean; tokensPerSec: number | null } | null | undefined): string {
+  const parts = [durationMs != null ? `耗时 ${duration(durationMs)}` : ''];
+  if (stats?.calls) {
+    parts.push(`${stats.calls} 次调用`, `输入 ${num(stats.promptTokens)} / 输出 ${num(stats.completionTokens)} tokens${stats.estimated ? '（估算）' : ''}`);
+    if (stats.tokensPerSec) parts.push(speed(stats.tokensPerSec));
+  }
+  return parts.filter(Boolean).join(' · ');
+}
+
 export function fullTime(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
 }

@@ -11,12 +11,20 @@ import { AssetsPanel } from '../components/AssetsPanel';
 import { FilesPanel } from '../components/FilesPanel';
 import { QuestionCard } from '../components/QuestionCard';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
-import { elapsed, TYPE_LABELS } from '../lib/format';
+import { duration, elapsed, num, speed, TYPE_LABELS } from '../lib/format';
 
 function progressText(j: Job): string {
+  const live = j.stats?.live;
+  if (live?.queued) return `排队等待模型空闲（接入点都在处理其他请求）· 已等待 ${duration(live.waitingMs)} · 已用 ${elapsed(j.createdAt)}`;
   if (!j.progress) return `排队中 · 已等待 ${elapsed(j.createdAt)}`;
-  const chars = j.progress.chars ? ` · ${j.progress.chars.toLocaleString()} 字符` : '';
-  return `${j.progress.stage}${chars} · 已用 ${elapsed(j.createdAt)}`;
+  const parts = [j.progress.stage];
+  if (live && !live.tokens && live.waitingMs > 5000) parts.push(`等待模型响应 ${duration(live.waitingMs)}`);
+  if (live?.tokensPerSec) parts.push(speed(live.tokensPerSec));
+  if (j.stats && (j.stats.promptTokens || j.stats.completionTokens)) {
+    parts.push(`输入 ${num(j.stats.promptTokens)} / 输出 ${num(j.stats.completionTokens)} tokens`);
+  } else if (j.progress.chars) parts.push(`${j.progress.chars.toLocaleString()} 字符`);
+  parts.push(`已用 ${elapsed(j.createdAt)}`);
+  return parts.join(' · ');
 }
 
 interface ProjectResponse {
@@ -34,6 +42,7 @@ export function EditorPage() {
   const { user } = useAuth();
   const [data, setData] = useState<ProjectResponse | null>(null);
   const [versions, setVersions] = useState<Version[]>([]);
+  const [failedJobs, setFailedJobs] = useState<Job[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [pageId, setPageId] = useState<string>('');
   const [selection, setSelection] = useState<SelectedElement[]>([]);
@@ -50,6 +59,7 @@ export function EditorPage() {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const versionRef = useRef(-1);
   const myJobs = useRef(new Set<string>());
+  const seenJobs = useRef(new Set<string>());
 
   const project = data?.project;
   const liveDoc = project?.doc;
@@ -58,6 +68,17 @@ export function EditorPage() {
   const pageIndex = Math.max(0, pages.findIndex((p) => p.id === pageId));
   const currentPage = pages[pageIndex];
 
+  const loadHistory = useCallback(() => {
+    if (!id) return;
+    api
+      .get<{ versions: Version[]; failedJobs: Job[] }>(`/api/projects/${id}/versions`)
+      .then((v) => {
+        setVersions(v.versions);
+        setFailedJobs(v.failedJobs ?? []);
+      })
+      .catch(() => {});
+  }, [id]);
+
   const loadProject = useCallback(async () => {
     if (!id) return;
     try {
@@ -65,7 +86,7 @@ export function EditorPage() {
       if (r.project.versionNo !== versionRef.current) {
         versionRef.current = r.project.versionNo;
         setData(r);
-        api.get<{ versions: Version[] }>(`/api/projects/${id}/versions`).then((v) => setVersions(v.versions));
+        loadHistory();
       } else {
         setData((d) => (d ? { ...d, assets: r.assets, project: { ...d.project, status: r.project.status, error: r.project.error, name: r.project.name } } : r));
       }
@@ -73,7 +94,7 @@ export function EditorPage() {
       toast((e as Error).message, 'error');
       if ((e as { status?: number }).status === 404) nav('/templates');
     }
-  }, [id, nav, toast]);
+  }, [id, nav, toast, loadHistory]);
 
   const loadJobs = useCallback(async () => {
     if (!id) return;
@@ -81,16 +102,33 @@ export function EditorPage() {
     if (!r) return;
     setJobs(r.jobs);
     const active = new Set(r.jobs.map((j) => j.id));
+    // A request finished (mine or someone else's): a failure only shows up in the history, so refresh it.
+    if ([...seenJobs.current, ...myJobs.current].some((jid) => !active.has(jid))) loadHistory();
+    seenJobs.current = active;
     for (const jid of [...myJobs.current]) {
       if (active.has(jid)) continue;
       myJobs.current.delete(jid);
       const { job } = await api.get<{ job: Job }>(`/api/jobs/${jid}`);
       if (job.status === 'done')
         toast(`${job.kind === 'create' ? '生成完成' : '修改已应用'}${job.review ? `（${reviewText(job.review)}）` : ''}`, 'success');
-      else if (job.status === 'error') toast(`${job.kind === 'create' ? '生成' : '修改'}失败：${job.error}`, 'error');
+      else if (job.status === 'error') toast(`${job.kind === 'create' ? '生成' : '修改'}失败（已记入修改历史，可重试）：${job.error}`, 'error');
       loadProject();
     }
-  }, [id, toast, loadProject]);
+  }, [id, toast, loadProject, loadHistory]);
+
+  const retry = async (j: Job) => {
+    try {
+      const r = await api.post<{ job: Job }>(`/api/jobs/${j.id}/retry`);
+      myJobs.current.add(r.job.id);
+      setJobs((list) => [...list, { ...r.job, userName: user?.displayName }]);
+      toast('已重新提交该请求', 'info');
+      loadHistory();
+      loadProject();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+      loadHistory();
+    }
+  };
 
   useEffect(() => {
     versionRef.current = -1;
@@ -316,6 +354,8 @@ export function EditorPage() {
               <button
                 className="btn btn-primary"
                 onClick={async () => {
+                  const failed = failedJobs.find((j) => j.kind === 'create' && !j.retriedBy);
+                  if (failed) return retry(failed);
                   try {
                     const r = await api.post<{ job: Job }>(`/api/projects/${project.id}/regenerate`);
                     myJobs.current.add(r.job.id);
@@ -325,19 +365,26 @@ export function EditorPage() {
                     toast((e as Error).message, 'error');
                   }
                 }}
+                data-testid="regenerate-btn"
               >
                 重新生成
               </button>
+              {failedJobs.length > 0 && (
+                <p className="muted small">
+                  已失败 {failedJobs.length} 次{failedJobs[0].userName ? `，最近一次由 ${failedJobs[0].userName} 发起` : ''}
+                  {failedJobs[0].durationMs ? `，耗时 ${duration(failedJobs[0].durationMs)}` : ''}
+                </p>
+              )}
             </>
           ) : (
             <>
               {createJob?.question ? <QuestionCard job={createJob} onAnswered={loadJobs} /> : <div className="spinner big" />}
               <h2>AI 正在生成{TYPE_LABELS[project.type]}…</h2>
               <p className="muted">
-                {createJob?.progress ? progressText(createJob) : '正在准备请求…'}
+                <span data-testid="job-progress">{createJob ? progressText(createJob) : '正在准备请求…'}</span>
               </p>
               <p className="muted small">
-                耗时取决于模型输出速度：在线模型通常 1–3 分钟；本地部署的模型（约 20–30 tokens/秒）生成并自检一份完整{TYPE_LABELS[project.type]}可能需要 20–60 分钟。字符数在增长就说明仍在生成。你可以离开此页面，稍后回来查看。
+                耗时取决于模型输出速度：在线模型通常 1–3 分钟；本地部署的模型（约 20–30 tokens/秒）生成并自检一份完整{TYPE_LABELS[project.type]}可能需要 20–60 分钟。输出 tokens 在增长就说明仍在生成。你可以离开此页面，稍后回来查看。
               </p>
             </>
           )}
@@ -417,7 +464,7 @@ export function EditorPage() {
                             : `第 ${pages.findIndex((p) => p.id === j.request.pageId) + 1} 页${j.request.scope === 'element' ? ` · ${j.request.elementIds?.length} 个元素` : ''}`}
                         </span>
                         <span className="job-prompt" title={j.request.prompt}>{j.request.prompt}</span>
-                        <span className="muted small">{progressText(j)}</span>
+                        <span className="muted small" data-testid="job-progress">{progressText(j)}</span>
                       </div>
                     ))}
                   </div>
@@ -491,7 +538,9 @@ export function EditorPage() {
 
           <aside className="side-panel">
             <div className="tabs">
-              <button className={tab === 'history' ? 'on' : ''} onClick={() => setTab('history')}>修改历史 <span className="muted">{versions.length}</span></button>
+              <button className={tab === 'history' ? 'on' : ''} onClick={() => setTab('history')}>修改历史 <span className="muted">{versions.length}</span>
+                {failedJobs.some((j) => !j.retriedBy) && <span className="err-text small"> · {failedJobs.filter((j) => !j.retriedBy).length} 失败</span>}
+              </button>
               <button className={tab === 'files' ? 'on' : ''} onClick={() => setTab('files')} data-testid="tab-files">文件</button>
               <button className={tab === 'assets' ? 'on' : ''} onClick={() => setTab('assets')}>素材 <span className="muted">{data?.assets.length ?? 0}</span></button>
             </div>
@@ -506,6 +555,9 @@ export function EditorPage() {
             ) : tab === 'history' ? (
               <HistoryPanel
                 versions={versions}
+                failedJobs={failedJobs}
+                pages={pages}
+                onRetry={retry}
                 currentVersionNo={project.versionNo}
                 previewId={preview?.version.id}
                 onPreview={openPreview}

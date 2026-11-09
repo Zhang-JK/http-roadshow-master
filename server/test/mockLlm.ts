@@ -263,6 +263,8 @@ function streamToolCalls(res: http.ServerResponse, toolCalls: { name: string; ar
 
 export interface MockOptions {
   delayMs?: number;
+  /** Pause between streamed chunks, so the output has a measurable speed. */
+  chunkDelayMs?: number;
 }
 
 export async function startMockLlm(opts: MockOptions = {}) {
@@ -271,6 +273,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
   const reviewCalls: MockCall[] = [];
   /** Requests answering a failed delivery check (also counted in calls / reviewCalls). */
   const checkCalls: MockCall[] = [];
+  const failedOnce = new Set<string>();
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || !req.url?.endsWith('/chat/completions')) {
       res.writeHead(404).end();
@@ -299,6 +302,13 @@ export async function startMockLlm(opts: MockOptions = {}) {
         }
     }
     const text = texts.join('\n');
+    // FAIL_ONCE in an edit request: the first attempt on each model fails as if it were overloaded, a retry works.
+    const editRequest = text.match(/【修改要求】\n([^\n]*)/)?.[1] ?? '';
+    if (editRequest.includes('FAIL_ONCE') && !failedOnce.has(`${body.model}|${editRequest}`)) {
+      failedOnce.add(`${body.model}|${editRequest}`);
+      res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model overloaded (FAIL_ONCE)' } }));
+      return;
+    }
     const review = text.includes('【自检阶段】');
     (review ? reviewCalls : calls).push({ model: body.model, stream: !!body.stream, user: body.user, text, images, body });
 
@@ -390,7 +400,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
     if (body.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const chunks = reply.match(/[\s\S]{1,200}/g) ?? [];
-      for (const c of chunks) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
+      for (const c of chunks) {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
+        if (opts.chunkDelayMs) await new Promise((r) => setTimeout(r, opts.chunkDelayMs));
+      }
       res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }], usage })}\n\n`);
       res.end('data: [DONE]\n\n');
     } else {

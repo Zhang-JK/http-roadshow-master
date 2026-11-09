@@ -8,6 +8,7 @@ import { ProjectsPage } from './pages/Projects';
 import { EditorPage } from './pages/Editor';
 import { UsersPage } from './pages/Users';
 import { ModelsPage } from './pages/Models';
+import { SessionsPage } from './pages/Sessions';
 import { PasswordDialog } from './components/PasswordDialog';
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -30,6 +31,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/decks">路演材料</NavLink>
           <NavLink to="/users">用户管理</NavLink>
           {user?.isAdmin && <NavLink to="/models">模型接入</NavLink>}
+          {user?.isAdmin && <NavLink to="/sessions" data-testid="nav-sessions">会话</NavLink>}
           {user?.isAdmin && (
             <NavLink to="/system">
               系统更新{sys?.updateAvailable && <span className="nav-dot" title="有新版本" data-testid="update-dot" />}
@@ -73,6 +75,7 @@ export default function App() {
       <Route path="/decks" element={<Shell><ProjectsPage type="deck" /></Shell>} />
       <Route path="/users" element={<Shell><UsersPage /></Shell>} />
       <Route path="/models" element={<Shell>{user.isAdmin ? <ModelsPage /> : <Navigate to="/templates" />}</Shell>} />
+      <Route path="/sessions" element={<Shell>{user.isAdmin ? <SessionsPage /> : <Navigate to="/templates" />}</Shell>} />
       <Route path="/system" element={<Shell>{user.isAdmin ? <SystemPage /> : <Navigate to="/templates" />}</Shell>} />
       <Route path="*" element={<Navigate to="/templates" replace />} />
     </Routes>

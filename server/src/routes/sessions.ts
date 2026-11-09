@@ -28,7 +28,7 @@ export function sessionRoutes(app: FastifyInstance, db: DB) {
     requireAdmin(req);
     const q = req.query as { status?: string; limit?: string; offset?: string };
     const active = q.status !== 'history';
-    const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
+    const limit = Math.max(1, Math.min(500, Number(q.limit) || 50));
     const offset = Math.max(0, Number(q.offset) || 0);
     const where = active ? ACTIVE : `NOT ${ACTIVE}`;
     const rows = db

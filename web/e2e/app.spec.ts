@@ -72,7 +72,7 @@ test('admin manages model endpoints and runs connectivity tests', async () => {
   await expect(page.locator('[data-testid=form-test-result]')).toContainText('测试通过', { timeout: 20_000 });
   await page.click('[data-testid=save-endpoint]');
   await expect(page.locator('[data-testid=endpoint-row]')).toHaveCount(2);
-  await expect(page.locator('.panel-card').first()).toContainText('admin');
+  await expect(page.locator('.panel-card:has(h3:has-text("用户 → 首选接入点"))')).toContainText('admin');
 });
 
 test('generation settings default to staged multi-file output within a 200K context', async () => {
@@ -407,4 +407,113 @@ test('an element edit changes the selection, then asks before changing the same 
   await expect(stage().locator('h1')).toHaveText('SIMILAR-DONE');
   await expect(page.locator('[data-testid=page-thumb]').nth(0).frameLocator('iframe').locator('h1')).toHaveText('SIMILAR-DONE');
   await expect(page.locator('[data-testid=page-thumb]').nth(2).frameLocator('iframe').locator('h1')).toHaveText('SIMILAR-DONE');
+});
+
+test('history shows the time, tokens and output speed of each AI change; the progress line shows tokens live', async () => {
+  await page.goto(deckUrl);
+  await page.click('.tabs button:has-text("修改历史")');
+  const before = await historyItems().count();
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await page.fill('[data-testid=prompt-input]', '统一一下字号');
+  await page.click('[data-testid=send-btn]');
+  await expect(page.locator('.job-item [data-testid=job-progress]')).toContainText(/输入 [\d,]+ \/ 输出 [\d,]+ tokens/, { timeout: 20_000 });
+  await expect(historyItems()).toHaveCount(before + 1, { timeout: 30_000 });
+  const cost = historyItems().first().locator('[data-testid=hist-cost]');
+  await expect(cost).toContainText(/耗时 \d+ 秒 · \d+ 次调用 · 输入 [\d,]+ \/ 输出 [\d,]+ tokens/);
+  // The first version was generated with streamed pages, so its output speed is known.
+  await expect(historyItems().last().locator('[data-testid=hist-cost]')).toContainText('tok/s');
+});
+
+test('a failed edit stays in the history, and another user retries it', async () => {
+  await page.goto(deckUrl);
+  await page.click('.tabs button:has-text("修改历史")');
+  const versions = await historyItems().count();
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await page.fill('[data-testid=prompt-input]', 'FAIL_ONCE 标题加粗');
+  await page.click('[data-testid=send-btn]');
+  const failed = page.locator('[data-testid=history-failed]');
+  await expect(failed).toHaveCount(1, { timeout: 30_000 });
+  await expect(failed).toContainText('FAIL_ONCE 标题加粗');
+  await expect(failed).toContainText('model overloaded');
+  await expect(failed).toContainText('管理员');
+  await expect(failed.locator('[data-testid=hist-cost]')).toContainText('2 次调用');
+  await expect(page.locator('.toast-error')).toContainText('已记入修改历史');
+  await expect(page.locator('.tabs')).toContainText('1 失败');
+
+  await page.goto('/decks');
+  await logout();
+  await login('carol', 'carol123');
+  await page.goto(deckUrl);
+  await expect(failed.locator('[data-testid=retry-btn]')).toBeVisible();
+  await failed.locator('[data-testid=retry-btn]').click();
+  await expect(failed.locator('[data-testid=retried]')).toHaveText('已重试');
+  await expect(failed.locator('[data-testid=retry-btn]')).toHaveCount(0);
+  await expect(historyItems()).toHaveCount(versions + 1, { timeout: 30_000 });
+  await expect(historyItems().first()).toContainText('卡罗尔');
+  await expect(historyItems().first()).toContainText('FAIL_ONCE 标题加粗');
+  await expect(page.locator('.tabs')).not.toContainText('失败');
+});
+
+test('the dashboard marks a project being edited; admins follow live and past sessions', async () => {
+  await page.goto('/decks');
+  await logout();
+  await login('admin', 'admin123');
+  await page.goto(deckUrl);
+  const deckName = (await page.locator('.editor-title').textContent())!.trim();
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await page.fill('[data-testid=prompt-input]', 'ASK_ME 会话测试');
+  await page.click('[data-testid=send-btn]');
+  await expect(page.locator('[data-testid=question-card]')).toBeVisible({ timeout: 30_000 });
+
+  await page.goto('/decks');
+  const card = page.locator(`[data-testid=project-card]:has-text("${deckName}")`);
+  await expect(card.locator('[data-testid=busy-badge] .spinner')).toBeVisible();
+  await expect(page.locator('[data-testid=busy-badge]')).toHaveCount(1);
+
+  await page.click('[data-testid=nav-sessions]');
+  await expect(page.locator('[data-testid=live-count]')).toHaveText('1');
+  const row = page.locator('[data-testid=session-row]');
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText('ASK_ME 会话测试');
+  await expect(row).toContainText('等待回答：MOCK-QUESTION');
+  await expect(row).toContainText(deckName);
+  await expect(row).toContainText(/Mock LLM|Backup/);
+  await row.click();
+  await expect(page.locator('[data-testid=session-call]').first()).toContainText('成功');
+
+  await page.goto(deckUrl);
+  await page.locator('[data-testid=question-option]:has-text("蓝色")').click();
+  await expect(page.locator('[data-testid=question-card]')).toHaveCount(0);
+  await expect(historyItems().first()).toContainText('ASK_ME 会话测试', { timeout: 30_000 });
+  await page.goto('/decks');
+  await expect(page.locator('[data-testid=busy-badge]')).toHaveCount(0);
+
+  await page.click('[data-testid=nav-sessions]');
+  await expect(page.locator('[data-testid=live-count]')).toHaveText('0');
+  await page.click('[data-testid=sessions-history]');
+  const done = page.locator('[data-testid=session-row]:has-text("ASK_ME 会话测试")');
+  await expect(done).toContainText('完成');
+  await expect(page.locator('[data-testid=session-row]:has-text("FAIL_ONCE")')).toHaveCount(2);
+  await expect(page.locator('[data-testid=session-row]:has-text("FAIL_ONCE"):has-text("model overloaded")')).toContainText('失败');
+  await expect(page.locator('[data-testid=session-row]:has-text("FAIL_ONCE"):has-text("已保存")')).toContainText('重试');
+  await expect(page.locator('[data-testid=session-row]').last()).toContainText('tok/s');
+  await done.click();
+  await expect(page.locator('[data-testid=session-call]').nth(1)).toBeVisible();
+});
+
+test('model access page shows usage with output speed above the user assignments, and the parallel limit', async () => {
+  await page.click('nav >> text=模型接入');
+  const usage = page.locator('[data-testid=usage-card]');
+  await expect(usage).toBeVisible();
+  const usageTop = (await usage.boundingBox())!.y;
+  const assignTop = (await page.locator('h3:has-text("用户 → 首选接入点")').boundingBox())!.y;
+  expect(usageTop).toBeLessThan(assignTop);
+  await expect(usage.locator('[data-testid=model-stats-row]').first()).toContainText('Mock LLM');
+  await expect(usage.locator('[data-testid=model-speed]', { hasText: 'tok/s' }).first()).toBeVisible();
+  const row = page.locator('[data-testid=endpoint-row]').first();
+  await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 不限');
+  await row.locator('button:has-text("编辑")').click();
+  await page.fill('[data-testid=ep-max-concurrency]', '2');
+  await page.click('[data-testid=save-endpoint]');
+  await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 2');
 });

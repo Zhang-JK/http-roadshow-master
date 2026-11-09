@@ -33,6 +33,8 @@ export interface Project {
   status: 'generating' | 'ready' | 'error';
   /** A job of this project waits for someone to answer the AI's question. */
   asking?: boolean;
+  /** Jobs of this project running now. */
+  busy?: number;
   error: string | null;
   versionNo: number;
   pageCount: number;
@@ -83,6 +85,12 @@ export interface Job {
   versionId: number | null;
   request: { prompt?: string; scope?: string; pageId?: string; elementIds?: string[] };
   progress: { chars: number; stage: string } | null;
+  stats?: JobStats | null;
+  durationMs?: number;
+  finishedAt?: number | null;
+  retryOf?: string | null;
+  /** The job that ran this failed request again. */
+  retriedBy?: string | null;
   cost: number | null;
   review?: JobReview | null;
   /** A question the job is waiting on. */
@@ -93,6 +101,17 @@ export interface Job {
   userName?: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Model calls of a job: tokens in and out, output speed, and the call running now. */
+export interface JobStats {
+  calls: number;
+  failedCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  estimated: boolean;
+  tokensPerSec: number | null;
+  live: { stage?: string; endpoint: string; queued: boolean; tokens: number; tokensPerSec: number | null; waitingMs: number } | null;
 }
 
 export interface JobQuestion {
@@ -145,6 +164,10 @@ export interface Version {
   prompt: string;
   summary: DiffSummary;
   createdAt: number;
+  /** The AI job that produced this version (none for manual changes). */
+  jobId?: string | null;
+  durationMs?: number | null;
+  stats?: JobStats | null;
 }
 
 export interface ProjectFile {
@@ -190,6 +213,9 @@ export interface Endpoint {
   weight: number;
   enabled: boolean;
   extraBody: string;
+  /** Requests sent to it at the same time (0 = no limit); more wait in a queue. */
+  maxConcurrency: number;
+  inflight: number;
   lastTestAt: number | null;
   lastTestOk: boolean | null;
   lastTestMessage: string | null;

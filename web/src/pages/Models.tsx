@@ -3,7 +3,7 @@ import { api } from '../api';
 import type { Endpoint, TestResult } from '../types';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/Toast';
-import { fullTime } from '../lib/format';
+import { duration, fullTime, num, speed } from '../lib/format';
 
 interface Form {
   id?: number;
@@ -14,6 +14,7 @@ interface Form {
   weight: number;
   enabled: boolean;
   extraBody: string;
+  maxConcurrency: number;
 }
 
 const EMPTY: Form = {
@@ -24,6 +25,7 @@ const EMPTY: Form = {
   weight: 1,
   enabled: true,
   extraBody: '{}',
+  maxConcurrency: 0,
 };
 
 interface Usage {
@@ -33,6 +35,22 @@ interface Usage {
   promptTokens: number | null;
   completionTokens: number | null;
   cost: number | null;
+  tokensPerSec: number | null;
+}
+
+interface ModelStats {
+  endpointId: number;
+  endpoint: string;
+  model: string;
+  calls: number;
+  failedCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  tokensPerSec: number | null;
+  firstTokenMs: number | null;
+  queuedMs: number | null;
+  inflight: number;
+  maxConcurrency: number;
 }
 
 export function ModelsPage() {
@@ -40,6 +58,7 @@ export function ModelsPage() {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [assignments, setAssignments] = useState<{ userId: number; username: string; endpointName: string | null }[]>([]);
   const [usage, setUsage] = useState<Usage[]>([]);
+  const [models, setModels] = useState<ModelStats[]>([]);
   const [settings, setSettings] = useState<{
     attachScreenshots: boolean;
     selfCheck: boolean;
@@ -63,7 +82,10 @@ export function ModelsPage() {
   const load = useCallback(() => {
     api.get<{ endpoints: Endpoint[] }>('/api/llm/endpoints').then((r) => setEndpoints(r.endpoints)).catch((e) => toast(e.message, 'error'));
     api.get<{ assignments: typeof assignments }>('/api/llm/assignments').then((r) => setAssignments(r.assignments));
-    api.get<{ usage: Usage[] }>('/api/llm/usage').then((r) => setUsage(r.usage));
+    api.get<{ usage: Usage[]; models: ModelStats[] }>('/api/llm/usage').then((r) => {
+      setUsage(r.usage);
+      setModels(r.models ?? []);
+    });
     api.get<{ settings: typeof settings }>('/api/settings').then((r) => setSettings(r.settings));
   }, [toast]);
   useEffect(load, [load]);
@@ -138,7 +160,7 @@ export function ModelsPage() {
         <div>
           <h1>模型接入</h1>
           <p className="muted">
-            配置兼容 OpenAI Chat Completions 协议的大模型接入点（模型必须支持图像输入）。启用多个接入点时，系统按<strong>用户</strong>做一致性哈希负载均衡：同一用户的请求固定发往同一接入点以充分利用提示词缓存，该接入点故障时自动切换到下一个。
+            配置兼容 OpenAI Chat Completions 协议的大模型接入点（模型必须支持图像输入）。启用多个接入点时，<strong>每个请求</strong>单独选择接入点：优先发往该用户的首选接入点（利用提示词缓存），它正在处理其他请求时改发最空闲的接入点，因此不同请求（包括同一用户的）可以并行；接入点故障时自动切换到下一个。设置了「并发上限」的接入点满载时，新请求在本地排队等待，排队时间不计入无响应超时。
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => { setForm({ ...EMPTY }); setFormTest(null); }} data-testid="add-endpoint">＋ 添加接入点</button>
@@ -147,11 +169,11 @@ export function ModelsPage() {
       <div className="table-card">
         <table className="table">
           <thead>
-            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th>权重</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
+            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th>权重</th><th title="正在处理的请求 / 并发上限">并发</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
           </thead>
           <tbody>
             {endpoints.length === 0 && (
-              <tr><td colSpan={8} className="muted center-text">尚未配置接入点，AI 生成功能不可用</td></tr>
+              <tr><td colSpan={9} className="muted center-text">尚未配置接入点，AI 生成功能不可用</td></tr>
             )}
             {endpoints.map((ep) => (
               <tr key={ep.id} data-testid="endpoint-row">
@@ -160,6 +182,7 @@ export function ModelsPage() {
                 <td className="muted small">{ep.baseUrl}</td>
                 <td><code>{ep.apiKeyMasked}</code></td>
                 <td>{ep.weight}</td>
+                <td className="nowrap" data-testid="endpoint-concurrency">{ep.inflight} / {ep.maxConcurrency || '不限'}</td>
                 <td>
                   <label className="switch">
                     <input type="checkbox" checked={ep.enabled} onChange={() => toggle(ep)} />
@@ -176,7 +199,7 @@ export function ModelsPage() {
                 </td>
                 <td className="right nowrap">
                   <button className="btn btn-sm" disabled={testing === ep.id} onClick={() => test(ep)} data-testid="test-endpoint">{testing === ep.id ? '测试中…' : '测试'}</button>{' '}
-                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody }); setFormTest(null); }}>编辑</button>{' '}
+                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody, maxConcurrency: ep.maxConcurrency }); setFormTest(null); }}>编辑</button>{' '}
                   <button className="btn btn-sm btn-danger" onClick={() => remove(ep)}>删除</button>
                 </td>
               </tr>
@@ -185,10 +208,52 @@ export function ModelsPage() {
         </table>
       </div>
 
+      <div className="panel-card usage-card" data-testid="usage-card">
+        <h3>用量统计 <span className="muted small">合计 ${totalCost.toFixed(4)}</span></h3>
+        <p className="muted small">输出速度 = 输出 tokens ÷（最后一个 token − 第一个 token 的时间），不含排队与模型读取输入的时间；首 token 延迟包含模型读取输入的时间。</p>
+        <table className="table compact" data-testid="model-stats">
+          <thead>
+            <tr><th>接入点</th><th>模型</th><th>调用</th><th>失败</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>平均首 token</th><th>平均排队</th><th>当前并发</th></tr>
+          </thead>
+          <tbody>
+            {models.length === 0 && <tr><td colSpan={9} className="muted center-text">暂无调用记录</td></tr>}
+            {models.map((m) => (
+              <tr key={m.endpointId} data-testid="model-stats-row">
+                <td><strong>{m.endpoint}</strong></td>
+                <td><code>{m.model}</code></td>
+                <td>{num(m.calls)}</td>
+                <td className={m.failedCalls ? 'err-text' : ''}>{num(m.failedCalls)}</td>
+                <td>{num(m.promptTokens)} / {num(m.completionTokens)}</td>
+                <td data-testid="model-speed"><strong>{speed(m.tokensPerSec)}</strong></td>
+                <td>{m.firstTokenMs != null ? duration(m.firstTokenMs) : '—'}</td>
+                <td>{m.queuedMs ? duration(m.queuedMs) : '—'}</td>
+                <td>{m.inflight} / {m.maxConcurrency || '不限'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <h4>按用户</h4>
+        <table className="table compact">
+          <thead><tr><th>用户</th><th>接入点</th><th>任务</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>费用</th></tr></thead>
+          <tbody>
+            {usage.map((u, i) => (
+              <tr key={i}>
+                <td>{u.username ?? '—'}</td>
+                <td>{u.endpoint ?? '（已删除）'}</td>
+                <td>{u.calls}</td>
+                <td>{num(u.promptTokens)} / {num(u.completionTokens)}</td>
+                <td>{speed(u.tokensPerSec)}</td>
+                <td>{u.cost != null ? `$${u.cost.toFixed(4)}` : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
       <div className="two-col">
         <div className="panel-card">
-          <h3>用户 → 接入点分配</h3>
-          <p className="muted small">基于加权一致性哈希（Rendezvous Hashing），增删接入点时只有少量用户会被重新分配。</p>
+          <h3>用户 → 首选接入点</h3>
+          <p className="muted small">基于加权一致性哈希（Rendezvous Hashing），增删接入点时只有少量用户会被重新分配。首选接入点忙时，请求会改发最空闲的接入点。</p>
           <table className="table compact">
             <tbody>
               {assignments.map((a) => (
@@ -274,15 +339,6 @@ export function ModelsPage() {
               </p>
             </div>
           )}
-          <h3 style={{ marginTop: 20 }}>用量统计 <span className="muted small">合计 ${totalCost.toFixed(4)}</span></h3>
-          <table className="table compact">
-            <thead><tr><th>用户</th><th>接入点</th><th>调用</th><th>输入/输出 tokens</th><th>费用</th></tr></thead>
-            <tbody>
-              {usage.map((u, i) => (
-                <tr key={i}><td>{u.username ?? '—'}</td><td>{u.endpoint ?? '（已删除）'}</td><td>{u.calls}</td><td>{(u.promptTokens ?? 0).toLocaleString()} / {(u.completionTokens ?? 0).toLocaleString()}</td><td>{u.cost != null ? `$${u.cost.toFixed(4)}` : '—'}</td></tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       </div>
 
@@ -305,6 +361,10 @@ export function ModelsPage() {
           <label className="field"><span>API Token{form.id ? '（留空则保持不变）' : ''}</span><input name="ep-key" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." /></label>
           <div className="row gap">
             <label className="field"><span>权重（1–100）</span><input type="number" min={1} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: Number(e.target.value) })} /></label>
+            <label className="field" title="同一时间最多发给这个接入点的请求数，0 表示不限。模型一次只能处理少量请求（例如自部署、单卡）时设置，超出的请求在本地排队，不会因等待而触发无响应超时">
+              <span>并发上限（0 = 不限）</span>
+              <input type="number" min={0} max={64} value={form.maxConcurrency} onChange={(e) => setForm({ ...form, maxConcurrency: Number(e.target.value) })} data-testid="ep-max-concurrency" />
+            </label>
             <label className="switch" style={{ marginTop: 22 }}><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /><span>启用</span></label>
           </div>
           <label className="field"><span>附加请求参数（JSON，可选，会合并进请求体）</span><textarea rows={3} value={form.extraBody} onChange={(e) => setForm({ ...form, extraBody: e.target.value })} placeholder='例如 {"reasoning":{"effort":"low"}}' /></label>

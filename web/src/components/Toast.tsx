@@ -14,7 +14,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((text: string, kind: Kind = 'info') => {
     const id = Date.now() + Math.random();
     setItems((s) => [...s, { id, kind, text }]);
-    setTimeout(() => setItems((s) => s.filter((t) => t.id !== id)), kind === 'error' ? 8000 : 4000);
+    setTimeout(() => setItems((s) => s.filter((t) => t.id !== id)), kind === 'error' ? 15_000 : 4000);
   }, []);
   return (
     <Ctx.Provider value={push}>

@@ -8,7 +8,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-e2e-'));
 process.env.DATA_DIR = dataDir;
 process.env.WEB_DIST = path.resolve(import.meta.dirname, '../dist');
 
-const mock = await startMockLlm({ delayMs: 1500 });
+const mock = await startMockLlm({ delayMs: 1500, chunkDelayMs: 60 });
 const { openDb } = await import('../../server/src/db.ts');
 const { buildApp } = await import('../../server/src/app.ts');
 const db = openDb();

@@ -26,11 +26,12 @@ export function ProjectsPage({ type }: { type: ProjectType }) {
     load();
   }, [load]);
 
+  // Poll faster while something runs; slowly otherwise, to notice edits other users start.
+  const running = !!projects?.some((p) => p.status === 'generating' || p.busy);
   useEffect(() => {
-    if (!projects?.some((p) => p.status === 'generating')) return;
-    const t = setInterval(load, 3000);
+    const t = setInterval(load, running ? 3000 : 10_000);
     return () => clearInterval(t);
-  }, [projects, load]);
+  }, [running, load]);
 
   const remove = async (p: Project) => {
     if (!confirm(`确定删除「${p.name}」？此操作不可恢复。`)) return;
@@ -92,7 +93,15 @@ export function ProjectsPage({ type }: { type: ProjectType }) {
                 )}
               </div>
               <div className="card-body">
-                <div className="card-title">{p.name}{p.asking && <span className="pill pill-ask q-flag" data-testid="asking-badge">待回答</span>}</div>
+                <div className="card-title">
+                  {p.busy && p.status !== 'generating' ? (
+                    <span className="busy-flag" title={`${p.busy} 个修改任务进行中`} data-testid="busy-badge">
+                      <span className="spinner tiny" />
+                    </span>
+                  ) : null}
+                  {p.name}
+                  {p.asking && <span className="pill pill-ask q-flag" data-testid="asking-badge">待回答</span>}
+                </div>
                 <div className="card-meta">
                   <span>{p.pageCount} 页</span>
                   <span>·</span>
