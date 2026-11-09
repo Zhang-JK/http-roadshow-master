@@ -230,6 +230,102 @@ test('preview and revert a historical version', async () => {
   await expect(historyItems().first()).toContainText('恢复到版本 v1');
 });
 
+test('double-click a text-only element to edit it in place, without the AI; each save is a version in history', async () => {
+  await expect(page.locator('[data-testid=page-indicator]')).toHaveText('第 2 / 3 页');
+  const count = await historyItems().count();
+  const editBar = page.locator('[data-testid=text-edit-bar]');
+  const body = stage().locator('p.body').first();
+  const title = stage().locator('h1');
+  await expect(body).toHaveText('第2页正文内容');
+
+  await body.hover();
+  await expect(stage().locator('[data-rs-ui] > div', { hasText: '段落 <p> · 双击改字' })).toBeVisible();
+
+  // Enter saves; Shift+Enter is a line break.
+  await body.dblclick();
+  await expect(editBar).toBeVisible();
+  await expect(body).toHaveAttribute('contenteditable', /plaintext-only|true/);
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('直接改的正文 <b>A&B</b>');
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.type('第二行');
+  await page.keyboard.press('Enter');
+  await expect(editBar).toHaveCount(0);
+  await expect(page.locator('.toast-success', { hasText: `文字已保存（v` })).toBeVisible();
+  await expect(historyItems()).toHaveCount(count + 1);
+  const top = historyItems().first();
+  await expect(top).toContainText('直接改字');
+  await expect(top).toContainText('管理员');
+  await expect(top).toContainText('第 2 页 · 1 个选中元素');
+  await expect(top.locator('[data-testid=hist-text] del')).toHaveText('第2页正文内容');
+  expect(await top.locator('[data-testid=hist-text] ins').textContent()).toBe('直接改的正文 <b>A&B</b>\n第二行');
+  await expect(top.locator('[data-testid=hist-cost]')).toHaveCount(0);
+  await expect(body).not.toHaveAttribute('contenteditable');
+  expect(await body.evaluate((el) => el.getAttribute('style'))).toBeNull();
+  const projectId = new URL(page.url()).pathname.split('/').pop();
+  const saved = async () => (await (await page.request.get(`/api/projects/${projectId}`)).json()).project.doc;
+  expect((await saved()).pages[1].html).toMatch(/>直接改的正文 &lt;b&gt;A&amp;B&lt;\/b&gt;<br>第二行<\/p>/);
+
+  // Esc, the bar's cancel button, and emptying the text all leave it as it was.
+  await body.dblclick();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('SHOULD-NOT-SAVE');
+  await page.keyboard.press('Escape');
+  await expect(editBar).toHaveCount(0);
+  await expect(body).toHaveText('直接改的正文 <b>A&B</b>第二行');
+  await title.dblclick();
+  await page.keyboard.type('XX');
+  await page.click('[data-testid=text-edit-cancel]');
+  await expect(editBar).toHaveCount(0);
+  await expect(title).toHaveText('第2页标题');
+  await body.dblclick();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.toast-info', { hasText: '文字不能为空' })).toBeVisible();
+  await expect(body).toHaveText('直接改的正文 <b>A&B</b>第二行');
+  await expect(historyItems()).toHaveCount(count + 1);
+
+  // The 直接改字 button on a selected element, then the bar's save button.
+  await title.click();
+  await expect(page.locator('[data-testid=scope-chip]')).toHaveText('第 2 页 · 1 个元素');
+  await page.click('[data-testid=edit-text-btn]');
+  await expect(editBar).toBeVisible();
+  await page.keyboard.type(' · 按钮');
+  await page.click('[data-testid=text-edit-save]');
+  await expect(historyItems()).toHaveCount(count + 2);
+  await expect(title).toHaveText('第2页标题 · 按钮');
+  await expect(historyItems().first().locator('[data-testid=hist-text] ins')).toHaveText('第2页标题 · 按钮');
+
+  // Clicking somewhere else saves too; a list holds more than text, so it is left to the AI.
+  const li = stage().locator('li').first();
+  await li.dblclick();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('新要点');
+  await title.click();
+  await expect(historyItems()).toHaveCount(count + 3);
+  await expect(li).toHaveText('新要点');
+  await expect(page.locator('[data-testid=edit-text-btn]')).toBeVisible();
+  await stage().locator('ul').dispatchEvent('dblclick');
+  await expect(page.locator('.toast-info', { hasText: '不能直接改字' })).toBeVisible();
+  await expect(editBar).toHaveCount(0);
+  await expect(page.locator('.sel-chip')).toContainText('列表');
+  await expect(page.locator('[data-testid=edit-text-btn]')).toHaveCount(0);
+  await page.click('button:has-text("取消选择")');
+
+  // Someone else changed the same text meanwhile: nothing is overwritten and the stage shows their text.
+  await body.dblclick();
+  await page.keyboard.type(' 我的');
+  const pageId = (await saved()).pages[1].id;
+  const eid = await body.getAttribute('data-eid');
+  const other = await page.request.put(`/api/projects/${projectId}/pages/${pageId}/elements/${eid}/text`, { data: { text: '别人改的正文' } });
+  expect(other.ok()).toBe(true);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.toast-error', { hasText: '文字没有保存' })).toContainText('别人改的正文');
+  await expect(body).toHaveText('别人改的正文');
+  await expect(historyItems()).toHaveCount(count + 4);
+});
+
 test('export HTML, PDF and PPTX downloads', async () => {
   for (const [label, ext, magic] of [
     ['下载 HTML', 'html', '<!DOCTYPE'],
