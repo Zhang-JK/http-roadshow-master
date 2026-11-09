@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import type { AnyNode, Element } from 'domhandler';
+import type { AnyNode, Element, Text } from 'domhandler';
 import { customAlphabet } from 'nanoid';
 import { ADDITIONS_CSS, appendCss, cssFiles, nameFiles, readmeBody } from './files.js';
 
@@ -41,6 +41,8 @@ export interface DiffSummary {
   elementsChanged: { eid: string; page: number; tag: string; text: string }[];
   elementsAdded: { eid: string; page: number; tag: string; text: string }[];
   elementsRemoved: { eid: string; tag: string; text: string }[];
+  /** Text typed straight into one element in the editor, without the model. */
+  textEdit?: { eid: string; page: number; before: string; after: string };
 }
 
 const shortId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 8);
@@ -439,4 +441,42 @@ export function movePage(doc: DeckDoc, pageId: string, toIndex: number): DeckDoc
   const [p] = pages.splice(idx, 1);
   pages.splice(Math.max(0, Math.min(pages.length, toIndex)), 0, p);
   return { ...doc, pages };
+}
+
+/** Keep in sync with NOT_TEXT in the editor's selection script (web/src/lib/slideHtml.ts). */
+const NOT_TEXT_TAGS = new Set(['svg', 'math', 'textarea', 'select', 'option', 'script', 'style', 'noscript', 'template', 'iframe', 'object', 'canvas', 'video', 'audio']);
+
+/**
+ * The text of an element that holds nothing but text and <br> line breaks (lines joined with \n,
+ * whitespace collapsed), or null when it is the page itself, empty, or contains other elements.
+ */
+export function plainText(el: Element): string | null {
+  if (NOT_TEXT_TAGS.has(el.tagName.toLowerCase()) || el.attribs['data-page-id'] !== undefined) return null;
+  const lines = [''];
+  for (const c of el.children ?? []) {
+    if (c.type === 'text') lines[lines.length - 1] += (c as Text).data;
+    else if (c.type === 'tag' && (c as Element).tagName.toLowerCase() === 'br') lines.push('');
+    else if (c.type !== 'comment') return null;
+  }
+  const text = lines
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .join('\n')
+    .trim();
+  return text || null;
+}
+
+const failWith = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+
+/** Replace the text of a text-only element; line breaks become <br>. Errors carry an HTTP statusCode. */
+export function setElementText(doc: DeckDoc, pageId: string, eid: string, text: string): { doc: DeckDoc; before: string; page: number } {
+  const idx = doc.pages.findIndex((p) => p.id === pageId);
+  if (idx < 0) throw failWith(409, '页面不存在（可能已被其他用户删除）');
+  const $ = cheerio.load(doc.pages[idx].html, null, false);
+  const node = $(`[data-eid="${eid.replace(/"/g, '')}"]`).first();
+  if (!node.length) throw failWith(409, '元素不存在（可能已被其他用户修改或删除）');
+  const before = plainText(node.get(0) as Element);
+  if (before === null) throw failWith(400, '只有纯文字元素可以直接编辑；包含图片、图标或其他子元素的内容请用 AI 修改');
+  node.html(text.split('\n').map(escapeHtml).join('<br>'));
+  const pages = doc.pages.map((p, i) => (i === idx ? { ...p, html: $.html() } : p));
+  return { doc: { ...doc, pages }, before, page: idx + 1 };
 }

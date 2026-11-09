@@ -387,6 +387,60 @@ describe('templates, decks, edits, history and export', () => {
     expect(v[0].summary.pagesRemoved).toEqual(['原第3页']);
   });
 
+  it('direct text edits skip the model and are recorded in history and the README log', async () => {
+    const calls = mock.calls.length;
+    const before = (await req('GET', `/api/projects/${deckId}`, adminCookie)).json.project;
+    const page = before.doc.pages[0];
+    const [, eid, oldText] = page.html.match(/<h1[^>]*data-eid="([^"]+)"[^>]*>([^<]*)<\/h1>/);
+    const ul = page.html.match(/<ul[^>]*data-eid="([^"]+)"/)[1];
+    const url = (e: string, pid = page.id) => `/api/projects/${deckId}/pages/${pid}/elements/${e}/text`;
+    const typed = '新标题 <b>A&B</b>\n第二行';
+
+    const r = await req('PUT', url(eid), aliceCookie, { text: '  新标题   <b>A&B</b>\r\n  第二行\u0007 ', oldText });
+    expect(r.status).toBe(200);
+    expect(r.json.versionNo).toBe(before.versionNo + 1);
+    const after = (await req('GET', `/api/projects/${deckId}`, adminCookie)).json.project;
+    expect(after.versionNo).toBe(before.versionNo + 1);
+    expect(after.doc.pages[0].html).toMatch(new RegExp(`data-eid="${eid}"[^>]*>新标题 &lt;b&gt;A&amp;B&lt;/b&gt;<br>第二行</h1>`));
+    expect(after.doc.pages.slice(1)).toEqual(before.doc.pages.slice(1));
+    expect(after.doc.css).toBe(before.doc.css);
+    expect(after.doc.readme).toContain(`v${after.versionNo} 爱丽丝：第 1 页 直接改字「${oldText}」→「新标题 <b>A&B</b> 第二行」`);
+    expect(mock.calls.length).toBe(calls);
+
+    const [v] = (await req('GET', `/api/projects/${deckId}/versions`, adminCookie)).json.versions;
+    expect(v).toMatchObject({ versionNo: after.versionNo, action: 'text_edit', userName: '爱丽丝', scope: 'element', pageIndex: 0, pageId: page.id, elementIds: [eid] });
+    expect(v.jobId ?? null).toBeNull();
+    expect(v.prompt).toBe(`直接修改文字：「${oldText}」→「${typed}」`);
+    expect(v.summary.textEdit).toEqual({ eid, page: 1, before: oldText, after: typed });
+    expect(v.summary.elementsChanged.map((e: any) => e.eid)).toEqual([eid]);
+    expect(v.summary.pagesChanged).toEqual([1]);
+    expect(v.summary.readmeChanged).toBeFalsy();
+
+    // The same text again is not a new version.
+    expect((await req('PUT', url(eid), adminCookie, { text: typed })).json).toEqual({ unchanged: true });
+    // Someone else changed the text since this editor loaded it.
+    const stale = await req('PUT', url(eid), adminCookie, { text: '我的修改', oldText });
+    expect(stale.status).toBe(409);
+    expect(stale.json.error).toContain('新标题 <b>A&B</b>');
+    // oldText only needs to match up to whitespace (the browser may collapse it differently).
+    expect((await req('PUT', url(eid), adminCookie, { text: '标题 v2', oldText: '新标题  <b>A&B</b> 第二行' })).status).toBe(200);
+
+    expect((await req('PUT', url(eid), adminCookie, { text: ' \n ' })).status).toBe(400);
+    expect((await req('PUT', url(eid), adminCookie, { text: 'x'.repeat(5001) })).status).toBe(400);
+    const notText = await req('PUT', url(ul), adminCookie, { text: '要点' });
+    expect(notText.status).toBe(400);
+    expect(notText.json.error).toContain('只有纯文字元素可以直接编辑');
+    expect((await req('PUT', url('nope'), adminCookie, { text: 'x' })).status).toBe(409);
+    expect((await req('PUT', url(eid, 'pmissing'), adminCookie, { text: 'x' })).status).toBe(409);
+    expect((await req('PUT', `/api/projects/nope/pages/${page.id}/elements/${eid}/text`, adminCookie, { text: 'x' })).status).toBe(404);
+    expect((await req('PUT', url(eid), '', { text: 'x' })).status).toBe(401);
+
+    const v2 = (await req('GET', `/api/projects/${deckId}/versions`, adminCookie)).json.versions;
+    expect(v2[0]).toMatchObject({ action: 'text_edit', userName: '管理员', versionNo: after.versionNo + 1 });
+    expect(v2[1].versionNo).toBe(after.versionNo);
+    expect((await req('GET', `/api/projects/${deckId}`, adminCookie)).json.project.doc.pages[0].html).toMatch(new RegExp(`data-eid="${eid}"[^>]*>标题 v2</h1>`));
+  });
+
   it('can preview and revert to an older version', async () => {
     const v = (await req('GET', `/api/projects/${deckId}/versions`, adminCookie)).json.versions;
     const v1 = v.find((x: any) => x.versionNo === 1);

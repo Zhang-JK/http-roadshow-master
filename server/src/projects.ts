@@ -6,6 +6,7 @@ import {
   diffDocs,
   emptyDoc,
   findElements,
+  setElementText,
   type DeckDoc,
   type DiffSummary,
 } from './deck.js';
@@ -104,12 +105,13 @@ export function projectDoc(p: ProjectRow): DeckDoc | null {
 }
 
 export interface VersionMeta {
-  action: 'create' | 'edit' | 'revert' | 'page_delete' | 'page_duplicate' | 'page_move' | 'rename' | 'readme';
+  action: 'create' | 'edit' | 'revert' | 'page_delete' | 'page_duplicate' | 'page_move' | 'rename' | 'readme' | 'text_edit';
   scope: 'global' | 'page' | 'element';
   pageIndex?: number | null;
   pageId?: string | null;
   elementIds?: string[];
   prompt?: string;
+  textEdit?: DiffSummary['textEdit'];
 }
 
 /** Persist a new document version and make it current. Must be called inside the project lock. */
@@ -118,6 +120,7 @@ export function commitVersion(db: DB, projectId: string, userId: number, doc: De
   if (!project) throw new Error('项目不存在');
   const before = projectDoc(project);
   const summary = diffDocs(before && before.pages.length ? before : null, doc);
+  if (meta.textEdit) summary.textEdit = meta.textEdit;
   const now = Date.now();
   const versionNo = project.version_no + 1;
   let versionId = 0;
@@ -711,5 +714,59 @@ export function applyManual(
     if (!doc || !doc.pages.length) throw new Error('项目尚未生成完成');
     const next = assignIds(mutate(doc));
     return commitVersion(db, projectId, userId, next, meta);
+  });
+}
+
+export const MAX_ELEMENT_TEXT = 5000;
+
+/** Text typed in the editor: line breaks kept, runs of spaces collapsed, control characters dropped. */
+export function cleanTypedText(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .split('\n')
+    .map((l) => l.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .trim();
+}
+
+const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+/**
+ * Replace the text of one text-only element, typed by the user in the editor (no model involved),
+ * as a new version. `oldText` is what the user saw when they started typing: when the saved text
+ * differs from it, someone else changed the element meanwhile and nothing is written (409).
+ */
+export function editElementText(
+  db: DB,
+  projectId: string,
+  userId: number,
+  input: { pageId: string; eid: string; text: string; oldText?: string },
+): Promise<{ versionId: number; versionNo: number } | { unchanged: true }> {
+  return withProjectLock(projectId, () => {
+    const project = getProject(db, projectId);
+    if (!project) throw new Error('项目不存在');
+    const doc = projectDoc(project);
+    if (!doc || !doc.pages.length) throw new Error('项目尚未生成完成');
+    const { doc: changed, before, page } = setElementText(doc, input.pageId, input.eid, input.text);
+    if (input.oldText !== undefined && squash(input.oldText) !== squash(before)) {
+      throw Object.assign(new Error(`这段文字刚被其他人改成了「${clip(before, 60)}」，你的修改没有保存`), { statusCode: 409 });
+    }
+    if (before === input.text) return { unchanged: true as const };
+    const versionNo = project.version_no + 1;
+    const who = (db.prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as { display_name?: string } | undefined)?.display_name ?? '';
+    const next = withReadme(project, assignIds(changed));
+    next.readme = logEdit(next.readme ?? '', `v${versionNo} ${who ? `${who}：` : ''}第 ${page} 页 直接改字「${clip(squash(before), 40)}」→「${clip(squash(input.text), 40)}」`);
+    const { versionId } = commitVersion(db, projectId, userId, next, {
+      action: 'text_edit',
+      scope: 'element',
+      pageIndex: page - 1,
+      pageId: input.pageId,
+      elementIds: [input.eid],
+      prompt: `直接修改文字：「${clip(before, 200)}」→「${clip(input.text, 200)}」`,
+      textEdit: { eid: input.eid, page, before: clip(before, 1000), after: clip(input.text, 1000) },
+    });
+    return { versionId, versionNo };
   });
 }

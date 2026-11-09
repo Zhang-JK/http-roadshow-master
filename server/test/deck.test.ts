@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import {
   assembleHtml,
   assignIds,
@@ -11,7 +13,9 @@ import {
   pageText,
   parseFragment,
   parseFullHtml,
+  plainText,
   replacePage,
+  setElementText,
 } from '../src/deck.js';
 
 const SAMPLE = `好的，下面是模板：
@@ -136,5 +140,49 @@ describe('page edits and diff', () => {
     const [info] = findElements(doc, doc.pages[0].id, [h1, 'nope']);
     expect(info).toMatchObject({ eid: h1, tag: 'h1', classes: 't', text: '封面标题' });
     expect(info.html).toContain('封面标题');
+  });
+});
+
+describe('direct text edits', () => {
+  const el = (html: string) => cheerio.load(html, null, false).root().children().get(0) as Element;
+
+  it('treats only elements holding text and line breaks as plain text', () => {
+    expect(plainText(el('<h1>  封面\n  标题 </h1>'))).toBe('封面 标题');
+    expect(plainText(el('<p>第一行<br>  第二行 <!-- note --><br/>第三行</p>'))).toBe('第一行\n第二行\n第三行');
+    expect(plainText(el('<p>A &amp; B &lt;c&gt;</p>'))).toBe('A & B <c>');
+    expect(plainText(el('<p>文字<b>加粗</b></p>'))).toBeNull();
+    expect(plainText(el('<ul><li>要点</li></ul>'))).toBeNull();
+    expect(plainText(el('<div><img src="x.png"></div>'))).toBeNull();
+    expect(plainText(el('<p>   </p>'))).toBeNull();
+    expect(plainText(el('<p><br></p>'))).toBeNull();
+    expect(plainText(el('<textarea>x</textarea>'))).toBeNull();
+    expect(plainText(el('<section class="slide" data-page-id="p1">只有文字</section>'))).toBeNull();
+  });
+
+  it('replaces the text of one element, escaping html and turning newlines into <br>', () => {
+    const doc = parseFullHtml(SAMPLE, base);
+    const h1 = doc.pages[0].html.match(/<h1[^>]*data-eid="([^"]+)"/)![1];
+    const r = setElementText(doc, doc.pages[0].id, h1, '新标题 <b>&</b>\n第二行');
+    expect(r).toMatchObject({ before: '封面标题', page: 1 });
+    expect(r.doc.pages[0].html).toContain(`<h1 class="t" data-eid="${h1}">新标题 &lt;b&gt;&amp;&lt;/b&gt;<br>第二行</h1>`);
+    expect(r.doc.pages[0].html.replace(/<h1[\s\S]*?<\/h1>/, '')).toBe(doc.pages[0].html.replace(/<h1[\s\S]*?<\/h1>/, ''));
+    expect(r.doc.pages[1]).toBe(doc.pages[1]);
+    expect(doc.pages[0].html).toContain('封面标题');
+    expect(diffDocs(doc, r.doc).elementsChanged.map((e) => e.eid)).toEqual([h1]);
+    const again = setElementText(r.doc, doc.pages[0].id, h1, '再改一次');
+    expect(again.before).toBe('新标题 <b>&</b>\n第二行');
+  });
+
+  it('refuses elements that hold more than text, and missing pages or elements', () => {
+    const doc = parseFullHtml(SAMPLE, base);
+    const [p0, p1] = doc.pages;
+    const ul = p1.html.match(/<ul[^>]*data-eid="([^"]+)"/)![1];
+    const li = p1.html.match(/<li[^>]*data-eid="([^"]+)"/)![1];
+    const section = p0.html.match(/<section[^>]*data-eid="([^"]+)"/)![1];
+    expect(() => setElementText(doc, p1.id, ul, 'x')).toThrow(expect.objectContaining({ statusCode: 400 }));
+    expect(() => setElementText(doc, p0.id, section, 'x')).toThrow(expect.objectContaining({ statusCode: 400 }));
+    expect(setElementText(doc, p1.id, li, '新要点').doc.pages[1].html).toContain('>新要点</li>');
+    expect(() => setElementText(doc, p1.id, 'nope', 'x')).toThrow(expect.objectContaining({ statusCode: 409 }));
+    expect(() => setElementText(doc, 'pmissing', ul, 'x')).toThrow(expect.objectContaining({ statusCode: 409 }));
   });
 });

@@ -6,9 +6,12 @@ import { ASPECTS, assembleHtml, deletePage, duplicatePage, movePage, type DeckDo
 import { assetPath, assetUrl, deleteAsset, makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRole, type AssetRow } from '../assets.js';
 import {
   applyManual,
+  cleanTypedText,
   commitVersion,
   createProject,
+  editElementText,
   getProject,
+  MAX_ELEMENT_TEXT,
   jobProgress,
   projectDoc,
   retryJob,
@@ -408,6 +411,24 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
   pageOp('delete');
   pageOp('duplicate');
   pageOp('move');
+
+  /** Text typed straight into a text-only element in the editor; saved as a version without the model. */
+  app.put('/api/projects/:id/pages/:pageId/elements/:eid/text', async (req) => {
+    const user = requireUser(req);
+    const { id, pageId, eid } = req.params as Record<string, string>;
+    mustProject(db, id);
+    const body = (req.body ?? {}) as { text?: unknown; oldText?: unknown };
+    const text = cleanTypedText(body.text);
+    if (!text) throw new HttpError(400, '文字不能为空；如需删除这个元素，请用 AI 修改');
+    if (text.length > MAX_ELEMENT_TEXT) throw new HttpError(400, `文字过长（最多 ${MAX_ELEMENT_TEXT} 字）`);
+    const oldText = typeof body.oldText === 'string' ? body.oldText : undefined;
+    try {
+      return await editElementText(db, id, user.id, { pageId, eid, text, oldText });
+    } catch (e) {
+      const err = e as Error & { statusCode?: number };
+      throw err.statusCode ? err : new HttpError(400, err.message);
+    }
+  });
 
   app.get('/api/projects/:id/versions', async (req) => {
     requireUser(req);
