@@ -517,3 +517,34 @@ test('model access page shows usage with output speed above the user assignments
   await page.click('[data-testid=save-endpoint]');
   await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 2');
 });
+
+test('a model that never writes the style files: generation carries on and the delivery check has them written', async () => {
+  await page.goto('/templates');
+  await page.click('[data-testid=create-btn]');
+  await page.fill('input[name=name]', '缺样式模板');
+  await page.fill('textarea[name=style]', '简约');
+  await page.fill('textarea[name=notes]', 'NO_CSS');
+  await page.click('[data-testid=submit-create]');
+  await expect(page).toHaveURL(/\/p\//);
+  await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(3, { timeout: 60_000 });
+  await expect(page.locator('.toast-success')).toContainText('交付检查通过（修复 1 轮）');
+  await page.click('[data-testid=tab-files]');
+  await expect(page.locator('[data-testid=files-panel]')).toContainText('styles/theme.css');
+  await page.locator('[data-testid=file-item]:has-text("theme.css")').click();
+  await expect(page.locator('[data-testid=file-content]')).toContainText('CHECK-WROTE-STYLES');
+});
+
+test('errors the model never fixes fail the generation after three fix rounds, with the problems listed', async () => {
+  await page.goto('/templates');
+  await page.click('[data-testid=create-btn]');
+  await page.fill('input[name=name]', '修不好的模板');
+  await page.fill('textarea[name=style]', '简约');
+  await page.fill('textarea[name=notes]', 'BAD_IMG CHECK_STUBBORN');
+  await page.click('[data-testid=submit-create]');
+  await expect(page).toHaveURL(/\/p\//);
+  await expect(page.locator('.gen-state h2')).toHaveText('生成失败', { timeout: 60_000 });
+  await expect(page.locator('.gen-state .error-box')).toContainText('交付检查 4 次未通过（已交回模型修复 3 次）');
+  await expect(page.locator('.gen-state .error-box')).toContainText('图片无法加载');
+  await expect(page.locator('[data-testid=regenerate-btn]')).toBeVisible();
+  await expect(page.locator('.gen-state')).toContainText('已失败 1 次');
+});
