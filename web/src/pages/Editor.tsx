@@ -9,6 +9,7 @@ import { useToast } from '../components/Toast';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { AssetsPanel } from '../components/AssetsPanel';
 import { FilesPanel } from '../components/FilesPanel';
+import { QuestionCard } from '../components/QuestionCard';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
 import { elapsed, TYPE_LABELS } from '../lib/format';
 
@@ -287,6 +288,7 @@ export function EditorPage() {
           <Link className="muted small link" to={`/p/${data.template.id}`}>模板：{data.template.name}</Link>
         )}
         <div className="spacer" />
+        {jobs.some((j) => j.question) && <span className="pill pill-ask" data-testid="question-pill">AI 在等你回答</span>}
         {jobs.length > 0 && <span className="pill pill-busy"><span className="dot" /> {jobs.length} 个任务进行中</span>}
         <div className="export">
           <button className="btn btn-primary" disabled={!hasContent || !!exporting} onClick={() => setExportMenu((m) => !m)} data-testid="export-btn">
@@ -329,7 +331,7 @@ export function EditorPage() {
             </>
           ) : (
             <>
-              <div className="spinner big" />
+              {createJob?.question ? <QuestionCard job={createJob} onAnswered={loadJobs} /> : <div className="spinner big" />}
               <h2>AI 正在生成{TYPE_LABELS[project.type]}…</h2>
               <p className="muted">
                 {createJob?.progress ? progressText(createJob) : '正在准备请求…'}
@@ -400,6 +402,9 @@ export function EditorPage() {
 
             {!preview && (
               <div className="composer">
+                {editJobs.filter((j) => j.question).map((j) => (
+                  <QuestionCard key={j.id} job={j} onAnswered={loadJobs} />
+                ))}
                 {editJobs.length > 0 && (
                   <div className="job-list">
                     {editJobs.map((j) => (

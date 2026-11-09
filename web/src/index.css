@@ -260,6 +260,15 @@ textarea { resize: vertical; min-height: 40px; }
 .job-user { font-weight: 600; }
 .job-scope { color: #9a3412; }
 .job-prompt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.question-card { display: flex; flex-direction: column; gap: 8px; background: var(--primary-50); border: 1px solid #c7d2fe; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; text-align: left; width: 100%; max-width: 640px; box-shadow: var(--shadow); }
+.q-head { display: flex; align-items: center; gap: 8px; }
+.q-badge { background: var(--primary); color: #fff; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.q-text { font-size: 15px; font-weight: 500; white-space: pre-wrap; }
+.q-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.q-reply { display: flex; gap: 6px; }
+.q-reply input { flex: 1; min-width: 0; border: 1px solid var(--border-strong); border-radius: 6px; padding: 4px 10px; background: #fff; }
+.pill-ask { background: var(--primary-50); color: var(--primary-600); }
+.q-flag { margin-left: 6px; font-size: 11px; vertical-align: middle; }
 .side-panel { background: #fff; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
 .tabs button { flex: 1; border: 0; background: none; padding: 12px; cursor: pointer; font-weight: 500; border-bottom: 2px solid transparent; color: #4a5168; }

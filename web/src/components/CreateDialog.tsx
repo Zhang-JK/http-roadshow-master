@@ -235,7 +235,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
         {type === 'template' && (
           <label className="field">
             <span>版式页数</span>
-            <input name="pageCount" type="number" min={3} max={20} value={f.pageCount} onChange={(e) => set('pageCount')(e.target.value)} placeholder="默认 8 页" />
+            <input name="pageCount" type="number" min={3} max={20} value={f.pageCount} onChange={(e) => set('pageCount')(e.target.value)} placeholder="默认 10 页" />
           </label>
         )}
         <label className="field">

@@ -189,6 +189,8 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     if (body.editToolRounds !== undefined) patch.editToolRounds = Math.max(2, Math.min(40, Math.floor(Number(body.editToolRounds)) || 12));
     if (body.llmIdleTimeoutSec !== undefined) patch.llmIdleTimeoutSec = Math.max(30, Math.min(7200, Math.floor(Number(body.llmIdleTimeoutSec)) || 600));
     if (body.llmMaxCallMinutes !== undefined) patch.llmMaxCallMinutes = Math.max(5, Math.min(1440, Math.floor(Number(body.llmMaxCallMinutes)) || 120));
+    if (body.askUser !== undefined) patch.askUser = !!body.askUser;
+    if (body.askTimeoutMinutes !== undefined) patch.askTimeoutMinutes = Math.max(1, Math.min(1440, Math.floor(Number(body.askTimeoutMinutes)) || 30));
     setSettings(db, patch);
     return { settings: getSettings(db) };
   });

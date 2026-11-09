@@ -40,19 +40,29 @@ function colourName([r, g, b]: [number, number, number]) {
   return 'blue';
 }
 
-const FULL_DOC = (title: string, n = 3, broken = false) => `下面是结果：
+/** The general components a template must offer (two SVG charts, a table, a timeline), with placeholder data. */
+const TPL_PARTS =
+  '<div class="parts"><svg class="chart" viewBox="0 0 200 100" width="200" height="100"><rect x="10" y="40" width="20" height="60"/><rect x="40" y="20" width="20" height="80"/><rect x="70" y="50" width="20" height="50"/><text x="10" y="98">类别 A</text></svg>' +
+  '<svg class="chart" viewBox="0 0 200 100" width="200" height="100"><polyline points="0,80 50,40 100,60 150,20" fill="none" stroke="#1e40af"/><circle cx="50" cy="40" r="3"/><circle cx="100" cy="60" r="3"/></svg>' +
+  '<table class="data-table"><tr><th>指标</th><th>数值</th></tr><tr><td>指标 A</td><td>XX%</td></tr></table><div class="timeline"><div class="step">阶段一</div><div class="step">阶段二</div></div></div>';
+
+/** COPY_REF: page 2 of a template copies a sentence of the reference file (the delivery check must catch it). */
+export const LEAKED = 'ACME 量子科技有限公司 2023 年营收 1234.5 万元';
+
+const FULL_DOC = (title: string, n = 3, broken = false, tpl = false) => `下面是结果：
 \`\`\`html
 <!DOCTYPE html><html><head><title>${title}</title>
 <style>:root{--brand:#1e40af}.title{font-size:96px;color:var(--brand)}.body{font-size:36px}</style></head><body>
-${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i === 0 ? 'cover' : 'content'}"><h1 class="title">第${i + 1}页标题</h1><p class="body">第${i + 1}页正文内容</p><ul><li>要点A${i + 1}</li><li>要点B${i + 1}</li></ul>${broken && i === 1 ? OVERFLOW : ''}</section>`).join('\n')}
+${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i === 0 ? 'cover' : 'content'}"><h1 class="title">第${i + 1}页标题</h1><p class="body">第${i + 1}页正文内容</p><ul><li>要点A${i + 1}</li><li>要点B${i + 1}</li></ul>${broken && i === 1 ? OVERFLOW : ''}${tpl && i === 0 ? TPL_PARTS : ''}</section>`).join('\n')}
 </body></html>
 \`\`\``;
 
-const PAGE = (n: number, layout: string, broken: boolean, extra = '') =>
-  `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}${n === 2 ? extra : ''}</section>`;
+const PAGE = (n: number, layout: string, broken: boolean, extra = '', tpl = false) =>
+  `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}${n === 2 ? extra : ''}${tpl && n === 1 ? TPL_PARTS : ''}</section>`;
 
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
-const pageExtra = (text: string) => (text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : '');
+const pageExtra = (text: string) =>
+  `${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
 
 const README_DOC = (title: string, n: number, notes: string) => `# ${title}
 
@@ -84,10 +94,11 @@ ${README_DOC(title, n, notes)}
 /** Page step: the files listed under 【本批任务】. */
 function pagesReply(text: string, broken: boolean, stray: boolean): string {
   const extra = pageExtra(text);
+  const tpl = text.includes('制作这份路演模板的页面文件');
   const task = text.slice(text.indexOf('【本批任务】'));
   const lines = [...task.matchAll(/^- 第 (\d+) 页：(pages\/[\w.-]+\.html) ｜ (\w+)/gm)];
   return lines
-    .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken, extra)}\n</file>`)
+    .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken, extra, tpl)}\n</file>`)
     .join('\n\n');
 }
 
@@ -148,9 +159,11 @@ function mockCheckRound(report: string, after: { content: string }[], stubborn: 
   if (stubborn) return null;
   if (after.length === 0) {
     const scripted = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：包含 /g)].map((m) => m[1]);
+    const leaked = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：含有从参考资料中照搬的具体内容/g)].map((m) => m[1]);
     return [
       { name: 'read_draft', args: {} },
       { name: 'read_draft', args: { path: 'README.md' } },
+      ...leaked.map((path) => ({ name: 'replace_in_draft', args: { path, old_text: LEAKED, new_text: '「公司名称」YYYY 年营收 X,XXX 万元' } })),
       ...scripted.flatMap((path) => [
         { name: 'edit_elements', args: { path, selector: 'script', remove: true, all: true } },
         { name: 'edit_elements', args: { path, selector: '[onclick]', attrs: { onclick: null }, all: true } },
@@ -177,7 +190,35 @@ const EDIT_TOOLS = new Set(['write_file', 'delete_file', 'edit_elements', 'edit_
  * changes the rewrite-mode replies below make, then a short summary.
  */
 function mockEditRound(text: string, messages: any[]): { name: string; args: Record<string, unknown> }[] | null {
+  const called = (name: string) => messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((c: any) => c.function.name === name));
+  const result = (name: string) => {
+    const ids = messages.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).filter((c: any) => c.function.name === name).map((c: any) => c.id) : []));
+    // Mock tool call ids repeat across rounds (call_0, call_1…): the latest match is the answer.
+    return [...messages].reverse().find((m) => m.role === 'tool' && ids.includes(m.tool_call_id))?.content as string | undefined;
+  };
+  // ASK_ME / SIMILAR count only in the user's request (the README may mention them from earlier jobs).
+  const request = text.match(/【修改要求】\n([^\n]*)/)?.[1] ?? '';
+  if (request.includes('ASK_ME') && !called('ask_user')) {
+    return [{ name: 'ask_user', args: { question: 'MOCK-QUESTION 改成什么颜色？', options: ['红色', '蓝色'] } }];
+  }
   const done = messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((c: any) => EDIT_TOOLS.has(c.function.name)));
+  // SIMILAR: after the local edit, look for the same title on the other pages and ask to widen the scope.
+  if (done && request.includes('SIMILAR')) {
+    if (!called('extend_scope')) {
+      return [
+        { name: 'find_elements', args: { selector: 'h1.title' } },
+        { name: 'extend_scope', args: { summary: 'MOCK-SIMILAR 其他页面也有同样的标题', pages: [1, 3] } },
+      ];
+    }
+    if (/已开放/.test(result('extend_scope') ?? '') && !called('delete_file')) {
+      return [
+        { name: 'edit_elements', args: { selector: 'h1.title', all: true, text: 'SIMILAR-DONE' } },
+        { name: 'edit_css', args: { selector: '.title', set: { color: '#ff0000' } } },
+        { name: 'delete_file', args: { path: 'pages/cover.html' } },
+      ];
+    }
+    return null;
+  }
   if (done) return null;
   const overflow = text.includes('FIX_DRAFT') ? [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: OVERFLOW } } }] : [];
   const eids = text.match(/选中元素的 data-eid：([^（]+)（/)?.[1].split('、');
@@ -278,6 +319,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
         ? text.includes('FIX_DRAFT')
           ? mockReviewRound(toolMsgs)
           : null
+        : planStep && text.includes('ASK_ME') && !toolMsgs.length
+          ? [{ name: 'ask_user', args: { question: 'MOCK-QUESTION 面向谁？', options: ['投资人', '客户'] } }]
         : toolEdit
           ? ((text.includes('USE_TOOLS') ? mockToolRound(toolMsgs) : null) ?? mockEditRound(text, body.messages))
           : text.includes('USE_TOOLS') && !pageStep
@@ -298,7 +341,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
       reply = PLAN_REPLY(title, 3).slice(0, 120);
       finish = 'length';
     } else if (planStep) {
-      reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, (text.match(/【其他要求】(.*)/)?.[1] ?? '').trim());
+      const answers = toolMsgs.map((m: any) => String(m.content)).filter((c: string) => /用户|回答/.test(c)).join(' ');
+      reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, `${(text.match(/【其他要求】(.*)/)?.[1] ?? '').trim()}${answers ? ` ASK-RESULT ${answers}` : ''}`);
     } else if (pageStep) {
       reply = pagesReply(text, broken, text.includes('STRAY_NAMES'));
       if (text.includes('TRUNCATE_PAGES') && text.includes('（无，本批是第一批）')) {
@@ -307,7 +351,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
         finish = 'length';
       }
     } else if (typeof lastUser?.content === 'string' && lastUser.content.includes('请从中断处继续输出')) {
-      const full = FULL_DOC(title, 3, broken);
+      const full = FULL_DOC(title, 3, broken, text.includes('可复用的「路演材料模板」'));
       reply = full.slice(full.length / 2);
     } else if (checkPhase) {
       reply = '已按交付检查修复。';
@@ -335,7 +379,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
       const css = [...text.matchAll(/<file path="(styles\/[\w.-]+\.css)">\n([\s\S]*?)\n<\/file>/g)].find((m) => m[2].includes('--brand'));
       reply = css ? `<file path="${css[1]}">\n${css[2].replace('--brand:#1e40af', '--brand:#111827')}\n</file>` : '（没有找到样式文件）';
     } else {
-      const full = FULL_DOC(title, 3, broken);
+      const full = FULL_DOC(title, 3, broken, text.includes('可复用的「路演材料模板」'));
       if (text.includes('TRUNCATE_SINGLE')) {
         reply = full.slice(0, full.length / 2);
         finish = 'length';

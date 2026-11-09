@@ -16,6 +16,8 @@ import {
   buildReviewContext,
   buildTemplatePrompt,
   type DeckBrief,
+  ASK_NOTE,
+  withNote,
   type EditMode,
   type EditScope,
   type TemplateBrief,
@@ -25,6 +27,7 @@ import { generateFiles } from './generate.js';
 import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
+import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
 import { cleanSummary, combineTools, createDraftTools, DRAFT_EDIT_TOOLS, DRAFT_TOOL_NAMES, Draft, reviewDraft, type ReviewLog } from './draft.js';
 
 export interface ProjectRow {
@@ -57,6 +60,8 @@ export interface JobRow {
   completion_tokens: number | null;
   cost: number | null;
   review: string | null;
+  /** Questions the model asked the user during the job, with the answers (QaEntry[]). */
+  questions: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -156,6 +161,7 @@ function createJob(db: DB, projectId: string, userId: number, kind: JobRow['kind
     completion_tokens: null,
     cost: null,
     review: null,
+    questions: null,
     created_at: now,
     updated_at: now,
   };
@@ -245,7 +251,29 @@ function fileToolsFor(db: DB, rows: AssetRow[]): { tools: FileTools; ids: Map<st
 }
 
 const toolStage = (name: string, args: Record<string, unknown>, phase = '自检') =>
-  `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+  name === 'ask_user' || name === 'extend_scope'
+    ? '等待用户回答问题'
+    : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+
+/**
+ * ask_user while the job may pause for an answer (off in the settings: not offered), and for page and
+ * element edits extend_scope. Each question and answer is kept with the job.
+ */
+function askToolsFor(db: DB, job: JobRow, extra: { draft?: Draft; prompt?: string } = {}): FileTools | undefined {
+  const jobId = job.id;
+  const settings = getSettings(db);
+  const minutes = Math.max(0.01, Number(settings.askTimeoutMinutes) || 30);
+  const qa: QaEntry[] = [];
+  return createAskTools({
+    ask: settings.askUser === false ? undefined : (q) => askQuestion({ id: jobId, projectId: job.project_id }, q, minutes * 60_000),
+    timeoutMinutes: minutes,
+    onAsked: (entry) => {
+      qa.push(entry);
+      updateJob(db, jobId, { questions: JSON.stringify(qa) });
+    },
+    ...extra,
+  });
+}
 
 /** Adds one model call's usage to the job's running totals. */
 function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptTokens?: number; completionTokens?: number; cost?: number }) {
@@ -312,7 +340,7 @@ async function runStep(db: DB, jobId: string, userId: number, messages: ChatMess
     onDelta: (_c: string, total: number) => jobProgress.set(jobId, { chars: total, stage }),
     onReasoning: (total: number) => jobProgress.set(jobId, { chars: total, stage: `${stage}（思考中）` }),
   };
-  if (!tools) {
+  if (!tools?.defs.length) {
     const r = await chat(db, userId, messages, opts);
     recordUsage(db, jobId, r);
     return r;
@@ -351,9 +379,9 @@ async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessa
  * Tool-first edit: the model changes the loaded draft with the structured tools instead of re-typing
  * whole pages, which matters most for slow models. A reply with complete HTML is still accepted.
  */
-async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft, messages: ChatMessage[], fileTools?: FileTools) {
+async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft, messages: ChatMessage[], fileTools?: FileTools, askTools?: FileTools) {
   const settings = getSettings(db);
-  const tools = combineTools(createDraftTools(draft, makeAssetResolver(db), db), fileTools);
+  const tools = combineTools(createDraftTools(draft, makeAssetResolver(db), db), fileTools, askTools);
   jobProgress.set(jobId, { chars: 0, stage: '模型修改中' });
   const r = await chatWithTools(db, userId, messages, {
     maxTokens: Number(settings.maxTokens) || undefined,
@@ -419,6 +447,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       const ft = fileToolsFor(db, rows);
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
+      const ask = askToolsFor(db, job);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;
@@ -427,7 +456,10 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
         const doc = await generateFiles(
           { base, kind: project.type, brief: meta.brief, template, assets },
           {
-            call: (messages, stage) => runStep(db, job.id, userId, messages, ft?.tools, stage),
+            call: (messages, stage, step) =>
+              step === 'plan' && ask
+                ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage)
+                : runStep(db, job.id, userId, messages, ft?.tools, stage),
             pagesPerCall: Number(settings.genPagesPerCall) || 3,
           },
         );
@@ -436,13 +468,19 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       } else {
         reviewContext =
           project.type === 'template' ? buildTemplatePrompt(base, meta.brief, assets) : buildDeckPrompt(base, template, meta.brief, assets);
-        const text = await runLlm(db, job.id, userId, reviewContext, ft?.tools);
+        const text = await runLlm(db, job.id, userId, ask ? withNote(reviewContext, ASK_NOTE) : reviewContext, combineTools(ft?.tools, ask));
         draft = Draft.fromDocument(text, {
           width: base.width,
           height: base.height,
           title: project.name,
           readme: readmeFromBrief(project.type, project.name, meta.brief),
         });
+      }
+      if (project.type === 'template') {
+        draft.templateCheck = {
+          referenceTexts: assets.flatMap((a) => (a.kind === 'document' && a.text ? [a.text] : [])),
+          allowed: Object.values(meta.brief ?? {}).map(String).join('\n'),
+        };
       }
       await selfReview(db, job.id, userId, draft, reviewContext, ft?.tools);
       jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });
@@ -459,6 +497,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       if (p && p.version_no === 0) db.prepare(`UPDATE projects SET status='error', error=? WHERE id=?`).run(msg, projectId);
       else db.prepare(`UPDATE projects SET status='ready' WHERE id=?`).run(projectId);
     } finally {
+      cancelQuestion(job.id);
       jobProgress.delete(job.id);
     }
   })();
@@ -539,6 +578,8 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           elements,
           screenshot,
           attachments,
+          ask: settings.askUser !== false,
+          explicitAll: asksForAll(input.prompt),
         },
         assets,
         project.type,
@@ -547,9 +588,9 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
       let draft: Draft;
       if (mode === 'tools') {
         draft = scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
-        await editWithTools(db, job.id, userId, draft, messages, ft?.tools);
+        await editWithTools(db, job.id, userId, draft, messages, ft?.tools, askToolsFor(db, job, { draft, prompt: input.prompt }));
       } else {
-        const text = await runLlm(db, job.id, userId, messages, ft?.tools);
+        const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, askToolsFor(db, job)));
         if (scope === 'global') {
           draft = Draft.ofDocument(snapshot);
           if (!draft.replaceFromText(text)) throw new Error(`模型没有输出任何文件修改${cleanSummary(text) ? `：${cleanSummary(text)}` : ''}`);
@@ -568,7 +609,10 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           next = draft.result(latest);
         }
         const idx = latest.pages.findIndex((p) => p.id === input.pageId);
-        const where = scope === 'global' ? '整份材料' : `第 ${idx + 1} 页${scope === 'element' ? `（${elementIds.length} 个元素）` : ''}`;
+        const extended = draft.mode === 'fragment' ? draft.extendedChanges() : { pages: [], css: false };
+        const also = [extended.pages.length ? `第 ${extended.pages.join('、')} 页` : '', extended.css ? '共享样式' : ''].filter(Boolean).join('和');
+        const where =
+          scope === 'global' ? '整份材料' : `第 ${idx + 1} 页${scope === 'element' ? `（${elementIds.length} 个元素）` : ''}${also ? `，并同步修改${also}` : ''}`;
         const who = (db.prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as { display_name?: string } | undefined)?.display_name ?? '';
         next.readme = logEdit(next.readme ?? '', `v${latestRow.version_no + 1} ${who ? `${who}：` : ''}${where} — ${input.prompt}`);
         return commitVersion(db, projectId, userId, next, {
@@ -584,6 +628,7 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
     } catch (e) {
       updateJob(db, job.id, { status: 'error', error: (e as Error).message });
     } finally {
+      cancelQuestion(job.id);
       jobProgress.delete(job.id);
     }
   })();

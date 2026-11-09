@@ -86,13 +86,13 @@ export function ProjectsPage({ type }: { type: ProjectType }) {
                     title={p.name}
                   />
                 ) : p.status === 'generating' ? (
-                  <div className="thumb-state"><div className="spinner" /><span>AI 生成中…</span></div>
+                  <div className="thumb-state"><div className="spinner" /><span>{p.asking ? 'AI 在等你回答问题' : 'AI 生成中…'}</span></div>
                 ) : (
                   <div className="thumb-state error"><span>生成失败</span></div>
                 )}
               </div>
               <div className="card-body">
-                <div className="card-title">{p.name}</div>
+                <div className="card-title">{p.name}{p.asking && <span className="pill pill-ask q-flag" data-testid="asking-badge">待回答</span>}</div>
                 <div className="card-meta">
                   <span>{p.pageCount} 页</span>
                   <span>·</span>

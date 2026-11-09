@@ -13,7 +13,7 @@ export const MAX_PLANNED_PAGES = 60;
 
 export interface GenerateDeps {
   /** One model call (with the read-only reference tools when there are uploads); must not throw on truncation. */
-  call: (messages: ChatMessage[], stage: string) => Promise<ChatResult>;
+  call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages') => Promise<ChatResult>;
   onStage?: (stage: string) => void;
   pagesPerCall: number;
 }
@@ -72,7 +72,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
   let messages = buildPlanPrompt(doc, kind, brief, template, assets);
   let plan: PlannedPage[] = [];
   for (let attempt = 0; ; attempt++) {
-    const r = await deps.call(messages, attempt ? '规划：补全 README 与样式文件' : '规划：编写 README 与样式文件');
+    const r = await deps.call(messages, attempt ? '规划：补全 README 与样式文件' : '规划：编写 README 与样式文件', 'plan');
     const blocks = parseFileBlocks(r.text);
     for (const b of blocks.filter((x) => x.complete)) {
       const c = pathOf(b);
@@ -126,7 +126,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     const from = plan.indexOf(batch[0]) + 1;
     const stage = `生成页面：第 ${from}${batch.length > 1 ? `–${from + batch.length - 1}` : ''} 页（共 ${plan.length} 页）`;
     deps.onStage?.(stage);
-    const r = await deps.call(buildPagesPrompt(doc, kind, brief, template, assets, batch, plan), stage);
+    const r = await deps.call(buildPagesPrompt(doc, kind, brief, template, assets, batch, plan), stage, 'pages');
     const blocks = parseFileBlocks(r.text).filter((b) => b.complete);
     let got = 0;
     const strays: FileBlock[] = [];

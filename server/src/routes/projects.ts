@@ -20,6 +20,7 @@ import {
 } from '../projects.js';
 import { renderImagePdf, renderPdf, renderPptx } from '../render.js';
 import { exportBundle } from '../bundle.js';
+import { answerQuestion, pendingQuestion, projectsAsking } from '../questions.js';
 import { cssFiles, fileTree, nameFiles } from '../files.js';
 
 const MAX_README = 50_000;
@@ -47,6 +48,7 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
     width: doc?.width ?? 1920,
     height: doc?.height ?? 1080,
     firstPageId: doc?.pages[0]?.id ?? null,
+    asking: projectsAsking().has(p.id),
     createdBy: p.created_by ? names.get(p.created_by) ?? null : null,
     updatedBy: p.updated_by ? names.get(p.updated_by) ?? null : null,
     createdAt: p.created_at,
@@ -70,6 +72,8 @@ function publicJob(j: JobRow) {
     promptTokens: j.prompt_tokens,
     completionTokens: j.completion_tokens,
     review: j.review ? JSON.parse(j.review) : null,
+    question: pendingQuestion(j.id) ?? null,
+    questions: j.questions ? JSON.parse(j.questions) : [],
     userId: j.user_id,
     createdAt: j.created_at,
     updatedAt: j.updated_at,
@@ -313,6 +317,22 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     requireUser(req);
     const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get((req.params as any).id) as JobRow | undefined;
     if (!j) throw new HttpError(404, '任务不存在');
+    return { job: publicJob(j) };
+  });
+
+  app.post('/api/jobs/:id/answer', async (req) => {
+    const user = requireUser(req);
+    const id = (req.params as any).id as string;
+    const body = (req.body ?? {}) as { questionId?: string; answer?: unknown; choice?: unknown };
+    const q = pendingQuestion(id);
+    if (!q || q.id !== body.questionId) throw new HttpError(409, '这个问题已经回答过或已超时');
+    const choice = body.choice === undefined || body.choice === null ? undefined : Math.floor(Number(body.choice));
+    let text = typeof body.answer === 'string' ? body.answer.trim().slice(0, 2000) : '';
+    if (choice !== undefined && q.options[choice] !== undefined) text = q.options[choice];
+    if (!answerQuestion(id, q.id, { text: text || null, choice: q.options[choice ?? -1] !== undefined ? choice : undefined, userId: user.id })) {
+      throw new HttpError(409, '这个问题已经回答过或已超时');
+    }
+    const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow;
     return { job: publicJob(j) };
   });
 

@@ -57,7 +57,8 @@ function planImages(assets: AssetRef[], budget: ImageBudget): ImagePlan {
   return plan;
 }
 
-function assetsBlock(assets: AssetRef[], plan?: ImagePlan): string {
+/** Templates learn only the look of the uploads: their text is left out so it cannot be copied. */
+function assetsBlock(assets: AssetRef[], plan?: ImagePlan, styleOnly = false): string {
   if (!assets.length) return '（无）';
   let inlineLeft = INLINE_TOTAL;
   return assets
@@ -77,6 +78,9 @@ function assetsBlock(assets: AssetRef[], plan?: ImagePlan): string {
             a.fileId && shown < a.slides.length ? '，其余页面可用 view_page 查看' : ''
           }。这些页面图片仅供参考（借鉴其版式、风格与内容结构），不要嵌入页面。\n`
         : '';
+      if (styleOnly) {
+        return `${i + 1}. 参考文件「${a.filename}」${idTag}：仅作为风格参考。${pages || '\n'}文字内容已省略：模板只学习它的视觉风格与版式结构，不使用其中的项目名称、数据和文案。`;
+      }
       let body: string;
       if (!text) body = '（无法提取文字）';
       else if (text.length <= Math.min(INLINE_CHARS, inlineLeft) || !a.fileId) {
@@ -96,7 +100,30 @@ const TOOLS_NOTE = (final: string) => `
 - 文件较大时请先搜索或按页读取关键内容，不要逐段读完整个文件；每次可并行调用多个工具。
 - 信息足够后直接输出最终结果，${final}`;
 
-const toolsNote = (assets: AssetRef[], final = '最终回答仍然只包含一个 ```html 代码块。') => (assets.some((a) => a.fileId) ? TOOLS_NOTE(final) : '');
+const toolsNote = (assets: AssetRef[], final = '最终回答仍然只包含一个 ```html 代码块。', styleOnly = false) =>
+  assets.some((a) => a.fileId)
+    ? `${TOOLS_NOTE(final)}${styleOnly ? '\n- 制作模板时只用 view_page 等查看参考页面的样式与版式（必要时读取主题配色与字体）；不要读取或照抄参考资料中的文字内容。' : ''}`
+    : '';
+
+/** What makes a template a template: placeholder content and a full set of general components. */
+const TEMPLATE_RULES = (pageCount: number, refs: boolean) => `【模板只是模板，不是示例：所有内容都用占位符】
+- 模板只提供版式与样式，不包含任何具体项目的信息。页面上的所有标题、正文、名称、数字、日期、图表数据都写成一看就是占位的文字，例如「演示标题」「副标题 / 一句话价值主张」「公司名称」「项目名称」「姓名」「职位」「YYYY 年 MM 月」「XX%」「¥X,XXX 万」「类别 A / B / C」「系列 1」「要点一：简要说明（不超过 20 字）」「此处放置产品截图」。不要写 lorem ipsum，也不要编造看起来真实的公司、人名或数据。${
+  refs
+    ? '\n- 用户上传的参考资料（PPT、PDF、图片）只用来学习视觉风格与版式结构：配色、字体气质、版式、装饰元素、信息层级、图表样式。不要照抄其中的公司名、产品名、项目细节、人名、数字或句子；参考里的每一项真实内容在模板中都换成对应的占位符。交付检查会比对参考资料，照搬的内容会被退回修改。'
+    : ''
+}
+- 图表数据也是占位：用规整的示意数值画出形状（例如柱高 40 / 65 / 80 / 55），坐标轴、图例、数据标签写「类别 A」「系列 1」「XX%」等。
+- README 的「需求」只记录模板的用途、受众与风格要求，不要记录参考资料中的项目内容；「页面规划」中每页的要点写这一页提供的版式与占位内容。
+【模板要包含的通用组件】约 ${pageCount} 页；页数不够时可以在一页中组合多个组件，但每类至少出现一次：
+- 封面、目录/议程、章节过渡页、结束/联系方式页
+- 图文页：图片位置用带说明文字的占位框（如「图片占位 16:9」）
+- 数据 KPI 卡片：大数字（XX%、X,XXX）加说明
+- 图表（内联 SVG，至少 2 种）：柱状图、折线图、饼图/环形图
+- 表格：<table>，表头加 3–5 行占位数据
+- 流程图（步骤 + 箭头）与时间线/里程碑
+- 对比：两栏对比或 2×2 矩阵
+- 团队/组织架构：头像占位 + 姓名 + 职位
+- 样式中为这些组件定义可复用的 class（如 .kpi、.chart、.data-table、.flow、.timeline、.compare、.team），后续生成材料时直接套用`;
 
 function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
   const parts: ContentPart[] = [];
@@ -151,7 +178,19 @@ ${RULES(doc, output)}`;
 /** Larger documents are listed page by page instead of sent in full; the model reads what it needs. */
 const INLINE_DOC_CHARS = 60_000;
 
-const TOOL_GUIDE = (scope: EditScope) => `【修改方式】
+const ASK_LINE = '- 要求含糊、可以有几种明显不同的理解时，可以先用 ask_user 向用户确认（给出选项）；能自行判断的不要问\n';
+
+/** Page and element edits: the selection first, then (with the user's consent) the same thing elsewhere. */
+const SIMILAR_GUIDE = (scope: EditScope, explicitAll: boolean) => `
+【先局部修改，再处理同类内容】
+1. 先按要求修改${scope === 'element' ? '选中的元素' : '本页'}。
+2. 然后检查其他页面有没有同类内容也该一起改：改了项目/公司/产品名称、日期、口径一致的数字等文字，用 find_elements（contains=原来的文字，不传 page 即搜索全部页面）查找；改了 Logo、图标、某类标题或卡片的颜色/样式，按相同的 class、标签或颜色查找（find_elements 的 selector，样式规则用 find_css）。只看与本次修改同类的内容，不要借机做无关的修改。
+3. 找到了就调用 extend_scope：pages 填这些页码，summary 写清在哪些页面发现了什么。${
+  explicitAll ? '用户的要求已明确包含全部同类内容，系统会直接开放，不会再询问。' : '系统会询问用户是否一起修改。'
+}开放后再用工具修改这些页面（共享样式也会开放，改一条共享规则即可影响所有页面）；未开放就只保留局部修改，并在总结中提一句。
+4. 没有同类内容就直接结束。`;
+
+const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false) => `【修改方式】
 草稿已载入为当前内容（项目文件见 read_draft），请用工具直接修改，只改与要求相关的部分，不要重新输出整份 HTML：
 - 修改要符合 README.md 中记录的需求与风格约定
 - 改文字、样式、属性，增删元素：edit_elements（用 data-eid 精确指定${scope === 'element' ? '，选中元素见上' : ''}，也可用 selector / contains；一次可改多个元素）
@@ -168,7 +207,20 @@ const TOOL_GUIDE = (scope: EditScope) => `【修改方式】
 - 增删、拆分或改名页面后，README 的「页面规划」要与实际的 pages/*.html 一致
 - 不要写 JavaScript（<script>、onclick 等会被移除）；动效用 CSS，图表用内联 SVG
 - 修改后可用 render_pages 查看效果；结束前系统会做交付检查（组装 index.html、检查 README 与各文件），也可以自己先调用 check_project
-全部完成后用一两句话说明做了哪些修改。`;
+${ask ? ASK_LINE : ''}${scope === 'global' ? '' : `${SIMILAR_GUIDE(scope, explicitAll)}\n`}全部完成后用一两句话说明做了哪些修改。`;
+
+/** Generation: the model may clarify the brief before writing anything. */
+export const ASK_NOTE =
+  '【需求澄清】如果需求中有关键信息含糊或矛盾（例如受众或用途不明确、重点内容不清楚、页数与内容量明显不匹配、上传的资料与描述不一致），可以先调用 ask_user 向用户提问（一次一个问题，给出 2–4 个选项），得到回答后再输出文件；信息足够时不要提问，直接开始。';
+
+/** The messages with a note added to the first user message. */
+export function withNote(messages: ChatMessage[], note: string): ChatMessage[] {
+  const i = messages.findIndex((m) => m.role === 'user');
+  if (i < 0) return messages;
+  const m = messages[i];
+  const content = typeof m.content === 'string' || !m.content ? `${m.content ?? ''}\n\n${note}` : [...m.content, { type: 'text' as const, text: note }];
+  return messages.map((x, j) => (j === i ? { ...m, content } : x));
+}
 
 const README_LIMIT = 8000;
 
@@ -202,8 +254,7 @@ export function buildTemplatePrompt(doc: DeckDoc, brief: TemplateBrief, assets: 
 【其他要求】${brief.notes || '无'}
 
 【模板要求】
-- 模板是后续生成具体路演材料的“版式库”，请提供约 ${brief.pageCount || 8} 页代表性版式，例如：封面、目录/议程、章节过渡页、图文内容页、数据/KPI 页、图表页（SVG）、对比或时间线页、团队介绍页、结束/联系方式页，可根据用途调整。
-- 每页 <section> 上添加 data-layout 属性标明版式类型（如 data-layout="cover"），并在页面中使用占位性质但真实可信的示例文案（不要写 lorem ipsum）。
+- 模板是后续生成具体路演材料的“版式库”。每页 <section> 上添加 data-layout 属性标明版式类型（如 data-layout="cover"）。
 - 样式系统要完整：用 CSS 变量定义主色、辅色、强调色、字体、圆角、间距，并为标题、正文、卡片、列表、图表、页脚页码等定义可复用的 class，便于后续材料复用。
 - 每页右下角或页脚包含统一的页码/品牌区域。${
     hasReferences(assets)
@@ -211,8 +262,10 @@ export function buildTemplatePrompt(doc: DeckDoc, brief: TemplateBrief, assets: 
       : ''
   }
 
+${TEMPLATE_RULES(brief.pageCount || 10, hasReferences(assets))}
+
 【可用素材】
-${assetsBlock(assets, plan)}${toolsNote(assets)}`;
+${assetsBlock(assets, plan, true)}${toolsNote(assets, undefined, true)}`;
   return [
     { role: 'system', content: SYSTEM(doc) },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
@@ -277,6 +330,10 @@ export interface EditRequest {
   screenshot?: string;
   /** Files attached to this particular edit request (with image data). */
   attachments?: AssetRef[];
+  /** The model can ask the user (ask_user / extend_scope). */
+  ask?: boolean;
+  /** The request already asks for every similar occurrence ("全部", "统一"…). */
+  explicitAll?: boolean;
 }
 
 export function buildEditPrompt(
@@ -308,7 +365,7 @@ ${docBlock(doc, tools)}
 【可用素材】
 ${assetsBlock(assets)}
 
-${tools ? TOOL_GUIDE('global') : REWRITE_FILES_GUIDE}${toolsNote([...assets, ...attachments], tools ? '修改完成后用一两句话说明。' : '最终回答按上面的格式输出文件。')}`;
+${tools ? TOOL_GUIDE('global', req.ask) : `${REWRITE_FILES_GUIDE}${req.ask ? `\n${ASK_LINE}` : ''}`}${toolsNote([...assets, ...attachments], tools ? '修改完成后用一两句话说明。' : '最终回答按上面的格式输出文件。')}`;
   } else {
     const n = req.pageIndex! + 1;
     const target =
@@ -353,7 +410,7 @@ ${
       tools
         ? `本次只能修改草稿第 ${n} 页${
             req.scope === 'element' && req.elements?.length ? `，选中元素的 data-eid：${req.elements.map((e) => e.eid).join('、')}（edit_elements 传 eids）` : ''
-          }。\n${TOOL_GUIDE(req.scope)}`
+          }。\n${TOOL_GUIDE(req.scope, req.ask, req.explicitAll)}`
         : `【输出格式】
 只输出修改后的第 ${n} 页 <section class="slide" ...> 完整元素（保留 data-page-id 与所有已有 data-eid）。如果用户明确要求把这一页拆分成多页，可以连续输出多个 <section>。如需新增 CSS 规则，可在 section 之前附加一个 <style> 块，其中只写新增规则，它会被追加到全局样式中；不要重复输出已有的全局样式。全部放在一个 \`\`\`html 代码块中。`
     }${toolsNote([...assets, ...attachments], tools ? '修改完成后用一两句话说明。' : '最终回答仍然只包含一个 ```html 代码块。')}`;
@@ -417,7 +474,7 @@ function briefBlock(kind: 'template' | 'deck', brief: TemplateBrief | DeckBrief,
 【计划用途】${b.purpose || '通用商业路演'}
 【目标受众】${b.audience || '未指定'}
 【配色偏好】${b.colors || '由你根据风格决定'}
-【期望版式数】约 ${b.pageCount || 8} 页
+【期望版式数】约 ${b.pageCount || 10} 页
 【其他要求】${b.notes || '无'}`;
   }
   const b = brief as DeckBrief;
@@ -433,10 +490,16 @@ ${content}
 
 const README_SPEC = (kind: 'template' | 'deck') => `<file path="README.md"> —— 项目的「生成说明」。之后每一批页面和每一次修改都会先读它，请写清楚，控制在 4000 字以内：
 # 名称
-## 需求 —— 用户的要求要点（用途、受众、${kind === 'template' ? '风格、配色' : '核心信息、关键数据与事实'}、其他要求），忠实保留用户给出的事实和数字
+## 需求 —— ${
+  kind === 'template'
+    ? '模板的用途、受众、风格与配色要求（只写风格要求，不写任何具体项目的内容或数据）'
+    : '用户的要求要点（用途、受众、核心信息、关键数据与事实、其他要求），忠实保留用户给出的事实和数字'
+}
 ## 风格约定 —— 配色（CSS 变量名与色值）、字体、字号层级、间距与圆角、装饰元素、页脚与页码规范，以及主要 class 的用途（后续页面只能使用这些 class）
 ## 页面规划 —— 每页一行，格式：\`序号. pages/英文名.html ｜ data-layout 值 ｜ 页面标题 ｜ 内容要点\`（文件名用英文小写字母、数字和 -，不能重复）${
-  kind === 'deck' ? '；内容要点要具体到这一页要放的信息和数据，后续分批生成页面时主要依据它' : ''
+  kind === 'deck'
+    ? '；内容要点要具体到这一页要放的信息和数据，后续分批生成页面时主要依据它'
+    : '；内容要点写这一页提供的组件与占位内容（例如“KPI 卡片 ×4：XX%、X,XXX 万 + 说明占位”）'
 }`;
 
 function templateOutline(template: DeckDoc): string {
@@ -471,13 +534,14 @@ ${templateOutline(template)}
   const requirements =
     kind === 'template'
       ? `【模板要求】
-- 模板是后续生成具体路演材料的“版式库”，规划约 ${(brief as TemplateBrief).pageCount || 8} 页代表性版式，例如：封面、目录/议程、章节过渡页、图文内容页、数据/KPI 页、图表页（SVG）、对比或时间线页、团队介绍页、结束/联系方式页，可根据用途调整。每页在 <section> 上用 data-layout 标明版式类型。
-- 页面中将使用占位性质但真实可信的示例文案（不要写 lorem ipsum）。
+- 模板是后续生成具体路演材料的“版式库”，每页在 <section> 上用 data-layout 标明版式类型。
 - 样式系统要完整：用 CSS 变量定义主色、辅色、强调色、字体、圆角、间距，并为标题、正文、卡片、列表、图表、页脚页码等定义可复用的 class。每页右下角或页脚有统一的页码/品牌区域。${
           hasReferences(assets)
             ? '\n- 用户上传了参考图片/参考 PPT：仔细观察其视觉风格（配色、字体气质、版式结构、装饰元素、信息层级），让模板整体风格与之贴近；不要直接嵌入参考截图。'
             : ''
-        }`
+        }
+
+${TEMPLATE_RULES((brief as TemplateBrief).pageCount || 10, hasReferences(assets))}`
       : `【制作要求】
 - 内容组织要有路演逻辑（如：痛点→方案→产品→市场→商业模式→竞争→团队→财务→融资计划），但以用户提供的内容为准，不要编造关键事实数据；缺少数据时用合理的定性表述或明显的占位提示。
 - 每页一个核心观点，标题提炼结论；数据用 KPI 卡片或 SVG 图表可视化；用户提供的可嵌入图片素材应在合适的页面中使用。${
@@ -501,18 +565,23 @@ ${briefBlock(kind, brief)}
 ${requirements}
 
 【可用素材】
-${assetsBlock(assets, plan)}
+${assetsBlock(assets, plan, kind === 'template')}
 
 ${styleTask}
 
 【本次输出】
 ${output}
-本次不要输出页面文件。${toolsNote(assets, '最终回答只输出上述文件。')}`;
+本次不要输出页面文件。${toolsNote(assets, '最终回答只输出上述文件。', kind === 'template')}`;
   return [
     { role: 'system', content: SYSTEM(doc, 'files') },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, plan)] },
   ];
 }
+
+const TEMPLATE_PAGE_RULES = `【模板页面的内容规则】
+- 所有文字、名称、数字、日期、图表数据都是占位符（「演示标题」「公司名称」「XX%」「¥X,XXX 万」「YYYY 年」「类别 A」「要点一：简要说明」），不要写任何具体项目的真实内容，也不要照抄参考资料中的文字或数据
+- 图表用内联 SVG 画出示意形状，数值规整（如 40 / 65 / 80），标签用「类别 A」「系列 1」；表格用 <table> 加占位行；流程/时间线用步骤 + 箭头
+- 图片位置用带说明文字的占位框（如「图片占位 16:9」），不要嵌入参考截图`;
 
 /** Template pages most useful for this batch: the layouts it names first, within a size budget. */
 function templateLayouts(template: DeckDoc, batch: PlannedPage[]): string {
@@ -557,8 +626,8 @@ ${cssFiles(doc.css)
   .map((f) => `<file path="${f.path}">\n${f.css}\n</file>`)
   .join('\n\n')}
 
-${kind === 'deck' ? `【用户需求原文】\n${briefBlock(kind, brief, CONTENT_INLINE)}\n\n` : ''}${template ? `【模板版式页（照其结构排版，示例文案全部换成本次的真实内容）】\n${templateLayouts(template, batch)}\n\n` : ''}【可用素材】
-${assetsBlock(assets, images)}
+${kind === 'deck' ? `【用户需求原文】\n${briefBlock(kind, brief, CONTENT_INLINE)}\n\n` : `${TEMPLATE_PAGE_RULES}\n\n`}${template ? `【模板版式页（照其结构排版，示例文案全部换成本次的真实内容）】\n${templateLayouts(template, batch)}\n\n` : ''}【可用素材】
+${assetsBlock(assets, images, kind === 'template')}
 
 【已完成的页面】
 ${done.length ? done.map((p, i) => `${i + 1}. ${p.file}：${pageText(p).split('\n')[0]?.slice(0, 40) ?? ''}`).join('\n') : '（无，本批是第一批）'}
@@ -569,7 +638,7 @@ ${batch.map((b) => `- 第 ${plan.indexOf(b) + 1} 页：${b.line}`).join('\n')}
 【输出格式】
 - 每个文件用 <file path="pages/名称.html"> … </file> 包裹（路径与上面一致），内容是一个 <section class="slide" data-layout="…">，页面中不要写 <style>
 - 现有 class 确实无法满足时，可再输出一个 <file path="${ADDITIONS_CSS}">，只写新增规则（会追加到该文件末尾）
-- 按顺序输出本批页面，不要输出本批以外的页面，也不要输出 README${toolsNote(assets, '最终回答只输出本批文件。')}`;
+- 按顺序输出本批页面，不要输出本批以外的页面，也不要输出 README${toolsNote(assets, '最终回答只输出本批文件。', kind === 'template')}`;
   return [
     { role: 'system', content: SYSTEM(doc, 'files') },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, images)] },

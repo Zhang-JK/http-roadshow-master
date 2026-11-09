@@ -79,11 +79,11 @@ describe('settings for long outputs and small contexts', () => {
   });
 
   it('moves a saved copy of the old 32000 default to the new default', async () => {
-    const { openDb, setSettings } = await import('../src/db.js');
+    const { MIGRATIONS, openDb, setSettings } = await import('../src/db.js');
     const file = path.join(tmp, 'migrate.db');
     const old = openDb(file);
     setSettings(old, { maxTokens: 32000 });
-    const n = (old.prepare('SELECT MAX(version) AS v FROM _migrations').get() as { v: number }).v;
+    const n = MIGRATIONS.findIndex((m) => m.includes("value = '65536'")) + 1;
     old.prepare('DELETE FROM _migrations WHERE version = ?').run(n);
     old.close();
     const again = openDb(file);

@@ -31,6 +31,8 @@ export interface Project {
   meta: { aspect?: string; brief?: Record<string, unknown> };
   templateId: string | null;
   status: 'generating' | 'ready' | 'error';
+  /** A job of this project waits for someone to answer the AI's question. */
+  asking?: boolean;
   error: string | null;
   versionNo: number;
   pageCount: number;
@@ -83,10 +85,32 @@ export interface Job {
   progress: { chars: number; stage: string } | null;
   cost: number | null;
   review?: JobReview | null;
+  /** A question the job is waiting on. */
+  question?: JobQuestion | null;
+  /** Questions asked during the job, with their answers. */
+  questions?: JobQa[];
   userId: number | null;
   userName?: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface JobQuestion {
+  id: string;
+  kind: 'ask' | 'scope';
+  text: string;
+  options: string[];
+  askedAt: number;
+  expiresAt: number;
+}
+
+export interface JobQa {
+  kind: 'ask' | 'scope';
+  question: string;
+  options: string[];
+  answer: string | null;
+  timedOut?: boolean;
+  at: number;
 }
 
 export interface ElementRef {

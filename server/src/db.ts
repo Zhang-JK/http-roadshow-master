@@ -4,7 +4,7 @@ import { config } from './config.js';
 
 export type DB = Database.Database;
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   `
   CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +110,9 @@ const MIGRATIONS: string[] = [
   `
   UPDATE settings SET value = '65536' WHERE key = 'maxTokens' AND value = '32000';
   `,
+  `
+  ALTER TABLE jobs ADD COLUMN questions TEXT;
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {
@@ -155,6 +158,8 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   editToolRounds: 12,
   llmIdleTimeoutSec: 600,
   llmMaxCallMinutes: 120,
+  askUser: true,
+  askTimeoutMinutes: 30,
 };
 
 export function getSettings(db: DB): typeof DEFAULT_SETTINGS {

@@ -53,6 +53,8 @@ export function ModelsPage() {
     contextTokens: number;
     generateMode: 'files' | 'single';
     genPagesPerCall: number;
+    askUser: boolean;
+    askTimeoutMinutes: number;
   } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
@@ -207,6 +209,16 @@ export function ModelsPage() {
                 <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
                 <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存（之后的交付检查始终运行：组装 index.html、检查 README 与各文件，有错误时交回模型修复）</span>
               </label>
+              <label className="switch">
+                <input type="checkbox" checked={settings.askUser} onChange={(e) => saveSettings({ askUser: e.target.checked })} data-testid="ask-user-toggle" />
+                <span>允许 AI 向用户提问：需求含糊时先确认（任务暂停，在编辑页回答）；修改选中元素后发现其他页面有同类内容时，询问是否一起修改（修改要求里写明「全部 / 统一」时不再询问）</span>
+              </label>
+              {settings.askUser && (
+                <label className="field inline" title="超时或跳过时，AI 按自己的判断继续；同类内容不会扩大修改范围">
+                  <span>等待回答最长（分钟）</span>
+                  <input type="number" min="1" max="1440" defaultValue={settings.askTimeoutMinutes} onBlur={(e) => saveSettings({ askTimeoutMinutes: Number(e.target.value) })} data-testid="ask-timeout" />
+                </label>
+              )}
               <label className="field inline" title="分步生成：先写 README（需求、风格约定、页面规划）与样式文件，再每次生成几页，单次输出短、被截断也只需重做一页；单次生成：一次输出整份 HTML">
                 <span>生成方式</span>
                 <select value={settings.generateMode} onChange={(e) => saveSettings({ generateMode: e.target.value as 'files' | 'single' })} data-testid="generate-mode">

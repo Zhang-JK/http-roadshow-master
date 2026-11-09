@@ -124,7 +124,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     expect(call.images.filter((i) => i.startsWith('data:image/png'))).toHaveLength(2);
     expect(call.text).toContain('「参考.pptx」第 1 页');
     expect(call.text).toContain('「参考.pptx」第 3 页');
-    expect(call.text).toContain('参考团队页 GAMMA'); // text extracted from the converted PDF
+    expect(call.text).not.toContain('参考团队页 GAMMA'); // a template learns only the look of the references, not their text
     expect(call.text).toContain('参考图「mood.png」');
     expect(call.text).toMatch(/图片「logo\.png」［file_id=F3］，可在页面中通过 <img src="\/api\/assets\//);
     expect(call.text).toContain('参考 PPT');
@@ -201,7 +201,8 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
   it('large files are previewed and the model reads them through read-only tools', async () => {
     const big = Array.from({ length: 4000 }, (_, i) => `第 ${i} 行：市场数据与说明文字。`).join('\n') + '\n结论 NEEDLE-42：毛利率 63%';
     const html = '<html><head><style>.slide{width:1280px;height:720px}</style></head><body><section class="slide"><h1>H1</h1></section><section class="slide"><h1>H2</h1></section><p class="raw-marker">RAW</p></body></html>';
-    const mp = multipart({ type: 'template', name: '工具模板', style: '参考附件', notes: 'USE_TOOLS' }, [
+    // A deck: templates do not get the text of their references (only their look).
+    const mp = multipart({ type: 'deck', name: '工具材料', templateId, content: '按参考附件整理', notes: 'USE_TOOLS' }, [
       { filename: '旧版.pptx', type: 'application/octet-stream', data: pptx },
       { filename: 'big.txt', type: 'text/plain', data: Buffer.from(big) },
       { filename: 'site.html', type: 'text/html', data: Buffer.from(html) },
@@ -215,7 +216,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
 
     const first = calls[0];
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
-      ['list_archive', 'list_files', 'read_archive_entry', 'read_raw', 'read_text', 'search_files', 'view_page'],
+      ['ask_user', 'list_archive', 'list_files', 'read_archive_entry', 'read_raw', 'read_text', 'search_files', 'view_page'],
     );
     expect(first.text).toContain('［file_id=F2］');
     expect(first.text).toContain('全文共');

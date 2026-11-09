@@ -365,3 +365,46 @@ test('attach an HTML deck as a page-by-page reference', async () => {
   await page.click('.tabs button:has-text("素材")');
   await expect(page.locator('.asset-list li:has-text("old-site.html")')).toContainText('3 页图片');
 });
+
+test('the AI asks a question during generation; answering on the card resumes it', async () => {
+  await page.goto('/templates');
+  await page.click('[data-testid=create-btn]');
+  await page.fill('input[name=name]', '提问模板');
+  await page.fill('textarea[name=style]', '简约');
+  await page.fill('textarea[name=notes]', 'ASK_ME');
+  await page.click('[data-testid=submit-create]');
+  await expect(page).toHaveURL(/\/p\//);
+  const url = page.url();
+  const card = page.locator('[data-testid=question-card]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card.locator('[data-testid=question-text]')).toHaveText('MOCK-QUESTION 面向谁？');
+  await expect(card).toContainText('AI 提问');
+  await expect(page.locator('[data-testid=question-pill]')).toBeVisible();
+  await page.goto('/templates');
+  await expect(page.locator('[data-testid=project-card]:has-text("提问模板") [data-testid=asking-badge]')).toBeVisible();
+  await page.goto(url);
+  await page.locator('[data-testid=question-option]:has-text("投资人")').click();
+  await expect(card).toHaveCount(0);
+  await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(3, { timeout: 30_000 });
+  await page.click('[data-testid=tab-files]');
+  await expect(page.locator('[data-testid=file-content]')).toContainText('ASK-RESULT 用户回答：「投资人」');
+});
+
+test('an element edit changes the selection, then asks before changing the same thing on other pages', async () => {
+  await page.click('.tabs button:has-text("修改历史")');
+  await page.locator('[data-testid=page-thumb]').nth(1).click();
+  await stage().locator('h1').click();
+  await expect(page.locator('[data-testid=scope-chip]')).toHaveText('第 2 页 · 1 个元素');
+  await page.fill('[data-testid=prompt-input]', 'SIMILAR 标题改成红色');
+  await page.click('[data-testid=send-btn]');
+  const card = page.locator('[data-testid=question-card]');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toContainText('修改范围');
+  await expect(card.locator('[data-testid=question-text]')).toContainText('MOCK-SIMILAR 其他页面也有同样的标题');
+  await expect(card.locator('[data-testid=question-option]')).toHaveText(['全部修改', '只改选中的']);
+  await card.locator('[data-testid=question-option]:has-text("全部修改")').click();
+  await expect(historyItems()).toHaveCount(2, { timeout: 30_000 });
+  await expect(stage().locator('h1')).toHaveText('SIMILAR-DONE');
+  await expect(page.locator('[data-testid=page-thumb]').nth(0).frameLocator('iframe').locator('h1')).toHaveText('SIMILAR-DONE');
+  await expect(page.locator('[data-testid=page-thumb]').nth(2).frameLocator('iframe').locator('h1')).toHaveText('SIMILAR-DONE');
+});

@@ -3,6 +3,7 @@
  * styles/*.css with every page, standalone pages/*.html) and loaded in headless Chrome, plus static
  * checks of the README, the style files and the page sources. Errors go back to the model.
  */
+import * as cheerio from 'cheerio';
 import postcss from 'postcss';
 import type { DB } from './db.js';
 import { bundleFiles } from './bundle.js';
@@ -25,6 +26,15 @@ export interface CheckInput {
   canEdit: (file: string) => boolean;
   /** Whether README problems are errors (the model owns the whole project) or only warnings. */
   strictReadme: boolean;
+  /** Generating a template: placeholders only, and the components a template should offer. */
+  template?: TemplateCheck;
+}
+
+export interface TemplateCheck {
+  /** Text of the uploaded reference files; nothing of it may end up in the template. */
+  referenceTexts: string[];
+  /** Text the user wrote in the brief (a brand name there is wanted, not copied). */
+  allowed: string;
 }
 
 const README_SECTIONS: [string, string][] = [
@@ -235,12 +245,107 @@ async function checkInBrowser(db: DB | undefined, input: CheckInput, add: (i: Pr
   });
 }
 
+/** The text a reader sees, with element boundaries kept apart (SVG labels and table cells included). */
+function visibleText(html: string): string {
+  const $ = cheerio.load(html, null, false);
+  $('style, script').remove();
+  $('*').each((_, el) => {
+    $(el).append('\n');
+  });
+  return $.root().text();
+}
+
+const CJK_RUN = /[\u3400-\u4dbf\u4e00-\u9fff]{8,}/g;
+const CJK_WINDOW = 8;
+const WORD_WINDOW = 4;
+const NUMBER = /\d[\d,]*(?:\.\d+)?%?/g;
+
+/** Numbers specific enough to be data: four or more digits, decimals, or uneven percentages. */
+function dataNumber(token: string): string | undefined {
+  const digits = token.replace(/\D/g, '');
+  if (digits.length >= 4 || /\.\d/.test(token) || (token.endsWith('%') && Number(digits) % 5 !== 0)) return token.replace(/,/g, '');
+  return undefined;
+}
+
+/** Pieces of text to compare: 8-character CJK windows, 4-word Latin phrases and data numbers. */
+function shingles(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(CJK_RUN)) {
+    for (let i = 0; i + CJK_WINDOW <= m[0].length; i++) out.add(m[0].slice(i, i + CJK_WINDOW));
+  }
+  for (const line of text.split(/[\n。！？；;!?]/)) {
+    const words = line.toLowerCase().match(/[a-z][a-z0-9&'-]*/g) ?? [];
+    for (let i = 0; i + WORD_WINDOW <= words.length; i++) {
+      const phrase = words.slice(i, i + WORD_WINDOW).join(' ');
+      if (phrase.length >= 16) out.add(phrase);
+    }
+  }
+  for (const m of text.matchAll(NUMBER)) {
+    const n = dataNumber(m[0]);
+    if (n) out.add(n);
+  }
+  return out;
+}
+
+const MAX_LEAKS = 6;
+
+function checkTemplate(input: CheckInput, add: (i: ProjectIssue) => void) {
+  const t = input.template;
+  if (!t) return;
+  const refs = t.referenceTexts.filter((x) => x.trim());
+  if (refs.length) {
+    const ref = new Set<string>();
+    for (const x of refs) for (const s of shingles(x)) ref.add(s);
+    const allowed = shingles(t.allowed);
+    const files = [
+      { file: README, text: readmeBody(input.doc.readme ?? '') },
+      ...nameFiles(input.doc.pages).map((p) => ({ file: p.file!, text: visibleText(p.html) })),
+    ];
+    for (const { file, text } of files) {
+      if (!input.canEdit(file)) continue;
+      const leaks = [...shingles(text)].filter((s) => ref.has(s) && !allowed.has(s));
+      if (!leaks.length) continue;
+      // Neighbouring windows of one copied sentence: show the sentence once.
+      const shown: string[] = [];
+      for (const l of leaks) {
+        if (shown.length >= MAX_LEAKS) break;
+        const line = text.split('\n').find((x) => x.replace(/,/g, '').toLowerCase().includes(l))?.trim() ?? l;
+        const clip = line.length > 40 ? `${line.slice(0, 40)}…` : line;
+        if (!shown.includes(clip)) shown.push(clip);
+      }
+      add({
+        severity: 'error',
+        file,
+        message: `含有从参考资料中照搬的具体内容：${shown.map((x) => `「${x}」`).join('')}。模板只能用占位符（如「公司名称」「项目名称」「XX%」「YYYY 年」「类别 A」「要点一：简要说明」），参考资料只用来学习风格与版式；请把这些内容换成占位符`,
+      });
+    }
+  }
+  if (!input.strictReadme) return;
+  const html = input.doc.pages.map((p) => p.html).join('\n');
+  const $ = cheerio.load(html, null, false);
+  const charts = $('svg').filter((_, el) => $(el).find('rect, path, polyline, polygon, circle, line, ellipse').length >= 3).length;
+  const missing = [
+    charts < 2 && `图表（至少 2 个内联 SVG 图表，例如柱状图、折线图、饼图/环形图；现有 ${charts} 个）`,
+    !$('table').length && '表格（<table>，表头加几行占位数据）',
+    !$('[class], [data-layout]').filter((_, el) => /timeline|flow|process|step|milestone|roadmap|journey/i.test(`${$(el).attr('class') ?? ''} ${$(el).attr('data-layout') ?? ''}`)).length &&
+      '流程图或时间线（class 含 flow / process / step / timeline / milestone 的步骤与箭头）',
+  ].filter(Boolean);
+  if (missing.length) {
+    add({
+      severity: 'error',
+      file: 'pages/',
+      message: `模板缺少通用组件：${missing.join('；')}。模板应提供后续材料可直接套用的图表、表格与流程/时间线版式（页数少时可在同一页中组合多个组件），数据都用占位值`,
+    });
+  }
+}
+
 export async function checkProject(db: DB | undefined, input: CheckInput): Promise<ProjectIssue[]> {
   const issues: ProjectIssue[] = [];
   const add = (i: ProjectIssue) => issues.push(i);
   checkReadme(input, add);
   checkStyles(input, add);
   checkPages(input, add);
+  checkTemplate(input, add);
   await checkInBrowser(db, input, add);
   return issues.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
 }

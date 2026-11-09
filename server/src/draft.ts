@@ -17,7 +17,7 @@ import {
 } from './domEdit.js';
 import { sliceText, type FileTools, type ToolDef, type ToolOutput } from './fileTools.js';
 import { ADDITIONS_CSS, checkPath, cssFiles, fileTree, joinCssFiles, nameFiles, parseFileBlocks, README } from './files.js';
-import { checkProject, formatProjectReport, unbalancedTags, type CheckInput } from './projectCheck.js';
+import { checkProject, formatProjectReport, unbalancedTags, type CheckInput, type TemplateCheck } from './projectCheck.js';
 import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart } from './llm.js';
 import { inspectLayout, renderContactSheets, renderPageImages, type PageReport } from './render.js';
 
@@ -55,6 +55,16 @@ export class Draft {
   /** README changes in fragment mode, applied onto the latest saved document. */
   private readmeEdit?: string;
 
+  /** Set while generating a template: the delivery check then also checks placeholders and components. */
+  templateCheck?: TemplateCheck;
+
+  /** Fragment mode: pages outside the target opened by extend_scope, and those changed, by page id. */
+  private opened = new Set<string>();
+  private changed = new Set<string>();
+  /** Fragment mode: shared style files opened by extend_scope, and whether they were changed. */
+  private sharedOpen = false;
+  private sharedChanged = false;
+
   private constructor(
     readonly mode: 'doc' | 'fragment',
     private doc: DeckDoc,
@@ -77,13 +87,13 @@ export class Draft {
   static ofPage(snapshot: DeckDoc, pageId: string): Draft {
     const page = snapshot.pages.find((p) => p.id === pageId);
     if (!page) throw new Error('目标页面不存在');
-    return new Draft('fragment', snapshot, [{ ...page }], '', pageId);
+    return new Draft('fragment', cloneDoc(snapshot), [{ ...page }], '', pageId);
   }
 
   static fromFragment(text: string, snapshot: DeckDoc, pageId: string): Draft {
     const frag = parseFragment(text);
     if (!snapshot.pages.some((p) => p.id === pageId)) throw new Error('目标页面不存在');
-    return new Draft('fragment', snapshot, frag.pages, frag.css, pageId);
+    return new Draft('fragment', cloneDoc(snapshot), frag.pages, frag.css, pageId);
   }
 
   /** The draft as it would be saved, with ids assigned; page n of the model is pages[n - 1]. */
@@ -125,7 +135,7 @@ export class Draft {
     const lines = fileTree(view).map((e) => {
       if (e.kind === 'readme') return `${e.path}（${e.chars} 字符）— 需求与风格说明（生成说明），修改前先读；用户的要求改变了风格、受众或页面规划时同步更新`;
       if (e.kind === 'css') {
-        const ro = this.mode === 'fragment' ? (e.path === ADDITIONS_CSS ? '［可追加本页样式］' : '［共享，只读］') : '';
+        const ro = this.mode === 'fragment' ? (e.path === ADDITIONS_CSS ? '［可追加本页样式］' : this.sharedOpen ? '［共享，已开放修改］' : '［共享，只读］') : '';
         return `${e.path}（${e.chars} 字符）${ro}`;
       }
       return `${e.path} — 第 ${e.page} 页［${this.isEditable(e.page!) ? '可修改' : '只读'}］${e.chars} 字符：${e.title}`;
@@ -137,7 +147,7 @@ export class Draft {
   /** Whether the model may change this project file in this job. */
   canEdit(path: string): boolean {
     if (path === README || path === 'index.html') return true;
-    if (path.startsWith('styles/')) return this.mode === 'doc' || path === ADDITIONS_CSS;
+    if (path.startsWith('styles/')) return this.mode === 'doc' || path === ADDITIONS_CSS || this.sharedOpen;
     const n = this.pageOf(path);
     return n !== undefined && this.isEditable(n);
   }
@@ -150,6 +160,7 @@ export class Draft {
       sources: doc.pages.map((p, i) => ({ file: p.file!, html: this.pageSource(i + 1) })),
       canEdit: (f) => this.canEdit(f),
       strictReadme: this.mode === 'doc',
+      template: this.templateCheck,
     };
   }
 
@@ -187,7 +198,7 @@ export class Draft {
     }
     if (c.kind === 'css') {
       if (/<\/?(style|section|html)\b/i.test(content)) throw new Error('样式文件中只能写 CSS，不要包含 <style> 等 HTML 标签');
-      if (this.mode === 'fragment') {
+      if (this.mode === 'fragment' && (c.path === ADDITIONS_CSS || !this.sharedOpen)) {
         if (c.path !== ADDITIONS_CSS) throw new Error(`共享样式文件只读（会影响所有页面）。本页需要的新规则请写入 ${ADDITIONS_CSS}，或用 edit_elements 的 style`);
         this.setCss(content);
         return `已写入 ${ADDITIONS_CSS} 的本次追加部分`;
@@ -196,7 +207,7 @@ export class Draft {
       const f = files.find((x) => x.path === c.path);
       if (f) f.css = content;
       else files.push({ path: c.path, css: content });
-      this.setCss(joinCssFiles(files));
+      this.setShared(joinCssFiles(files));
       return `已${f ? '覆盖' : '新建'} ${c.path}`;
     }
     const n = this.pageOf(c.path);
@@ -206,7 +217,7 @@ export class Draft {
       const added = this.pageCount - before;
       return `已覆盖 ${c.path}（第 ${n} 页）${added > 0 ? `，并拆分出 ${added} 个新页面（文件名自动生成，后续页码顺延）` : ''}`;
     }
-    const at = after ?? (this.mode === 'doc' ? this.doc.pages.length : this.editablePages().at(-1)!);
+    const at = after ?? (this.mode === 'doc' ? this.doc.pages.length : this.firstEditable + this.pages.length - 1);
     const added = this.insertPages(at, content, c.path);
     return `已新建 ${c.path}，插在第 ${at} 页之后（${added > 1 ? `共 ${added} 页，` : ''}现共 ${this.pageCount} 页）`;
   }
@@ -235,7 +246,7 @@ export class Draft {
       if (!n) throw new Error(`草稿中没有 ${c.path}`);
       return this.replace(n, oldText, newText, all);
     }
-    if (c.kind === 'css' && this.mode === 'fragment') {
+    if (c.kind === 'css' && this.mode === 'fragment' && (c.path === ADDITIONS_CSS || !this.sharedOpen)) {
       if (c.path !== ADDITIONS_CSS) throw new Error(`共享样式文件只读；本页的样式请写入 ${ADDITIONS_CSS} 或用 edit_elements 的 style`);
       return this.replace(0, oldText, newText, all);
     }
@@ -244,7 +255,7 @@ export class Draft {
     if (c.kind === 'readme') this.setReadme(next.text);
     else {
       const files = cssFiles(this.doc.css).map((f) => (f.path === c.path ? { ...f, css: next.text } : f));
-      this.setCss(joinCssFiles(files));
+      this.setShared(joinCssFiles(files));
     }
     return next.count;
   }
@@ -282,7 +293,38 @@ export class Draft {
   /** 1-based page numbers the model may change. */
   editablePages(): number[] {
     const n = this.mode === 'doc' ? this.doc.pages.length : this.pages.length;
-    return Array.from({ length: n }, (_, i) => this.firstEditable + i);
+    const target = Array.from({ length: n }, (_, i) => this.firstEditable + i);
+    if (!this.opened.size) return target;
+    const opened = this.doc.pages.flatMap((p, i) => (this.opened.has(p.id) ? [this.pageAt(i)] : []));
+    return [...target, ...opened].sort((a, b) => a - b);
+  }
+
+  private inTarget(page: number): boolean {
+    return page >= this.firstEditable && page < this.firstEditable + this.pages.length;
+  }
+
+  /** Fragment mode: index in the saved document of a page outside the target, and back. */
+  private docIndex(page: number): number {
+    return page < this.firstEditable ? page - 1 : page - this.pages.length;
+  }
+
+  private pageAt(docIndex: number): number {
+    return docIndex < this.firstEditable - 1 ? docIndex + 1 : docIndex + this.pages.length;
+  }
+
+  /** Fragment mode: also open these other pages and the shared style files (extend_scope). */
+  extendScope(pages: number[]) {
+    if (this.mode !== 'fragment') return;
+    for (const p of pages) {
+      if (p >= 1 && p <= this.pageCount && !this.inTarget(p)) this.opened.add(this.doc.pages[this.docIndex(p)].id);
+    }
+    this.sharedOpen = true;
+  }
+
+  /** Fragment mode: page numbers outside the target changed after extend_scope, and whether shared styles changed. */
+  extendedChanges(): { pages: number[]; css: boolean } {
+    const pages = this.doc.pages.flatMap((p, i) => (this.changed.has(p.id) ? [this.pageAt(i)] : []));
+    return { pages, css: this.sharedChanged };
   }
 
   isEditable(page: number): boolean {
@@ -300,7 +342,7 @@ export class Draft {
 
   cssSource(): string {
     if (this.mode === 'doc') return this.doc.css;
-    return `/* ===== 共享样式（只读） ===== */\n${this.doc.css}\n/* ===== 本次追加样式（可用 page=0 修改） ===== */\n${this.extraCss}`;
+    return `/* ===== 共享样式（${this.sharedOpen ? '已开放修改' : '只读'}） ===== */\n${this.doc.css}\n/* ===== 本次追加样式（可用 page=0 修改） ===== */\n${this.extraCss}`;
   }
 
   private editableCss(): string {
@@ -310,6 +352,14 @@ export class Draft {
   private setCss(css: string) {
     if (this.mode === 'doc') this.doc = { ...this.doc, css };
     else this.extraCss = css;
+    this.edits++;
+  }
+
+  /** The shared style files (in fragment mode only after extend_scope). */
+  private setShared(css: string) {
+    if (this.mode === 'doc') return this.setCss(css);
+    this.doc = { ...this.doc, css };
+    this.sharedChanged = true;
     this.edits++;
   }
 
@@ -330,15 +380,23 @@ export class Draft {
       const pages = [...this.doc.pages];
       pages.splice(page - 1, 1, ...sections);
       this.doc = { ...this.doc, pages };
-    } else {
+    } else if (this.inTarget(page)) {
       this.pages.splice(page - this.firstEditable, 1, ...sections);
+    } else {
+      if (sections.length > 1) throw new Error(`${this.where(page)}不是本次选中的页面：只能修改其中的内容，不能拆分出新页面`);
+      const i = this.docIndex(page);
+      const pages = [...this.doc.pages];
+      pages[i] = { ...pages[i], html: sections[0].html };
+      this.doc = { ...this.doc, pages };
+      this.changed.add(pages[i].id);
     }
     this.edits++;
   }
 
   deletePage(page: number) {
     if (!this.isEditable(page)) throw new Error(`第 ${page} 页是只读的`);
-    if (this.editablePages().length <= 1) throw new Error('至少需要保留一页');
+    if (this.mode === 'fragment' && !this.inTarget(page)) throw new Error(`${this.where(page)}不是本次选中的页面，不能删除`);
+    if ((this.mode === 'doc' ? this.doc.pages.length : this.pages.length) <= 1) throw new Error('至少需要保留一页');
     if (this.mode === 'doc') this.doc = { ...this.doc, pages: this.doc.pages.filter((_, i) => i !== page - 1) };
     else this.pages.splice(page - this.firstEditable, 1);
     this.edits++;
@@ -403,15 +461,16 @@ export class Draft {
   }
 
   findCss(query: string): string[] {
-    const shared = cssFiles(this.doc.css).flatMap((f) => findCssRules(f.css, query, `［${f.path}${this.mode === 'fragment' ? '，共享只读' : ''}］`));
+    const shared = cssFiles(this.doc.css).flatMap((f) => findCssRules(f.css, query, `［${f.path}${this.mode === 'fragment' && !this.sharedOpen ? '，共享只读' : ''}］`));
     if (this.mode === 'doc') return shared;
     return [...shared, ...findCssRules(this.extraCss, query, `［${ADDITIONS_CSS} 本次追加］`)];
   }
 
   /** Edit one rule: in the file that has it, else (new rule) in `file` or the last style file. */
   editCss(edit: CssEdit, file?: string): ReturnType<typeof editCss> & { file: string } {
-    if (this.mode === 'fragment') {
-      if (hasCssRule(this.doc.css, edit.selector, edit.media) && !hasCssRule(this.extraCss, edit.selector, edit.media)) {
+    const shared = hasCssRule(this.doc.css, edit.selector, edit.media) && !hasCssRule(this.extraCss, edit.selector, edit.media);
+    if (this.mode === 'fragment' && !(shared && this.sharedOpen)) {
+      if (shared) {
         throw new Error(
           `规则 ${edit.selector} 属于共享样式，修改会影响所有页面，而本次只能修改第 ${this.describeEditable()} 页：请用 edit_elements 的 style / add_class 修改本页元素，或新建一个只用于本页的 class`,
         );
@@ -433,7 +492,7 @@ export class Draft {
     }
     const r = editCss(target.css, edit);
     target.css = r.css;
-    this.setCss(joinCssFiles(files));
+    this.setShared(joinCssFiles(files));
     return { ...r, file: target.path };
   }
 
@@ -449,7 +508,7 @@ export class Draft {
       pages.splice(after, 0, ...sections);
       this.doc = { ...this.doc, pages };
     } else {
-      if (!this.isEditable(after)) throw new Error(`本次只能在第 ${this.describeEditable()} 页之后插入新页`);
+      if (!this.inTarget(after)) throw new Error(`本次只能在第 ${this.firstEditable}${this.pages.length > 1 ? `–${this.firstEditable + this.pages.length - 1}` : ''} 页之后插入新页`);
       this.pages.splice(after - this.firstEditable + 1, 0, ...sections);
     }
     this.edits++;
@@ -525,13 +584,27 @@ export class Draft {
   /** The final document: the whole draft, or the edited pages applied onto the latest saved document. */
   result(latest?: DeckDoc): DeckDoc {
     if (this.mode === 'doc') return assignIds(cloneDoc(this.doc));
-    const base = latest ?? this.doc;
+    let base = latest ?? this.doc;
+    if (this.changed.size || this.sharedChanged) {
+      const own = new Map(this.doc.pages.map((p) => [p.id, p.html]));
+      base = {
+        ...base,
+        css: this.sharedChanged ? this.doc.css : base.css,
+        pages: base.pages.map((p) => (this.changed.has(p.id) && own.has(p.id) ? { ...p, html: own.get(p.id)! } : p)),
+      };
+    }
     return { ...replacePage(base, this.targetPageId!, this.pages, this.extraCss), readme: this.readmeEdit ?? base.readme };
   }
 
+  /** Editable page numbers as ranges, e.g. "3–4、7". */
   describeEditable(): string {
-    const pages = this.editablePages();
-    return pages.length > 1 ? `${pages[0]}–${pages.at(-1)}` : String(pages[0]);
+    const ranges: string[] = [];
+    for (const p of this.editablePages()) {
+      const last = ranges.at(-1)?.split('–');
+      if (last && Number(last.at(-1)) === p - 1) ranges[ranges.length - 1] = `${last[0]}–${p}`;
+      else ranges.push(String(p));
+    }
+    return ranges.join('、');
   }
 }
 
@@ -906,7 +979,7 @@ export function createDraftTools(draft: Draft, resolver: Resolver, db?: DB): Fil
           if (typeof args.path === 'string' && args.path.trim()) {
             const path = checkPath(args.path).path;
             const n = draft.pageOf(path);
-            const ro = n ? !draft.isEditable(n) : draft.mode === 'fragment' && path.startsWith('styles/') && path !== ADDITIONS_CSS;
+            const ro = n ? !draft.isEditable(n) : !draft.canEdit(path);
             return { content: sliceText(draft.readFile(path), args.offset, args.max_chars, `${path}${n ? `（第 ${n} 页）` : ''}${ro ? '（只读）' : ''}`) };
           }
           if (args.page === undefined || args.page === null || args.page === '') return { content: draft.listFiles() };
@@ -1053,7 +1126,9 @@ function trimPromptImages(messages: ChatMessage[], canReopen: boolean): ChatMess
 function reviewPrompt(draft: Draft, view: DeckDoc, report: string): string {
   const scope =
     draft.mode === 'fragment'
-      ? `\n本次只能修改第 ${draft.describeEditable()} 页（以及 ${ADDITIONS_CSS} 中本次追加的样式）；其他页面和共享样式只读，仅供对照风格。`
+      ? draft.canEdit('styles/main.css')
+        ? `\n本次只能修改第 ${draft.describeEditable()} 页（含用户同意扩展的页面）和样式文件；其他页面只读，仅供对照风格。`
+        : `\n本次只能修改第 ${draft.describeEditable()} 页（以及 ${ADDITIONS_CSS} 中本次追加的样式）；其他页面和共享样式只读，仅供对照风格。`
       : '';
   return `【自检阶段】你的初稿已在无头浏览器（Chrome，画幅 ${view.width}×${view.height}）中渲染。下面是页面缩略图总览与自动布局检查报告。
 请像设计师交付前一样自检并修复：

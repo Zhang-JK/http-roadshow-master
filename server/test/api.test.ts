@@ -346,7 +346,8 @@ describe('templates, decks, edits, history and export', () => {
     expect((await edit({ prompt: '加一段', scope: 'page', pageId: doc.pages[1].id })).status).toBe('done');
     expect(mock.calls.length).toBe(b2 + 1);
     expect(mock.calls.at(-1)!.text).toContain('只输出修改后的第');
-    expect(mock.calls.at(-1)!.body.tools).toBeUndefined();
+    // Rewrite mode gets no editing tools; only the question tool.
+    expect(mock.calls.at(-1)!.body.tools.map((t: any) => t.function.name)).toEqual(['ask_user']);
     expect((await req('GET', `/api/projects/${id}`, adminCookie)).json.project.doc.pages[1].html).toContain('整页新增段落');
     expect((await req('PUT', '/api/settings', adminCookie, { editMode: 'tools', editToolRounds: 99 })).json.settings).toMatchObject({ editMode: 'tools', editToolRounds: 40 });
     expect((await req('DELETE', `/api/projects/${id}`, adminCookie)).status).toBe(200);
