@@ -203,7 +203,7 @@ export function EditorPage() {
         if (m.type === 'text-edit-commit') saveText(m);
         else if (m.empty) toast('文字不能为空，已恢复原来的文字；如需删除这个元素，请用 AI 修改', 'info');
       } else if (m.type === 'text-edit-denied') {
-        toast(`这个${m.label}里还有图片、图标或其他元素，不能直接改字：可以双击里面的单段文字，或在下方描述修改交给 AI`, 'info');
+        toast(`「${m.label}」里除了文字还有其他元素（图片、图标或单独设置样式的文字），不能直接改字：可以双击其中的单段文字，或在下方描述修改交给 AI`, 'info');
       }
     };
     window.addEventListener('message', onMsg);
