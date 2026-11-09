@@ -62,7 +62,7 @@ const PAGE = (n: number, layout: string, broken: boolean, extra = '', tpl = fals
 
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
 const pageExtra = (text: string) =>
-  `${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
+  `${text.includes('BAD_IMG') ? '<img src="/api/assets/no-such-image" alt="缺失">' : ''}${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
 
 const README_DOC = (title: string, n: number, notes: string) => `# ${title}
 
@@ -97,7 +97,9 @@ function pagesReply(text: string, broken: boolean, stray: boolean): string {
   const tpl = text.includes('制作这份路演模板的页面文件');
   const task = text.slice(text.indexOf('【本批任务】'));
   const lines = [...task.matchAll(/^- 第 (\d+) 页：(pages\/[\w.-]+\.html) ｜ (\w+)/gm)];
+  // SKIP_PAGE: the model never manages to write page 2.
   return lines
+    .filter(([, , path]) => !(text.includes('SKIP_PAGE') && path === 'pages/content-1.html'))
     .map(([, n, path, layout]) => `<file path="${stray ? path.replace('pages/', 'pages/x-') : path}">\n${PAGE(Number(n), layout, broken, extra, tpl)}\n</file>`)
     .join('\n\n');
 }
@@ -153,16 +155,29 @@ function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args:
 /**
  * Scripted fix after a failed delivery check (the last user message has 【交付检查】): remove scripts
  * from the pages named in the report and list the files, then rewrite the README with every section
- * and a page plan of the actual files. Markers: CHECK_STUBBORN never fixes anything.
+ * and a page plan of the actual files; pages reported as not written and missing style sheets are
+ * written with write_file. Markers: CHECK_STUBBORN never fixes anything.
  */
 function mockCheckRound(report: string, after: { content: string }[], stubborn: boolean): { name: string; args: Record<string, unknown> }[] | null {
   if (stubborn) return null;
   if (after.length === 0) {
     const scripted = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：包含 /g)].map((m) => m[1]);
     const leaked = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：含有从参考资料中照搬的具体内容/g)].map((m) => m[1]);
+    const unwritten = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：页面 \S+ 还没有写出/g)].map((m) => m[1]);
+    const noStyles = /✗ styles\/：没有任何样式文件/.test(report);
     return [
       { name: 'read_draft', args: {} },
       { name: 'read_draft', args: { path: 'README.md' } },
+      ...(noStyles
+        ? [
+            { name: 'write_file', args: { path: 'styles/theme.css', content: ':root{--brand:#0f766e} /* CHECK-WROTE-STYLES */' } },
+            { name: 'write_file', args: { path: 'styles/components.css', content: '.title{font-size:96px;color:var(--brand)}.body{font-size:36px}' } },
+          ]
+        : []),
+      ...unwritten.map((path) => ({
+        name: 'write_file',
+        args: { path, after: 1, content: '<section class="slide" data-layout="content"><h1 class="title">CHECK-WROTE-PAGE</h1><p class="body">补写的页面</p></section>' },
+      })),
       ...leaked.map((path) => ({ name: 'replace_in_draft', args: { path, old_text: LEAKED, new_text: '「公司名称」YYYY 年营收 X,XXX 万元' } })),
       ...scripted.flatMap((path) => [
         { name: 'edit_elements', args: { path, selector: 'script', remove: true, all: true } },
@@ -350,6 +365,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
     if (planStep && !continuing && text.includes('TRUNCATE_PLAN')) {
       reply = PLAN_REPLY(title, 3).slice(0, 120);
       finish = 'length';
+    } else if (planStep && text.includes('NO_CSS')) {
+      reply = PLAN_REPLY(title, 3).replace(/<file path="styles[\s\S]*$/, '');
+    } else if (planStep && text.includes('CSS_FENCED')) {
+      reply = PLAN_REPLY(title, 3).replace(/<file path="(styles\/[\w.-]+)">\n([\s\S]*?)\n<\/file>/g, '### $1\n```css\n$2\n```');
     } else if (planStep) {
       const answers = toolMsgs.map((m: any) => String(m.content)).filter((c: string) => /用户|回答/.test(c)).join(' ');
       reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, `${(text.match(/【其他要求】(.*)/)?.[1] ?? '').trim()}${answers ? ` ASK-RESULT ${answers}` : ''}`);

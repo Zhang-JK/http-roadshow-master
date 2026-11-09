@@ -15,6 +15,8 @@ export interface ProjectIssue {
   severity: 'error' | 'warning';
   file: string;
   message: string;
+  /** Removed automatically when the project is saved, so it never fails a job on its own. */
+  cleanedOnSave?: boolean;
 }
 
 export interface CheckInput {
@@ -28,6 +30,8 @@ export interface CheckInput {
   strictReadme: boolean;
   /** Generating a template: placeholders only, and the components a template should offer. */
   template?: TemplateCheck;
+  /** Page files the generation planned; any that were not written are errors. */
+  expectedPages?: string[];
 }
 
 export interface TemplateCheck {
@@ -62,7 +66,15 @@ function checkReadme(input: CheckInput, add: (i: ProjectIssue) => void) {
   if (plan === undefined) return;
   const planned = [...new Set(plan.match(/pages\/[A-Za-z0-9][\w.-]*\.html/g) ?? [])];
   const files = nameFiles(input.doc.pages).map((p) => p.file!);
-  const missing = planned.filter((p) => !files.includes(p));
+  const unwritten = (input.expectedPages ?? []).filter((p) => !files.includes(p));
+  for (const p of unwritten) {
+    add({
+      severity: 'error',
+      file: p,
+      message: `页面 ${p} 还没有写出：请按 README「页面规划」中这一页的说明，用 write_file 写入完整页面（一个 <section class="slide">），不要删除规划中的这一行`,
+    });
+  }
+  const missing = planned.filter((p) => !files.includes(p) && !unwritten.includes(p));
   const unlisted = files.filter((f) => !planned.includes(f));
   if (missing.length) add({ severity, file: README, message: `「页面规划」列出的 ${missing.join('、')} 不存在：页面已删除或改名时请同步更新 README` });
   if (unlisted.length) add({ severity, file: README, message: `「页面规划」没有列出 ${unlisted.join('、')}：新增或拆分页面后请把它们按顺序补进页面规划` });
@@ -96,6 +108,7 @@ function checkPages(input: CheckInput, add: (i: ProjectIssue) => void) {
         severity: 'error',
         file,
         message: `包含 ${js.join('、')}：材料不运行 JavaScript（多人共享、导出 PDF/PPTX 时也无法执行），保存时会被移除。请删除它们，动效用 CSS 动画/过渡，图表用内联 SVG 或纯 CSS`,
+        cleanedOnSave: true,
       });
     }
     if (/<style\b/i.test(html)) add({ severity: 'warning', file, message: '页面内含 <style>：样式请放进 styles/ 下的样式文件，便于各页共用' });

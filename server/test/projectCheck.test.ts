@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { startMockLlm } from './mockLlm.js';
 import { assignIds, type DeckDoc } from '../src/deck.js';
 import { createDraftTools, Draft } from '../src/draft.js';
-import { joinCssFiles } from '../src/files.js';
+import { cssFiles, joinCssFiles } from '../src/files.js';
 import { checkProject, formatProjectReport, type ProjectIssue } from '../src/projectCheck.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-check-'));
@@ -297,12 +297,71 @@ describe('delivery check in jobs', () => {
     expect(page).toContain('下一步');
   });
 
-  it('a model that does not fix the problems gets two tries; the draft is then saved, sanitized', async () => {
+  it('scripts the model leaves in get three fix rounds; saving strips them, so the job still succeeds', async () => {
     const { id, job, checks } = await create('BAD_PAGE_JS CHECK_STUBBORN');
     expect(job.status).toBe('done');
-    expect(checks).toHaveLength(2);
-    expect(job.review.check).toMatchObject({ errors: 1, fixes: 2, remaining: [expect.stringMatching(/^pages\/content-1\.html：包含 <script>/)] });
+    expect(checks).toHaveLength(3);
+    expect(job.review.check).toMatchObject({ errors: 1, fixes: 3, remaining: [expect.stringMatching(/^pages\/content-1\.html：包含 <script>/)] });
+    expect(job.review.check.unresolved).toBeUndefined();
     expect(savedDoc(id).pages[1].html).not.toMatch(/<script|onclick/);
+  });
+
+  it('errors still there after three fix rounds fail the job, listing them', async () => {
+    const { id, job, checks } = await create('BAD_IMG CHECK_STUBBORN');
+    expect(checks).toHaveLength(3);
+    expect(job.status).toBe('error');
+    expect(job.error).toMatch(/^交付检查 4 次未通过（已交回模型修复 3 次），仍有以下问题：\n- pages\/content-1\.html：图片无法加载/);
+    expect(job.review.check.fixes).toBe(3);
+    expect(job.review.check.unresolved[0]).toContain('图片无法加载');
+    const p = await req('GET', `/api/projects/${id}`);
+    expect(p.json.project).toMatchObject({ status: 'error', versionNo: 0 });
+    const h = await req('GET', `/api/projects/${id}/versions`);
+    expect(h.json.failedJobs[0].error).toContain('交付检查 4 次未通过');
+  });
+
+  it('a plan without style sheets carries on, and the check has the model write them', async () => {
+    const plans = () => mock.calls.filter((c) => c.text.includes('本次只输出 README.md 与样式文件')).length;
+    const before = plans();
+    const { id, job, checks } = await create('NO_CSS');
+    expect(job.status).toBe('done');
+    // The first reply and three requests for the missing files, then the pages are written anyway.
+    expect(plans() - before).toBe(4);
+    expect(checks[0].text).toContain('✗ styles/：没有任何样式文件');
+    expect(savedDoc(id).css).toContain('CHECK-WROTE-STYLES');
+    expect(job.review.check).toMatchObject({ errors: 0, fixes: 1 });
+  });
+
+  it('style sheets in ```css blocks instead of <file> tags are taken as they are', async () => {
+    const plans = () => mock.calls.filter((c) => c.text.includes('本次只输出 README.md 与样式文件')).length;
+    const before = plans();
+    const { id, job, checks } = await create('CSS_FENCED');
+    expect(job.status).toBe('done');
+    expect(plans() - before).toBe(1);
+    expect(checks).toHaveLength(0);
+    expect(cssFiles(savedDoc(id).css).map((f) => f.path)).toEqual(['styles/theme.css', 'styles/components.css']);
+  });
+
+  it('a page the model fails to write is left to the check, which has it written', async () => {
+    const { id, job, checks } = await create('SKIP_PAGE');
+    expect(job.error).toBeNull();
+    expect(job.status).toBe('done');
+    expect(checks[0].text).toContain('✗ pages/content-1.html：页面 pages/content-1.html 还没有写出');
+    const doc = savedDoc(id);
+    expect(doc.pages.map((p) => p.file)).toEqual(['pages/cover.html', 'pages/content-1.html', 'pages/content-2.html']);
+    expect(doc.pages[1].html).toContain('CHECK-WROTE-PAGE');
+  });
+
+  it('an edit is not failed for errors the project already had', async () => {
+    const { id } = await create('');
+    const doc = savedDoc(id);
+    doc.pages[2].html = doc.pages[2].html.replace('</section>', '<img src="/api/assets/old-missing" alt="旧图"></section>');
+    db.prepare('UPDATE projects SET doc = ? WHERE id = ?').run(JSON.stringify(doc), id);
+    const before = mock.checkCalls.length;
+    const e = await req('POST', `/api/projects/${id}/edit`, { prompt: 'CHECK_STUBBORN 整体微调', scope: 'global' });
+    const job = await waitJob(e.json.job.id);
+    expect(mock.checkCalls.length - before).toBe(3);
+    expect(job.status).toBe('done');
+    expect(job.review.check).toMatchObject({ fixes: 3, remaining: expect.arrayContaining([expect.stringContaining('图片无法加载')]) });
   });
 
   it('a whole-document edit that deletes a page must bring the README page plan up to date', async () => {

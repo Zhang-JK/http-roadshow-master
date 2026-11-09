@@ -22,7 +22,8 @@ import {
   type EditScope,
   type TemplateBrief,
 } from './prompts.js';
-import { logEdit, readmeFromBrief } from './files.js';
+import { logEdit, plannedPages, readmeFromBrief } from './files.js';
+import { checkProject } from './projectCheck.js';
 import { generateFiles } from './generate.js';
 import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
@@ -306,7 +307,8 @@ function recordUsage(db: DB, jobId: string, r: { endpointId: number; promptToken
 /**
  * Self-check loop: render the draft in headless Chrome, inspect its layout and let the model fix it
  * with the draft tools (skipped when disabled in the settings), then the delivery check of the
- * project as exported, whose errors always go back to the model.
+ * project as exported, whose errors go back to the model up to MAX_CHECK_FIXES times. Errors that
+ * remain after that fail the job (an edit only for errors the project did not have before).
  */
 async function selfReview(
   db: DB,
@@ -316,6 +318,7 @@ async function selfReview(
   prompt: ChatMessage[],
   fileTools?: FileTools,
   skipIfClean = false,
+  before?: DeckDoc,
 ): Promise<ReviewLog> {
   const settings = getSettings(db);
   const log = await reviewDraft(db, userId, {
@@ -334,13 +337,30 @@ async function selfReview(
     stage: '自检与交付检查',
     skipIfClean,
     layoutReview: !!settings.selfCheck,
+    baseline: before ? () => checkProject(db, Draft.ofDocument(before).checkInput()) : undefined,
   });
   updateJob(db, jobId, { review: JSON.stringify(log) });
+  const left = log.check?.unresolved;
+  if (left?.length) {
+    const tries = (log.check?.fixes ?? 0) + 1;
+    throw new Error(
+      `交付检查 ${tries} 次未通过（已交回模型修复 ${log.check!.fixes} 次${log.check?.error ? `，修复时模型调用失败：${log.check.error.slice(0, 200)}` : ''}），仍有以下问题：\n${left.map((x) => `- ${x}`).join('\n')}`,
+    );
+  }
   return log;
 }
 
 /** One model call for a job, with the read-only reference tools when there are uploads. */
-async function runStep(db: DB, jobId: string, userId: number, messages: ChatMessage[], tools: FileTools | undefined, stage: string): Promise<ChatResult> {
+async function runStep(
+  db: DB,
+  jobId: string,
+  userId: number,
+  messages: ChatMessage[],
+  tools: FileTools | undefined,
+  stage: string,
+  /** The caller treats an empty reply as a miss and asks again. */
+  allowEmpty = false,
+): Promise<ChatResult> {
   const settings = getSettings(db);
   jobProgress.set(jobId, { chars: 0, stage });
   const opts = {
@@ -350,6 +370,7 @@ async function runStep(db: DB, jobId: string, userId: number, messages: ChatMess
     temperature: Number(settings.temperature),
     onDelta: (_c: string, total: number) => jobProgress.set(jobId, { chars: total, stage }),
     onReasoning: (total: number) => jobProgress.set(jobId, { chars: total, stage: `${stage}（思考中）` }),
+    allowEmpty,
   };
   if (!tools?.defs.length) {
     const r = await chat(db, userId, messages, opts);
@@ -362,6 +383,7 @@ async function runStep(db: DB, jobId: string, userId: number, messages: ChatMess
     execute: tools.execute,
     onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
     onRound: (r) => recordUsage(db, jobId, r),
+    allowEmptyFinal: allowEmpty,
   });
 }
 
@@ -471,8 +493,8 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
           {
             call: (messages, stage, step) =>
               step === 'plan' && ask
-                ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage)
-                : runStep(db, job.id, userId, messages, ft?.tools, stage),
+                ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
+                : runStep(db, job.id, userId, messages, ft?.tools, stage, true),
             pagesPerCall: Number(settings.genPagesPerCall) || 3,
           },
         );
@@ -489,6 +511,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
           readme: readmeFromBrief(project.type, project.name, meta.brief),
         });
       }
+      if (settings.generateMode !== 'single') draft.expectedPages = plannedPages(draft.view().readme ?? '').map((p) => p.path);
       if (project.type === 'template') {
         draft.templateCheck = {
           referenceTexts: assets.flatMap((a) => (a.kind === 'document' && a.text ? [a.text] : [])),
@@ -609,7 +632,7 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           if (!draft.replaceFromText(text)) throw new Error(`模型没有输出任何文件修改${cleanSummary(text) ? `：${cleanSummary(text)}` : ''}`);
         } else draft = Draft.fromFragment(text, snapshot, input.pageId!);
       }
-      await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools');
+      await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools', snapshot);
       jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });
       const { versionId } = await withProjectLock(projectId, () => {
         const latestRow = getProject(db, projectId)!;

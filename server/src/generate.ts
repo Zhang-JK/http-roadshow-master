@@ -11,6 +11,35 @@ import { buildPagesPrompt, buildPlanPrompt, type AssetRef, type DeckBrief, type 
 
 export const MAX_PLANNED_PAGES = 60;
 
+/** Times a reply missing required files is sent back to the model before the step gives up. */
+export const MAX_PLAN_FIXES = 3;
+
+/**
+ * Style sheets written without <file> tags (```css blocks), named by the styles/*.css path mentioned
+ * just before each block, else theme.css then components.css.
+ */
+export function looseCss(text: string): FileBlock[] {
+  const out: FileBlock[] = [];
+  const defaults = ['styles/theme.css', 'styles/components.css'];
+  text = text.replace(/<file\b[\s\S]*?<\/file\s*>/gi, '');
+  for (const m of text.matchAll(/```css[ \t]*\n([\s\S]*?)```/gi)) {
+    const before = text.slice(Math.max(0, m.index! - 300), m.index!);
+    const named = [...before.matchAll(/styles\/[\w.-]+\.css/g)].at(-1)?.[0];
+    const path = named && !out.some((b) => b.path === named) ? named : defaults.find((d) => !out.some((b) => b.path === d)) ?? `styles/extra-${out.length}.css`;
+    if (m[1].trim()) out.push({ path, content: m[1].trim(), complete: true });
+  }
+  return out;
+}
+
+/** A style sheet cut off by the output limit, kept up to its last complete rule. */
+function salvageCss(b: FileBlock): FileBlock | null {
+  const end = b.content.lastIndexOf('}');
+  if (end < 200) return null;
+  const css = b.content.slice(0, end + 1);
+  const open = (css.match(/{/g) ?? []).length - (css.match(/}/g) ?? []).length;
+  return open === 0 ? { ...b, content: css, complete: true } : null;
+}
+
 export interface GenerateDeps {
   /** One model call (with the read-only reference tools when there are uploads); must not throw on truncation. */
   call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages') => Promise<ChatResult>;
@@ -73,8 +102,15 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
   let plan: PlannedPage[] = [];
   for (let attempt = 0; ; attempt++) {
     const r = await deps.call(messages, attempt ? '规划：补全 README 与样式文件' : '规划：编写 README 与样式文件', 'plan');
-    const blocks = parseFileBlocks(r.text);
-    for (const b of blocks.filter((x) => x.complete)) {
+    const parsed = parseFileBlocks(r.text);
+    const blocks = parsed.flatMap((b) => {
+      if (b.complete) return [b];
+      const c = pathOf(b);
+      const kept = c?.kind === 'css' ? salvageCss(b) : null;
+      return kept ? [kept] : [];
+    });
+    if (!blocks.some((b) => pathOf(b)?.kind === 'css') && !cssFiles(doc.css).length) blocks.push(...looseCss(r.text));
+    for (const b of blocks) {
       const c = pathOf(b);
       if (!c) continue;
       if (c.kind === 'readme') doc.readme = `${b.content.trim()}\n`;
@@ -89,7 +125,14 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     else if (!plan.length) missing.push(`${README}（「页面规划」中没有找到 pages/名称.html 格式的条目，请按格式重写整个 README）`);
     if (!doc.css.trim()) missing.push('styles/theme.css 与 styles/components.css');
     if (!missing.length) break;
-    if (attempt >= 2) throw new Error(`模型没有按要求输出${missing.join('、')}，请重试（或在「模型接入 → 生成设置」中改用单次生成）`);
+    if (attempt >= MAX_PLAN_FIXES) {
+      // Without a page plan there is nothing to write; missing style sheets are left to the delivery check,
+      // which sends them back to the model with the draft tools.
+      if (doc.readme && plan.length) break;
+      throw new Error(
+        `模型 ${attempt + 1} 次都没有按要求输出${missing.join('、')}（已交回模型补全 ${attempt} 次），请重试（或在「模型接入 → 生成设置」中改用单次生成）`,
+      );
+    }
     const cut = r.finishReason === 'length' ? '回复达到最大输出长度被截断' : '缺少文件或格式不对';
     messages = continueMessages(
       messages,
@@ -119,8 +162,11 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
 
   let size = Math.max(1, deps.pagesPerCall);
   let failures = 0;
+  let lastCut = false;
+  // Pages the model failed to write three times running: left to the delivery check, which reports them as missing.
+  const skipped = new Set<string>();
   for (;;) {
-    const queue = plan.filter((p) => !done.has(p.path));
+    const queue = plan.filter((p) => !done.has(p.path) && !skipped.has(p.path));
     if (!queue.length) break;
     const batch = queue.slice(0, size);
     const from = plan.indexOf(batch[0]) + 1;
@@ -150,10 +196,13 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     failures++;
     if (size > 1) size = 1;
     else if (failures >= 3) {
-      throw new Error(
-        `模型连续 ${failures} 次没有输出页面 ${batch[0].path}${r.finishReason === 'length' ? '（回复达到最大输出长度被截断，请提高「最大输出 tokens」）' : ''}，生成中止`,
-      );
+      skipped.add(batch[0].path);
+      failures = 0;
+      lastCut = r.finishReason === 'length';
     }
+  }
+  if (!doc.pages.length) {
+    throw new Error(`模型多次都没有输出任何页面${lastCut ? '（回复达到最大输出长度被截断，请提高「最大输出 tokens」）' : ''}，生成中止`);
   }
   return doc;
 }

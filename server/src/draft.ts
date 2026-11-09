@@ -17,7 +17,7 @@ import {
 } from './domEdit.js';
 import { sliceText, type FileTools, type ToolDef, type ToolOutput } from './fileTools.js';
 import { ADDITIONS_CSS, checkPath, cssFiles, fileTree, joinCssFiles, nameFiles, parseFileBlocks, README } from './files.js';
-import { checkProject, formatProjectReport, unbalancedTags, type CheckInput, type TemplateCheck } from './projectCheck.js';
+import { checkProject, formatProjectReport, unbalancedTags, type CheckInput, type ProjectIssue, type TemplateCheck } from './projectCheck.js';
 import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart } from './llm.js';
 import { inspectLayout, renderContactSheets, renderPageImages, type PageReport } from './render.js';
 
@@ -57,6 +57,8 @@ export class Draft {
 
   /** Set while generating a template: the delivery check then also checks placeholders and components. */
   templateCheck?: TemplateCheck;
+  /** Page files the generation planned (the delivery check reports the ones not written). */
+  expectedPages?: string[];
 
   /** Fragment mode: pages outside the target opened by extend_scope, and those changed, by page id. */
   private opened = new Set<string>();
@@ -161,6 +163,7 @@ export class Draft {
       canEdit: (f) => this.canEdit(f),
       strictReadme: this.mode === 'doc',
       template: this.templateCheck,
+      expectedPages: this.expectedPages,
     };
   }
 
@@ -1156,6 +1159,8 @@ export interface CheckLog {
   fixes: number;
   /** Errors still there at the end (first few). */
   remaining: string[];
+  /** Errors left after every fix round that the job did not have before: the job fails with them. */
+  unresolved?: string[];
   error?: string;
 }
 
@@ -1187,10 +1192,13 @@ export interface ReviewOptions extends ChatOptions {
   layoutReview?: boolean;
   /** Run the delivery check at the end and send its errors back to the model (default true). */
   finalCheck?: boolean;
+  /** Errors the project already had before this job (an edit is not failed for those). */
+  baseline?: () => Promise<ProjectIssue[]>;
 }
 
 /** Times the delivery check's errors go back to the model before the draft is saved as it is. */
-export const MAX_CHECK_FIXES = 2;
+/** Times a failed delivery check goes back to the model; still failing after that fails the job. */
+export const MAX_CHECK_FIXES = 3;
 
 function checkPrompt(draft: Draft, report: string): string {
   const scope =
@@ -1207,11 +1215,13 @@ ${report}`;
  * Agent loop after the first draft: render it, inspect the layout, and let the model look at its own
  * pages and fix them with the draft tools until it is satisfied (bounded by maxRounds). If errors are
  * still detected afterwards it gets one more pass. Then the delivery check puts the project together
- * as exported (index.html, styles, pages, README) and sends what fails back to the model. Failures here
- * never fail the job: the draft as it stands is kept.
+ * as exported (index.html, styles, pages, README) and sends what fails back to the model, up to
+ * MAX_CHECK_FIXES times. Errors still there after that (and not already in `baseline`) are listed in
+ * `check.unresolved`, and the caller fails the job with them. Problems with the layout review or with
+ * the checker itself never fail the job: the draft as it stands is kept.
  */
 export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): Promise<ReviewLog> {
-  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, ...chatOpts } = opts;
+  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, baseline, ...chatOpts } = opts;
   const editsBefore = draft.edits;
   const focus = () => (draft.mode === 'fragment' ? draft.editablePages() : undefined);
   const inspect = async () => {
@@ -1288,28 +1298,49 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
     }
   }
   if (finalCheck) {
-    try {
-      for (let fix = 0; ; fix++) {
-        onStage?.('交付检查：组装 index.html，检查 README、样式与页面文件');
-        const input = draft.checkInput();
-        const issues = await checkProject(db, input);
-        const errors = issues.filter((i) => i.severity === 'error');
-        log.check = {
-          errors: errors.length,
-          warnings: issues.length - errors.length,
-          fixes: fix,
-          remaining: errors.slice(0, 5).map((i) => `${i.file}：${i.message}`.slice(0, 200)),
-        };
-        if (!errors.length || fix >= MAX_CHECK_FIXES) break;
-        onStage?.('交付检查：模型修复问题');
+    let errors: ProjectIssue[] = [];
+    let fixError: string | undefined;
+    for (let fix = 0; ; fix++) {
+      onStage?.('交付检查：组装 index.html，检查 README、样式与页面文件');
+      const input = draft.checkInput();
+      let issues: ProjectIssue[];
+      try {
+        issues = await checkProject(db, input);
+      } catch (e) {
+        // The checker itself broke (e.g. the browser): that says nothing about the draft, which is kept.
+        log.check = { errors: 0, warnings: 0, fixes: fix, remaining: [], error: (e as Error).message };
+        errors = [];
+        break;
+      }
+      errors = issues.filter((i) => i.severity === 'error');
+      log.check = {
+        errors: errors.length,
+        warnings: issues.length - errors.length,
+        fixes: fix,
+        remaining: errors.slice(0, 5).map((i) => `${i.file}：${i.message}`.slice(0, 200)),
+      };
+      if (!errors.length || fix >= MAX_CHECK_FIXES) break;
+      onStage?.(`交付检查：模型修复问题（第 ${fix + 1}/${MAX_CHECK_FIXES} 轮）`);
+      try {
         const r = await converse(
           [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues)) }],
           Math.max(3, Math.ceil(maxRounds / 2)),
         );
         history = r.history;
+      } catch (e) {
+        fixError = (e as Error).message;
+        break;
       }
-    } catch (e) {
-      log.check = { errors: log.check?.errors ?? 0, warnings: log.check?.warnings ?? 0, fixes: log.check?.fixes ?? 0, remaining: log.check?.remaining ?? [], error: (e as Error).message };
+    }
+    let blocking = errors.filter((i) => !i.cleanedOnSave);
+    if (blocking.length && baseline) {
+      const key = (i: ProjectIssue) => `${i.file}\u0000${i.message}`;
+      const before = new Set((await baseline().catch(() => [] as ProjectIssue[])).filter((i) => i.severity === 'error').map(key));
+      blocking = blocking.filter((i) => !before.has(key(i)));
+    }
+    if (blocking.length && log.check) {
+      log.check.unresolved = blocking.slice(0, 10).map((i) => `${i.file}：${i.message}`.slice(0, 300));
+      if (fixError) log.check.error = fixError;
     }
   }
   log.edits = draft.edits - editsBefore;

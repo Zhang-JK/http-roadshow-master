@@ -242,7 +242,7 @@ describe('staged generation', () => {
     expect(cssFiles(d.css).find((f) => f.path === 'styles/additions.css')!.css).toBe('.only-here{color:red}');
   });
 
-  it('copies the template styles, drops to one page per call after a miss and gives up after repeated misses', async () => {
+  it('copies the template styles, drops to one page per call after a miss and gives up when no page is ever written', async () => {
     const template = doc();
     const sizes: number[] = [];
     const { deps } = scripted([
@@ -254,8 +254,9 @@ describe('staged generation', () => {
     ]);
     await expect(
       generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template, assets: [] }, deps),
-    ).rejects.toThrow(/连续 3 次没有输出页面 pages\/a\.html/);
-    expect(sizes).toEqual([2, 1, 1]);
+    ).rejects.toThrow(/模型多次都没有输出任何页面/);
+    // Each page gets three tries on its own before it is skipped.
+    expect(sizes).toEqual([2, 1, 1, 1, 1, 1]);
 
     const ok = scripted([
       () => result('<file path="README.md">\n# T\n## 页面规划\n1. pages/a.html ｜ cover\n</file>'),
@@ -270,6 +271,43 @@ describe('staged generation', () => {
     await expect(generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template: null, assets: [] }, deps)).rejects.toThrow(
       /页面规划/,
     );
-    expect(stages).toHaveLength(3);
+    expect(stages).toHaveLength(4);
+  });
+
+  it('skips a page the model never writes and carries on with the rest', async () => {
+    const { deps, stages } = scripted([
+      () => result(plan(3)),
+      (m) => result(batchOf(m).filter((n) => n !== 2).map(page).join('\n')),
+    ]);
+    const d = await generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template: null, assets: [] }, deps);
+    expect(d.pages.map((p) => p.file)).toEqual(['pages/p1.html', 'pages/p3.html']);
+    expect(stages.filter((s) => s.includes('第 2 页'))).toHaveLength(3);
+  });
+
+  it('carries on without style sheets after asking three times, and salvages a cut-off one', async () => {
+    const readme = plan(1).replace(/<file path="styles[\s\S]*$/, '');
+    const { deps, stages } = scripted([() => result(readme), (m) => result(batchOf(m).map(page).join('\n'))]);
+    const d = await generateFiles({ base, kind: 'template', brief: { name: 'T', style: 's', purpose: 'p' }, template: null, assets: [] }, deps);
+    expect(stages.filter((s) => s.startsWith('规划'))).toHaveLength(4);
+    expect(d.css).toBe('');
+    expect(d.pages).toHaveLength(1);
+
+    const rule = '.card{padding:24px;border-radius:12px;background:#fff}\n';
+    const cut = `${readme}\n<file path="styles/theme.css">\n${rule.repeat(6)}.half{color:`;
+    const s2 = scripted([() => result(cut, 'length'), (m) => result(batchOf(m).map(page).join('\n'))]);
+    const d2 = await generateFiles({ base, kind: 'template', brief: { name: 'T', style: 's', purpose: 'p' }, template: null, assets: [] }, s2.deps);
+    expect(s2.stages.filter((s) => s.startsWith('规划'))).toHaveLength(1);
+    expect(cssFiles(d2.css)).toEqual([{ path: 'styles/theme.css', css: rule.repeat(6).trim() }]);
+  });
+
+  it('reads ```css blocks and unquoted <file> paths as style sheets', async () => {
+    const reply = `${plan(1).replace(/<file path="styles[\s\S]*$/, '')}\n### styles/theme.css\n\`\`\`css\n:root{--a:1}\n\`\`\`\n\nstyles/components.css：\n\`\`\`css\n.b{}\n\`\`\``;
+    const { deps } = scripted([() => result(reply), (m) => result(batchOf(m).map(page).join('\n'))]);
+    const d = await generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template: null, assets: [] }, deps);
+    expect(cssFiles(d.css)).toEqual([
+      { path: 'styles/theme.css', css: ':root{--a:1}' },
+      { path: 'styles/components.css', css: '.b{}' },
+    ]);
+    expect(parseFileBlocks('<file path=styles/x.css>\n.x{}\n</file>')).toEqual([{ path: 'styles/x.css', content: '.x{}', complete: true }]);
   });
 });

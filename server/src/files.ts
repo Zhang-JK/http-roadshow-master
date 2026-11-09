@@ -117,7 +117,7 @@ export interface FileBlock {
  */
 export function parseFileBlocks(text: string): FileBlock[] {
   const out: FileBlock[] = [];
-  const re = /<file\s+path\s*=\s*["']([^"']+)["']\s*>/gi;
+  const re = /<file\s+(?:path|name)\s*=\s*["']?([^"'\s>]+)["']?\s*>/gi;
   const starts = [...text.matchAll(re)];
   starts.forEach((m, i) => {
     const from = m.index! + m[0].length;
