@@ -1196,7 +1196,6 @@ export interface ReviewOptions extends ChatOptions {
   baseline?: () => Promise<ProjectIssue[]>;
 }
 
-/** Times the delivery check's errors go back to the model before the draft is saved as it is. */
 /** Times a failed delivery check goes back to the model; still failing after that fails the job. */
 export const MAX_CHECK_FIXES = 3;
 
