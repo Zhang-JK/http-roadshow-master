@@ -419,7 +419,7 @@ test('history shows the time, tokens and output speed of each AI change; the pro
   await expect(page.locator('.job-item [data-testid=job-progress]')).toContainText(/输入 [\d,]+ \/ 输出 [\d,]+ tokens/, { timeout: 20_000 });
   await expect(historyItems()).toHaveCount(before + 1, { timeout: 30_000 });
   const cost = historyItems().first().locator('[data-testid=hist-cost]');
-  await expect(cost).toContainText(/耗时 \d+ 秒 · \d+ 次调用 · 输入 [\d,]+ \/ 输出 [\d,]+ tokens/);
+  await expect(cost).toContainText(/耗时 [\d.]+ 秒 · \d+ 次调用 · 输入 [\d,]+ \/ 输出 [\d,]+ tokens/);
   // The first version was generated with streamed pages, so its output speed is known.
   await expect(historyItems().last().locator('[data-testid=hist-cost]')).toContainText('tok/s');
 });

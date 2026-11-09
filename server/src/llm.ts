@@ -404,7 +404,7 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
         const record = (r: Partial<ChatResult>, e?: unknown) => {
           if (!jobId) return;
           const outText = (r.text ?? '') + (r.toolCalls ?? []).map((c) => c.function.name + c.function.arguments).join('');
-          const estimated = r.completionTokens === undefined || r.promptTokens === undefined;
+          const estimated = (r.completionTokens === undefined || r.promptTokens === undefined) && !(e && !live.firstTokenAt);
           recordCall(db, {
             jobId,
             userId,
@@ -415,7 +415,8 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
             startedAt,
             firstTokenAt: r.firstTokenAt ?? live.firstTokenAt,
             endedAt: Date.now(),
-            promptTokens: r.promptTokens ?? requestTokens(msgs, o.tools),
+            // A request rejected before any output was not processed by the model: it used no tokens.
+            promptTokens: r.promptTokens ?? (e && !live.firstTokenAt ? 0 : requestTokens(msgs, o.tools)),
             completionTokens: r.completionTokens ?? (e ? live.tokens : estimateTokens(outText)),
             estimated,
             status: e ? 'error' : 'ok',

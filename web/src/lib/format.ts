@@ -13,9 +13,10 @@ export function elapsed(ts: number): string {
   return s >= 3600 ? `${Math.floor(s / 3600)}:${mmss.padStart(5, '0')}` : mmss;
 }
 
-/** A length of time in words, e.g. 45 秒, 3 分 05 秒, 1 小时 02 分. */
+/** A length of time in words, e.g. 2.4 秒, 45 秒, 3 分 05 秒, 1 小时 02 分. */
 export function duration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
+  if (ms < 10_000) return `${(Math.max(0, ms) / 1000).toFixed(1)} 秒`;
+  const s = Math.round(ms / 1000);
   if (s < 60) return `${s} 秒`;
   if (s < 3600) return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`;
   return `${Math.floor(s / 3600)} 小时 ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')} 分`;

@@ -72,9 +72,9 @@ describe('parallel requests across endpoints', () => {
     );
     return id;
   };
-  const ask = async (jobId: string, signal?: AbortSignal) => {
+  const ask = async (jobId: string, signal?: AbortSignal, userId = 1) => {
     const { chat } = await import('../src/llm.js');
-    return chat(db, 1, [{ role: 'user', content: '你好' }], { jobId, stage: '测试', onDelta: () => {}, signal });
+    return chat(db, userId, [{ role: 'user', content: '你好' }], { jobId, stage: '测试', onDelta: () => {}, signal });
   };
 
   it('runs requests of the same user in parallel, even on one endpoint', async () => {
@@ -113,14 +113,21 @@ describe('parallel requests across endpoints', () => {
 
   it('records a failed attempt and moves on to the next endpoint', async () => {
     endpoints({ name: 'fail' }, { name: 'ok' });
-    const id = newJob();
-    // Whichever endpoint is preferred, the busy one fails and the other answers.
-    const r = await ask(id);
-    expect(r.text).toContain('第4段');
-    const rows = db.prepare('SELECT status FROM llm_calls WHERE job_id = ? ORDER BY id').all(id) as any[];
-    expect(rows.map((x) => x.status).at(-1)).toBe('ok');
     const { jobStats } = await import('../src/calls.js');
-    expect(jobStats(db, [id]).get(id)!.failedCalls).toBe(rows.length - 1);
+    let failures = 0;
+    // Users prefer different endpoints; whichever is tried first, the busy one fails and the other answers.
+    for (let user = 1; user <= 6; user++) {
+      const id = newJob();
+      const r = await ask(id, undefined, user);
+      expect(r.text).toContain('第4段');
+      const rows = db.prepare('SELECT status, prompt_tokens, estimated FROM llm_calls WHERE job_id = ? ORDER BY id').all(id) as any[];
+      expect(rows.map((x) => x.status).at(-1)).toBe('ok');
+      // Rejected before any output: the model processed nothing.
+      for (const f of rows.filter((x) => x.status === 'error')) expect(f).toMatchObject({ prompt_tokens: 0, estimated: 0 });
+      expect(jobStats(db, [id]).get(id)!.failedCalls).toBe(rows.length - 1);
+      failures += rows.length - 1;
+    }
+    expect(failures).toBeGreaterThan(0);
   });
 
   it('a queued request can be cancelled and frees nothing it did not take', async () => {
