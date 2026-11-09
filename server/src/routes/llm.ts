@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type { DB } from '../db.js';
 import { getSettings, setSettings } from '../db.js';
 import { HttpError, requireAdmin, requireUser } from '../auth.js';
-import { callTimeouts, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, type Endpoint } from '../llm.js';
+import { callTimeouts, inflightCount, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, type Endpoint } from '../llm.js';
+import { SPEED_SQL, tokensPerSec } from '../calls.js';
 
 const maskKey = (k: string) => (k.length <= 10 ? '****' : `${k.slice(0, 6)}…${k.slice(-4)}`);
 
@@ -15,6 +16,8 @@ const publicEndpoint = (e: Endpoint) => ({
   weight: e.weight,
   enabled: !!e.enabled,
   extraBody: e.extra_body,
+  maxConcurrency: e.max_concurrency ?? 0,
+  inflight: inflightCount(e.id),
   lastTestAt: e.last_test_at,
   lastTestOk: e.last_test_ok === null ? null : !!e.last_test_ok,
   lastTestMessage: e.last_test_message,
@@ -38,6 +41,7 @@ function validate(body: any, partial: boolean) {
   else if (!partial) throw new HttpError(400, 'API Token 不能为空');
   if (body.weight !== undefined) out.weight = Math.max(1, Math.min(100, Number(body.weight) || 1));
   if (body.enabled !== undefined) out.enabled = body.enabled ? 1 : 0;
+  if (body.maxConcurrency !== undefined) out.maxConcurrency = Math.max(0, Math.min(64, Math.floor(Number(body.maxConcurrency)) || 0));
   if (body.extraBody !== undefined) {
     const raw = String(body.extraBody || '{}').trim() || '{}';
     try {
@@ -64,10 +68,10 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     const v = validate(req.body ?? {}, false);
     const r = db
       .prepare(
-        `INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, enabled, extra_body, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, enabled, extra_body, max_concurrency, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(v.name, v.baseUrl, v.apiKey, v.model, v.weight ?? 1, v.enabled ?? 1, v.extraBody ?? '{}', Date.now());
+      .run(v.name, v.baseUrl, v.apiKey, v.model, v.weight ?? 1, v.enabled ?? 1, v.extraBody ?? '{}', v.maxConcurrency ?? 0, Date.now());
     return { endpoint: publicEndpoint(db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(r.lastInsertRowid) as Endpoint) };
   });
 
@@ -84,6 +88,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       weight: 'weight',
       enabled: 'enabled',
       extraBody: 'extra_body',
+      maxConcurrency: 'max_concurrency',
     };
     const entries = Object.entries(v);
     if (entries.length) {
@@ -134,6 +139,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       weight: 1,
       enabled: 1,
       extra_body: String(v.extraBody ?? '{}'),
+      max_concurrency: 0,
       last_test_at: null,
       last_test_ok: null,
       last_test_message: null,
@@ -164,8 +170,44 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
          FROM jobs j LEFT JOIN users u ON u.id = j.user_id LEFT JOIN llm_endpoints e ON e.id = j.endpoint_id
          WHERE j.endpoint_id IS NOT NULL GROUP BY j.user_id, j.endpoint_id ORDER BY cost DESC`,
       )
-      .all();
-    return { usage: rows };
+      .all() as any[];
+    // Output speed comes from the recorded model calls (jobs from before the calls were recorded have none).
+    const speedRows = db
+      .prepare(
+        `SELECT u.username, e.name AS endpoint, ${SPEED_SQL}
+         FROM llm_calls c LEFT JOIN users u ON u.id = c.user_id LEFT JOIN llm_endpoints e ON e.id = c.endpoint_id
+         GROUP BY c.user_id, c.endpoint_id`,
+      )
+      .all() as any[];
+    const speed = new Map(speedRows.map((r) => [`${r.username}\u0000${r.endpoint}`, tokensPerSec(r.speed_tokens, r.speed_ms)]));
+    const models = (
+      db
+        .prepare(
+          `SELECT e.id, e.name, e.model, e.max_concurrency, COUNT(c.id) AS calls, SUM(c.status = 'error') AS failed,
+                  SUM(c.prompt_tokens) AS promptTokens, SUM(c.completion_tokens) AS completionTokens,
+                  AVG(CASE WHEN c.first_token_at IS NOT NULL THEN c.first_token_at - c.started_at END) AS firstTokenMs,
+                  AVG(c.queued_ms) AS queuedMs, ${SPEED_SQL}
+           FROM llm_endpoints e LEFT JOIN llm_calls c ON c.endpoint_id = e.id GROUP BY e.id ORDER BY e.id`,
+        )
+        .all() as any[]
+    ).map((r) => ({
+      endpointId: r.id,
+      endpoint: r.name,
+      model: r.model,
+      calls: r.calls,
+      failedCalls: r.failed ?? 0,
+      promptTokens: r.promptTokens ?? 0,
+      completionTokens: r.completionTokens ?? 0,
+      tokensPerSec: tokensPerSec(r.speed_tokens, r.speed_ms),
+      firstTokenMs: r.firstTokenMs === null ? null : Math.round(r.firstTokenMs),
+      queuedMs: r.queuedMs === null ? null : Math.round(r.queuedMs),
+      inflight: inflightCount(r.id),
+      maxConcurrency: r.max_concurrency ?? 0,
+    }));
+    return {
+      usage: rows.map((r) => ({ ...r, tokensPerSec: speed.get(`${r.username}\u0000${r.endpoint}`) ?? null })),
+      models,
+    };
   });
 
   app.get('/api/settings', async (req) => {

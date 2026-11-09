@@ -11,6 +11,7 @@ import {
   getProject,
   jobProgress,
   projectDoc,
+  retryJob,
   startEdit,
   startGeneration,
   withProjectLock,
@@ -22,6 +23,7 @@ import { renderImagePdf, renderPdf, renderPptx } from '../render.js';
 import { exportBundle } from '../bundle.js';
 import { answerQuestion, pendingQuestion, projectsAsking } from '../questions.js';
 import { cssFiles, fileTree, nameFiles } from '../files.js';
+import { jobDuration, jobStats, type JobStats } from '../calls.js';
 
 const MAX_README = 50_000;
 
@@ -32,7 +34,16 @@ function userNames(db: DB): Map<number, string> {
   return new Map(rows.map((r) => [r.id, r.display_name || r.username]));
 }
 
-function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boolean) {
+/** Running jobs per project, for the spinner on the dashboard. */
+function activeJobCounts(db: DB): Map<string, number> {
+  const rows = db.prepare(`SELECT project_id, COUNT(*) AS c FROM jobs WHERE status IN ('pending','running') GROUP BY project_id`).all() as {
+    project_id: string;
+    c: number;
+  }[];
+  return new Map(rows.map((r) => [r.project_id, r.c]));
+}
+
+function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boolean, busy?: Map<string, number>) {
   const doc = projectDoc(p);
   const meta = JSON.parse(p.meta || '{}');
   return {
@@ -49,6 +60,7 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
     height: doc?.height ?? 1080,
     firstPageId: doc?.pages[0]?.id ?? null,
     asking: projectsAsking().has(p.id),
+    busy: busy?.get(p.id) ?? 0,
     createdBy: p.created_by ? names.get(p.created_by) ?? null : null,
     updatedBy: p.updated_by ? names.get(p.updated_by) ?? null : null,
     createdAt: p.created_at,
@@ -57,7 +69,7 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
   };
 }
 
-function publicJob(j: JobRow) {
+function publicJob(j: JobRow, stats?: JobStats) {
   const progress = jobProgress.get(j.id);
   return {
     id: j.id,
@@ -74,11 +86,18 @@ function publicJob(j: JobRow) {
     review: j.review ? JSON.parse(j.review) : null,
     question: pendingQuestion(j.id) ?? null,
     questions: j.questions ? JSON.parse(j.questions) : [],
+    stats: stats ?? null,
+    durationMs: jobDuration(j),
+    finishedAt: j.finished_at ?? null,
+    retryOf: j.retry_of ?? null,
+    retriedBy: j.retried_by ?? null,
     userId: j.user_id,
     createdAt: j.created_at,
     updatedAt: j.updated_at,
   };
 }
+
+const withStats = (db: DB, j: JobRow) => publicJob(j, jobStats(db, [j.id]).get(j.id));
 
 const publicAsset = (db: DB, a: AssetRow) => {
   const slides = a.kind === 'document' ? slideAssets(db, a.id) : [];
@@ -128,7 +147,8 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
         : db.prepare('SELECT * FROM projects ORDER BY updated_at DESC').all()
     ) as ProjectRow[];
     const names = userNames(db);
-    return { projects: rows.map((p) => publicProject(p, names, false)) };
+    const busy = activeJobCounts(db);
+    return { projects: rows.map((p) => publicProject(p, names, false, busy)) };
   });
 
   /** Create a template or deck. Multipart: text fields + optional supporting files. */
@@ -317,7 +337,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     requireUser(req);
     const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get((req.params as any).id) as JobRow | undefined;
     if (!j) throw new HttpError(404, '任务不存在');
-    return { job: publicJob(j) };
+    return { job: withStats(db, j) };
   });
 
   app.post('/api/jobs/:id/answer', async (req) => {
@@ -333,7 +353,19 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       throw new HttpError(409, '这个问题已经回答过或已超时');
     }
     const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow;
-    return { job: publicJob(j) };
+    return { job: withStats(db, j) };
+  });
+
+  /** Any user may run a failed request again; it runs as theirs. */
+  app.post('/api/jobs/:id/retry', async (req) => {
+    const user = requireUser(req);
+    const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get((req.params as any).id) as JobRow | undefined;
+    if (!j) throw new HttpError(404, '任务不存在');
+    try {
+      return { job: publicJob(retryJob(db, j, user.id)) };
+    } catch (e) {
+      throw new HttpError(409, (e as Error).message);
+    }
   });
 
   app.get('/api/projects/:id/jobs', async (req) => {
@@ -346,7 +378,8 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
         : db.prepare('SELECT * FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 50').all(p.id)
     ) as JobRow[];
     const names = userNames(db);
-    return { jobs: rows.map((j) => ({ ...publicJob(j), userName: j.user_id ? names.get(j.user_id) ?? null : null })) };
+    const stats = jobStats(db, rows.map((j) => j.id));
+    return { jobs: rows.map((j) => ({ ...publicJob(j, stats.get(j.id)), userName: j.user_id ? names.get(j.user_id) ?? null : null })) };
   });
 
   const pageOp = (op: 'delete' | 'duplicate' | 'move') =>
@@ -382,12 +415,30 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     const rows = db
       .prepare(
         `SELECT v.id, v.version_no, v.user_id, v.action, v.scope, v.page_index, v.page_id, v.element_ids, v.prompt, v.summary, v.created_at,
-                u.username, u.display_name
-         FROM project_versions v LEFT JOIN users u ON u.id = v.user_id WHERE v.project_id = ? ORDER BY v.version_no DESC`,
+                u.username, u.display_name, j.id AS job_id, j.status AS job_status, j.created_at AS job_created, j.updated_at AS job_updated,
+                j.finished_at AS job_finished
+         FROM project_versions v LEFT JOIN users u ON u.id = v.user_id LEFT JOIN jobs j ON j.version_id = v.id
+         WHERE v.project_id = ? ORDER BY v.version_no DESC`,
       )
       .all(p.id) as any[];
+    const failed = db
+      .prepare(
+        `SELECT j.*, u.username, u.display_name FROM jobs j LEFT JOIN users u ON u.id = j.user_id
+         WHERE j.project_id = ? AND j.status = 'error' ORDER BY j.created_at DESC LIMIT 50`,
+      )
+      .all(p.id) as (JobRow & { username: string | null; display_name: string | null })[];
+    const stats = jobStats(db, [...rows.filter((r) => r.job_id).map((r) => r.job_id as string), ...failed.map((j) => j.id)]);
     return {
+      failedJobs: failed.map((j) => ({
+        ...publicJob(j, stats.get(j.id)),
+        userName: j.display_name || j.username || '（已删除用户）',
+      })),
       versions: rows.map((r) => ({
+        jobId: r.job_id ?? null,
+        durationMs: r.job_id
+          ? jobDuration({ status: r.job_status, created_at: r.job_created, updated_at: r.job_updated, finished_at: r.job_finished })
+          : null,
+        stats: r.job_id ? stats.get(r.job_id) ?? null : null,
         id: r.id,
         versionNo: r.version_no,
         userId: r.user_id,

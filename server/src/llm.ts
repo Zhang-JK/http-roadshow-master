@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
-import { compactHistory, DEFAULT_CONTEXT_TOKENS, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
+import { compactHistory, DEFAULT_CONTEXT_TOKENS, estimateTokens, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
+import { liveCalls, recordCall, type LiveCall } from './calls.js';
 
 export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
 export const DEFAULT_MAX_CALL_MINUTES = 120;
@@ -16,6 +17,8 @@ export interface Endpoint {
   weight: number;
   enabled: number;
   extra_body: string;
+  /** Requests sent to this endpoint at the same time (0 = no limit); more wait in our own queue. */
+  max_concurrency: number;
   last_test_at: number | null;
   last_test_ok: number | null;
   last_test_message: string | null;
@@ -55,6 +58,11 @@ export interface ChatOptions {
   allowEmpty?: boolean;
   /** The model's context window; max_tokens is reduced (and long input compacted) to fit it. */
   contextTokens?: number;
+  /** The job the call belongs to: the call is recorded and shown live. */
+  jobId?: string;
+  stage?: string;
+  /** Output so far (text, reasoning, tool arguments): characters and estimated tokens. */
+  onStream?: (p: { chars: number; tokens: number }) => void;
 }
 
 export interface ChatResult {
@@ -66,6 +74,8 @@ export interface ChatResult {
   cost?: number;
   finishReason?: string;
   toolCalls?: ToolCall[];
+  /** When the first output (text, reasoning or tool call) arrived. */
+  firstTokenAt?: number;
 }
 
 export class LlmError extends Error {
@@ -218,7 +228,14 @@ async function readStream(ep: Endpoint, res: Response, result: ChatResult, opts:
   const decoder = new TextDecoder();
   let buf = '';
   let reasoningChars = 0;
+  let toolChars = 0;
+  let tokens = 0;
   const calls: ToolCall[] = [];
+  const out = (chunk: string) => {
+    if (!chunk) return;
+    result.firstTokenAt ??= Date.now();
+    tokens += estimateTokens(chunk);
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -238,12 +255,14 @@ async function readStream(ep: Endpoint, res: Response, result: ChatResult, opts:
       }
       if (data.error) throw new LlmError(`接入点 ${ep.name} 流式错误: ${JSON.stringify(data.error).slice(0, 500)}`, true);
       const reasoning = data.choices?.[0]?.delta?.reasoning ?? data.choices?.[0]?.delta?.reasoning_content;
-      if (reasoning && opts.onReasoning) {
+      if (reasoning) {
+        out(reasoning);
         reasoningChars += reasoning.length;
-        opts.onReasoning(reasoningChars);
+        opts.onReasoning?.(reasoningChars);
       }
       const delta = data.choices?.[0]?.delta?.content;
       if (delta) {
+        out(delta);
         result.text += delta;
         opts.onDelta!(delta, result.text.length);
       }
@@ -251,14 +270,22 @@ async function readStream(ep: Endpoint, res: Response, result: ChatResult, opts:
         const i = typeof tc.index === 'number' ? tc.index : calls.length;
         const c = (calls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
         if (tc.id) c.id = tc.id;
-        if (tc.function?.name) c.function.name += tc.function.name;
-        if (tc.function?.arguments) c.function.arguments += tc.function.arguments;
+        if (tc.function?.name) {
+          out(tc.function.name);
+          c.function.name += tc.function.name;
+        }
+        if (tc.function?.arguments) {
+          out(tc.function.arguments);
+          toolChars += tc.function.arguments.length;
+          c.function.arguments += tc.function.arguments;
+        }
       }
       const fr = data.choices?.[0]?.finish_reason;
       if (fr) result.finishReason = fr;
       if (data.usage) applyUsage(result, data.usage);
     }
-    onData(result.text.length + reasoningChars);
+    onData(result.text.length + reasoningChars + toolChars);
+    if (tokens) opts.onStream?.({ chars: result.text.length + reasoningChars + toolChars, tokens });
   }
   const toolCalls = calls.filter((c) => c && c.function.name);
   if (toolCalls.length) {
@@ -292,6 +319,55 @@ function applyUsage(result: ChatResult, usage: any) {
   if (typeof usage.cost === 'number') result.cost = usage.cost;
 }
 
+/** Requests in flight per endpoint, and jobs waiting for a free slot. */
+const inflight = new Map<number, number>();
+const waiters = new Set<() => void>();
+
+export function inflightCount(endpointId: number): number {
+  return inflight.get(endpointId) ?? 0;
+}
+
+function release(endpointId: number) {
+  inflight.set(endpointId, Math.max(0, inflightCount(endpointId) - 1));
+  for (const w of [...waiters]) w();
+}
+
+/**
+ * The endpoint for one call. Requests run in parallel across endpoints: the user's preferred
+ * endpoint (rendezvous hashing, which keeps the prompt cache warm) is used while it is idle;
+ * otherwise the least loaded endpoint (relative to its weight) with a free slot. When every endpoint
+ * is at its parallel limit the call waits here, before any timeout starts, until a slot frees up.
+ */
+async function acquireEndpoint(
+  candidates: Endpoint[],
+  signal: AbortSignal | undefined,
+  onQueue: () => void,
+): Promise<Endpoint> {
+  for (;;) {
+    const free = candidates.filter((ep) => !ep.max_concurrency || inflightCount(ep.id) < ep.max_concurrency);
+    if (free.length) {
+      const load = (ep: Endpoint) => inflightCount(ep.id) / Math.max(ep.weight, 0.0001);
+      const ep = inflightCount(free[0].id) === 0 ? free[0] : free.reduce((best, e) => (load(e) < load(best) ? e : best), free[0]);
+      inflight.set(ep.id, inflightCount(ep.id) + 1);
+      return ep;
+    }
+    onQueue();
+    await new Promise<void>((resolve, reject) => {
+      const wake = () => {
+        waiters.delete(wake);
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      };
+      const abort = () => {
+        waiters.delete(wake);
+        reject(signal!.reason ?? new Error('已取消'));
+      };
+      waiters.add(wake);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+  }
+}
+
 export async function chat(db: DB, userId: number, messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResult> {
   const endpoints = listEnabledEndpoints(db);
   if (!endpoints.length) throw new LlmError('尚未配置任何可用的大模型接入点，请联系管理员在「模型接入」中添加', false);
@@ -303,24 +379,77 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   if (requestTokens(messages, opts.tools) > budget) messages = compactHistory(messages, budget, { tools: opts.tools }).messages;
   const fitted: ChatOptions = { ...opts, maxTokens: fitMaxTokens(ctx, requestTokens(messages, opts.tools), opts.maxTokens) };
   const errors: string[] = [];
-  for (const ep of ranked) {
+  const tried = new Set<number>();
+  const jobId = opts.jobId;
+  while (tried.size < ranked.length) {
+    const queuedAt = Date.now();
+    const ep = await acquireEndpoint(
+      ranked.filter((e) => !tried.has(e.id)),
+      opts.signal,
+      () => {
+        if (jobId && !liveCalls.get(jobId)?.queuedSince) {
+          liveCalls.set(jobId, { endpointId: 0, endpointName: '', model: '', stage: opts.stage, queuedSince: queuedAt, tokens: 0 });
+        }
+      },
+    );
+    tried.add(ep.id);
     let o = fitted;
     let msgs = messages;
     let err: unknown;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await chatWithEndpoint(ep, msgs, userKey, o);
-      } catch (e) {
-        // Too long for this endpoint's model: ask for less output, and shrink the input as well.
-        if (isContextError(e) && attempt < 3) {
-          const out = Math.max(MIN_OUTPUT_TOKENS, Math.floor((o.maxTokens ?? 32_000) / 2));
-          msgs = compactHistory(msgs, Math.floor(requestTokens(msgs, o.tools) * 0.8), { tools: o.tools }).messages;
-          o = { ...o, maxTokens: out };
-          continue;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const startedAt = Date.now();
+        const live = { endpointId: ep.id, endpointName: ep.name, model: ep.model, stage: opts.stage, startedAt, tokens: 0 } as LiveCall;
+        if (jobId) liveCalls.set(jobId, live);
+        const record = (r: Partial<ChatResult>, e?: unknown) => {
+          if (!jobId) return;
+          const outText = (r.text ?? '') + (r.toolCalls ?? []).map((c) => c.function.name + c.function.arguments).join('');
+          const estimated = r.completionTokens === undefined || r.promptTokens === undefined;
+          recordCall(db, {
+            jobId,
+            userId,
+            endpointId: ep.id,
+            model: ep.model,
+            stage: opts.stage,
+            queuedMs: attempt ? 0 : startedAt - queuedAt,
+            startedAt,
+            firstTokenAt: r.firstTokenAt ?? live.firstTokenAt,
+            endedAt: Date.now(),
+            promptTokens: r.promptTokens ?? requestTokens(msgs, o.tools),
+            completionTokens: r.completionTokens ?? (e ? live.tokens : estimateTokens(outText)),
+            estimated,
+            status: e ? 'error' : 'ok',
+            error: e ? (e as Error).message : undefined,
+          });
+        };
+        const tracked: ChatOptions = {
+          ...o,
+          onStream: (p) => {
+            live.firstTokenAt ??= Date.now();
+            live.tokens = p.tokens;
+            o.onStream?.(p);
+          },
+        };
+        try {
+          const r = await chatWithEndpoint(ep, msgs, userKey, tracked);
+          record(r);
+          return r;
+        } catch (e) {
+          record({}, e);
+          // Too long for this endpoint's model: ask for less output, and shrink the input as well.
+          if (isContextError(e) && attempt < 3) {
+            const out = Math.max(MIN_OUTPUT_TOKENS, Math.floor((o.maxTokens ?? 32_000) / 2));
+            msgs = compactHistory(msgs, Math.floor(requestTokens(msgs, o.tools) * 0.8), { tools: o.tools }).messages;
+            o = { ...o, maxTokens: out };
+            continue;
+          }
+          err = e;
+          break;
         }
-        err = e;
-        break;
       }
+    } finally {
+      if (jobId) liveCalls.delete(jobId);
+      release(ep.id);
     }
     errors.push((err as Error).message);
     if (err instanceof LlmError && !err.retryable) break;

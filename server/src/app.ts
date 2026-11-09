@@ -10,6 +10,7 @@ import { HttpError, SESSION_COOKIE, userFromToken } from './auth.js';
 import { authRoutes } from './routes/auth.js';
 import { llmRoutes } from './routes/llm.js';
 import { projectRoutes } from './routes/projects.js';
+import { sessionRoutes } from './routes/sessions.js';
 import { systemRoutes } from './routes/system.js';
 import { versionInfo } from './system.js';
 
@@ -32,6 +33,7 @@ export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: bool
   authRoutes(app, db);
   llmRoutes(app, db);
   projectRoutes(app, db);
+  sessionRoutes(app, db);
   systemRoutes(app);
 
   if (opts.serveWeb !== false && fs.existsSync(config.webDist)) {

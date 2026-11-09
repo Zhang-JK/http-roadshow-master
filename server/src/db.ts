@@ -113,6 +113,32 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE jobs ADD COLUMN questions TEXT;
   `,
+  `
+  CREATE TABLE llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
+    user_id INTEGER,
+    endpoint_id INTEGER,
+    model TEXT,
+    stage TEXT,
+    queued_ms INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    first_token_at INTEGER,
+    ended_at INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    estimated INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    error TEXT
+  );
+  CREATE INDEX idx_llm_calls_job ON llm_calls(job_id);
+  CREATE INDEX idx_llm_calls_endpoint ON llm_calls(endpoint_id, started_at);
+  ALTER TABLE llm_endpoints ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE jobs ADD COLUMN finished_at INTEGER;
+  ALTER TABLE jobs ADD COLUMN retry_of TEXT;
+  ALTER TABLE jobs ADD COLUMN retried_by TEXT;
+  CREATE INDEX idx_jobs_status ON jobs(status, created_at);
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {
@@ -132,7 +158,7 @@ export function openDb(file = config.dbFile): DB {
   });
   ensureAdmin(db);
   // Jobs interrupted by a restart can never finish.
-  db.prepare(`UPDATE jobs SET status='error', error='服务重启，任务中断' WHERE status IN ('pending','running')`).run();
+  db.prepare(`UPDATE jobs SET status='error', error='服务重启，任务中断', finished_at=updated_at WHERE status IN ('pending','running')`).run();
   db.prepare(`UPDATE projects SET status='error', error='服务重启，生成中断' WHERE status='generating'`).run();
   return db;
 }

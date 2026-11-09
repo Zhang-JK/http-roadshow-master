@@ -60,6 +60,9 @@ export interface JobRow {
   completion_tokens: number | null;
   cost: number | null;
   review: string | null;
+  finished_at?: number | null;
+  retry_of?: string | null;
+  retried_by?: string | null;
   /** Questions the model asked the user during the job, with the answers (QaEntry[]). */
   questions: string | null;
   created_at: number;
@@ -162,6 +165,9 @@ function createJob(db: DB, projectId: string, userId: number, kind: JobRow['kind
     cost: null,
     review: null,
     questions: null,
+    finished_at: null,
+    retry_of: null,
+    retried_by: null,
     created_at: now,
     updated_at: now,
   };
@@ -173,6 +179,7 @@ function createJob(db: DB, projectId: string, userId: number, kind: JobRow['kind
 }
 
 function updateJob(db: DB, id: string, patch: Partial<JobRow>) {
+  if ((patch.status === 'done' || patch.status === 'error') && patch.finished_at === undefined) patch = { ...patch, finished_at: Date.now() };
   const keys = Object.keys(patch);
   if (!keys.length) return;
   db.prepare(`UPDATE jobs SET ${keys.map((k) => `${k} = @${k}`).join(', ')}, updated_at = @updated_at WHERE id = @id`).run({
@@ -323,6 +330,8 @@ async function selfReview(
     onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
     onStage: (stage) => jobProgress.set(jobId, { chars: 0, stage }),
     onUsage: (u) => recordUsage(db, jobId, u),
+    jobId,
+    stage: '自检与交付检查',
     skipIfClean,
     layoutReview: !!settings.selfCheck,
   });
@@ -335,6 +344,8 @@ async function runStep(db: DB, jobId: string, userId: number, messages: ChatMess
   const settings = getSettings(db);
   jobProgress.set(jobId, { chars: 0, stage });
   const opts = {
+    jobId,
+    stage,
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
     onDelta: (_c: string, total: number) => jobProgress.set(jobId, { chars: total, stage }),
@@ -384,6 +395,8 @@ async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft
   const tools = combineTools(createDraftTools(draft, makeAssetResolver(db), db), fileTools, askTools);
   jobProgress.set(jobId, { chars: 0, stage: '模型修改中' });
   const r = await chatWithTools(db, userId, messages, {
+    jobId,
+    stage: '修改',
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
     onDelta: (_c, total) => jobProgress.set(jobId, { chars: total, stage: '模型修改中' }),
@@ -633,6 +646,32 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
     }
   })();
   return job;
+}
+
+/** Runs a failed request again as a new job of `userId`; each failed job is retried at most once. */
+export function retryJob(db: DB, failed: JobRow, userId: number): JobRow {
+  if (failed.status !== 'error') throw new Error('只有失败的请求可以重试');
+  if (failed.retried_by) throw new Error('这个请求已经重试过了');
+  const project = getProject(db, failed.project_id);
+  if (!project) throw new Error('项目不存在');
+  let job: JobRow;
+  if (failed.kind === 'create') {
+    if (project.version_no > 0) throw new Error('项目已生成，请通过修改对话框进行调整');
+    if (project.status === 'generating') throw new Error('正在生成中');
+    job = startGeneration(db, project.id, userId);
+  } else {
+    const req = JSON.parse(failed.request || '{}') as EditInput;
+    job = startEdit(db, project.id, userId, {
+      prompt: String(req.prompt ?? ''),
+      scope: req.scope ?? 'global',
+      pageId: req.pageId,
+      elementIds: req.elementIds ?? [],
+      attachmentIds: req.attachmentIds ?? [],
+    });
+  }
+  db.prepare('UPDATE jobs SET retry_of = ? WHERE id = ?').run(failed.id, job.id);
+  db.prepare('UPDATE jobs SET retried_by = ? WHERE id = ?').run(job.id, failed.id);
+  return db.prepare('SELECT * FROM jobs WHERE id = ?').get(job.id) as JobRow;
 }
 
 export function applyManual(
