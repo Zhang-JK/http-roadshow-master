@@ -271,6 +271,7 @@ describe('mcp tools through the SDK client', () => {
     }
     expect(status).toMatchObject({ projectId, status: 'ready', pageCount: 3, size: '1920×1080' });
     expect(status.pages.map((x: any) => x.page)).toEqual([1, 2, 3]);
+    expect(status.pages[0]).toEqual({ page: 1, file: expect.stringMatching(/^pages\/.+\.html$/), title: '第1页标题' });
     expect(Object.keys(status.downloads)).toEqual(['html', 'pdf', 'pdf-image', 'pptx', 'zip']);
 
     const calls = mock.calls.slice(before);
