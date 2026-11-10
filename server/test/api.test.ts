@@ -103,7 +103,7 @@ describe('auth & users', () => {
     expect((await req('GET', '/api/llm/endpoints', aliceCookie)).status).toBe(403);
     expect((await req('POST', '/api/llm/endpoints', aliceCookie, {})).status).toBe(403);
     expect((await req('PUT', '/api/settings', aliceCookie, { maxTokens: 5 })).status).toBe(403);
-    expect((await req('GET', '/api/users', aliceCookie)).json.users).toHaveLength(2);
+    expect((await req('GET', '/api/users', aliceCookie)).json.users.map((u: any) => u.username)).toEqual(['admin', 'mcp', 'alice']);
   });
 
   it('password change, admin reset (invalidates sessions) and delete', async () => {

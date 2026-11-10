@@ -12,6 +12,7 @@ import { llmRoutes } from './routes/llm.js';
 import { projectRoutes } from './routes/projects.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { systemRoutes } from './routes/system.js';
+import { mcpRoutes } from './mcp.js';
 import { versionInfo } from './system.js';
 
 export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: boolean } = {}) {
@@ -35,11 +36,13 @@ export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: bool
   projectRoutes(app, db);
   sessionRoutes(app, db);
   systemRoutes(app);
+  await mcpRoutes(app, db);
 
   if (opts.serveWeb !== false && fs.existsSync(config.webDist)) {
     await app.register(fastifyStatic, { root: config.webDist, prefix: '/' });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) return reply.status(404).send({ error: '接口不存在' });
+      // MCP clients probe /.well-known for OAuth metadata; the SPA page would look like a broken answer.
+      if (/^\/(api|mcp|\.well-known)(\/|\?|$)/.test(req.url)) return reply.status(404).send({ error: '接口不存在' });
       return reply.type('text/html').send(fs.readFileSync(path.join(config.webDist, 'index.html')));
     });
   }

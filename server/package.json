@@ -30,6 +30,7 @@
     "undici": "^7.30.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.6",

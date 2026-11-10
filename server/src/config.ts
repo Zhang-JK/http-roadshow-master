@@ -32,6 +32,8 @@ export const config = {
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
   chromePath: findChrome(),
   appRoot,
+  /** Origin used in links handed to MCP clients; defaults to the request's Host. */
+  publicUrl: process.env.PUBLIC_URL?.replace(/\/+$/, '') || undefined,
   /** Set by deploy.sh; when absent the app was not installed by the deploy tool and cannot self-update. */
   baseDir: process.env.RS_BASE_DIR,
   runDir: process.env.RS_RUN_DIR,

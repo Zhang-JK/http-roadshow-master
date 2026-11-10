@@ -58,6 +58,35 @@ export function requireAdmin(req: FastifyRequest): SessionUser {
   return u;
 }
 
+export const hashToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
+
+/** A new API token for a service account: shown once, only its hash and last characters are kept. */
+export function issueToken(db: DB, userId: number): string {
+  const token = `rs_mcp_${crypto.randomBytes(24).toString('base64url')}`;
+  db.prepare('UPDATE users SET token_hash = ?, token_hint = ?, token_created_at = ? WHERE id = ?').run(hashToken(token), token.slice(-4), Date.now(), userId);
+  return token;
+}
+
+export interface ServiceUser extends SessionUser {
+  mcp_enabled: number;
+}
+
+/** The service account a `Authorization: Bearer <token>` header belongs to. */
+export function serviceUserFromRequest(db: DB, req: FastifyRequest): ServiceUser | undefined {
+  const m = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? '');
+  if (!m) return undefined;
+  return db
+    .prepare('SELECT id, username, display_name, is_admin, mcp_enabled FROM users WHERE is_service = 1 AND token_hash = ?')
+    .get(hashToken(m[1])) as ServiceUser | undefined;
+}
+
+export function requireMcpCaller(db: DB, req: FastifyRequest): ServiceUser {
+  const svc = serviceUserFromRequest(db, req);
+  if (!svc) throw new HttpError(401, req.headers.authorization ? 'MCP 令牌无效或已被撤销' : '缺少 MCP 令牌（Authorization: Bearer …）');
+  if (!svc.mcp_enabled) throw new HttpError(403, '管理员未开启「允许 MCP 请求」');
+  return svc;
+}
+
 export function setSessionCookie(reply: FastifyReply, token: string) {
   reply.setCookie(SESSION_COOKIE, token, {
     path: '/',
