@@ -235,7 +235,7 @@ export function ModelsPage() {
       <div className="table-card">
         <table className="table">
           <thead>
-            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th>权重</th><th title="正在处理的请求 / 并发上限">并发</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
+            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th className="nowrap">权重</th><th title="正在处理的请求 / 并发上限">并发</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
           </thead>
           <tbody>
             {endpoints.length === 0 && (
@@ -249,10 +249,10 @@ export function ModelsPage() {
                   {ep.baseUrl}
                   {!ep.useProxy && <> <span className="tag" title="不经过系统代理，直接连接接入地址" data-testid="endpoint-direct">直连</span></>}
                 </td>
-                <td><code>{ep.apiKeyMasked}</code></td>
+                <td className="nowrap"><code>{ep.apiKeyMasked}</code></td>
                 <td>{ep.weight}</td>
                 <td className="nowrap" data-testid="endpoint-concurrency">{ep.inflight} / {ep.maxConcurrency || '不限'}</td>
-                <td>
+                <td className="nowrap">
                   <label className="switch">
                     <input type="checkbox" checked={ep.enabled} onChange={() => toggle(ep)} />
                     <span>{ep.enabled ? '启用' : '停用'}</span>
