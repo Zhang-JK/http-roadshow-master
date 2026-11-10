@@ -123,10 +123,10 @@ describe('proxy settings from the environment', () => {
     const servers = [model, proxy];
     await Promise.all(servers.map((s) => new Promise<void>((r) => s.listen(0, '127.0.0.1', r))));
     const modelUrl = `http://127.0.0.1:${(model.address() as AddressInfo).port}/v1`;
-    const ep = (useProxy: number) => ({
+    const ep = (useProxy: number, baseUrl = modelUrl) => ({
       id: 0,
       name: '本地模型',
-      base_url: modelUrl,
+      base_url: baseUrl,
       api_key: 'k',
       model: 'local',
       weight: 1,
@@ -141,13 +141,25 @@ describe('proxy settings from the environment', () => {
     });
     const hi = [{ role: 'user' as const, content: 'hi' }];
     try {
-      setEnv({ HTTP_PROXY: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}` });
+      const proxyUrl = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+      setEnv({ HTTP_PROXY: proxyUrl });
       setupProxy();
-      await expect(chatWithEndpoint(ep(1), hi, 'u')).rejects.toThrow(/无法连接接入点 本地模型|HTTP 502/);
+      const viaProxy = await chatWithEndpoint(ep(1), hi, 'u').catch((e: Error) => e);
+      expect(String(viaProxy)).toMatch(/无法连接接入点 本地模型|HTTP 502/);
+      expect(String(viaProxy)).toContain(`请求经过系统代理 ${proxyUrl}；模型部署在本机或内网、代理访问不到时，请在「模型接入」中关闭这个接入点的「使用系统代理」`);
       expect(seen).toHaveLength(1);
       expect(seen[0]).toContain(new URL(modelUrl).host);
       expect((await chatWithEndpoint(ep(0), hi, 'u')).text).toBe('local model');
       expect(seen).toHaveLength(1);
+
+      // A local model that is not running: the direct connection error says why.
+      const closed = http.createServer();
+      await new Promise<void>((r) => closed.listen(0, '127.0.0.1', r));
+      const closedUrl = `http://127.0.0.1:${(closed.address() as AddressInfo).port}/v1`;
+      await new Promise((r) => closed.close(r));
+      const down = await chatWithEndpoint(ep(0, closedUrl), hi, 'u').catch((e: Error) => e);
+      expect(String(down)).toMatch(/无法连接接入点 本地模型: fetch failed（.*ECONNREFUSED.*）$/);
+      expect(String(down)).not.toContain('系统代理');
     } finally {
       setGlobalDispatcher(new Agent());
       for (const s of servers) {

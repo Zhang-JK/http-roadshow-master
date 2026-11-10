@@ -4,7 +4,7 @@ import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
 import { compactHistory, DEFAULT_CONTEXT_TOKENS, estimateTokens, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
 import { liveCalls, recordCall, type LiveCall } from './calls.js';
-import { directDispatcher } from './proxy.js';
+import { activeProxy, directDispatcher } from './proxy.js';
 
 export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
 export const DEFAULT_MAX_CALL_MINUTES = 120;
@@ -191,7 +191,14 @@ export async function chatWithEndpoint(
         ...(ep.use_proxy === 0 ? { dispatcher: directDispatcher() } : {}),
       } as RequestInit);
     } catch (e) {
-      throw failure(e, `无法连接接入点 ${ep.name}`);
+      const err = failure(e, `无法连接接入点 ${ep.name}`);
+      if (err instanceof LlmError && !timedOut) {
+        const proxy = ep.use_proxy !== 0 && activeProxy();
+        const cause = (e as { cause?: Error }).cause?.message;
+        if (proxy) err.message += `。请求经过系统代理 ${proxy}；模型部署在本机或内网、代理访问不到时，请在「模型接入」中关闭这个接入点的「使用系统代理」`;
+        else if (cause) err.message += `（${cause}）`;
+      }
+      throw err;
     }
     alive();
     if (!res.ok) {
