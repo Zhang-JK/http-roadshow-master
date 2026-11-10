@@ -625,6 +625,47 @@ test('model access page shows usage with output speed above the user assignments
   await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 2');
 });
 
+test('an endpoint can bypass the system proxy; the parallel test sends up to 5 requests at once and sets the limit', async () => {
+  const row = page.locator('[data-testid=endpoint-row]').first();
+  await row.locator('button:has-text("编辑")').click();
+  await expect(page.locator('[data-testid=ep-use-proxy]')).toBeChecked();
+  await expect(page.locator('[data-testid=proxy-hint]')).toContainText('服务器未配置系统代理');
+  await page.click('.modal button:has-text("取消")');
+
+  // As if the server ran behind a proxy: a local model address gets a warning until the endpoint connects directly.
+  const list = '**/api/llm/endpoints';
+  await page.route(list, async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), systemProxy: 'http://***@proxy.corp:8080' } });
+  });
+  await page.reload();
+  await row.locator('button:has-text("编辑")').click();
+  await expect(page.locator('[data-testid=proxy-hint]')).toContainText('经过代理 http://***@proxy.corp:8080');
+  await expect(page.locator('[data-testid=proxy-local-warning]')).toBeVisible();
+  await page.uncheck('[data-testid=ep-use-proxy]');
+  await expect(page.locator('[data-testid=proxy-local-warning]')).toHaveCount(0);
+  await page.click('[data-testid=save-endpoint]');
+  await expect(row.locator('[data-testid=endpoint-direct]')).toHaveText('直连');
+  await expect(page.locator('[data-testid=endpoint-direct]')).toHaveCount(1);
+  await page.unroute(list);
+
+  await row.locator('[data-testid=parallel-test]').click();
+  const dialog = page.locator('.modal:has-text("并发测试 · Mock LLM")');
+  await expect(dialog.locator('[data-testid=parallel-running]')).toBeVisible();
+  await expect(row.locator('[data-testid=parallel-test]')).toBeDisabled();
+  await expect(dialog.locator('[data-testid=parallel-result]')).toContainText('5 个请求都能同时处理', { timeout: 30_000 });
+  const levels = dialog.locator('[data-testid=parallel-level]');
+  await expect(levels).toHaveCount(5);
+  await expect(levels.nth(4)).toContainText('5 / 5');
+  await expect(levels.filter({ hasText: '✓ 并行' })).toHaveCount(5);
+  await expect(dialog).toContainText('当前并发上限：2');
+  await expect(dialog.locator('[data-testid=apply-parallel]')).toHaveText('将并发上限设为 不限');
+  await dialog.locator('[data-testid=apply-parallel]').click();
+  await expect(dialog).toHaveCount(0);
+  await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 不限');
+  await expect(row.locator('[data-testid=endpoint-direct]')).toHaveText('直连');
+});
+
 test('a model that never writes the style files: generation carries on and the delivery check has them written', async () => {
   await page.goto('/templates');
   await page.click('[data-testid=create-btn]');
