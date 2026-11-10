@@ -284,18 +284,18 @@ def demo_charts(out: Path) -> list[Path]:
         latency.write_bytes(bars_png([RESULTS[v]["p99"] for v in RESULTS], colors))
         throughput.write_bytes(bars_png([RESULTS[v]["qps"] for v in RESULTS], colors))
         return [latency, throughput]
+    x = range(len(LEVELS))
     fig, ax = plt.subplots(figsize=(9.6, 5.4), dpi=100)
     for version, color in zip(RESULTS, ("#94a3b8", "#2563eb")):
-        ax.plot(LEVELS, RESULTS[version]["p99"], marker="o", linewidth=2.5, color=color, label=f"{version} p99")
+        ax.plot(list(x), RESULTS[version]["p99"], marker="o", linewidth=2.5, color=color, label=f"{version} p99")
     ax.axhline(100, linestyle="--", color="#dc2626", label="SLA 100 ms")
-    ax.set(xscale="log", xlabel="Concurrent users", ylabel="p99 latency (ms)", title="p99 latency vs. concurrency")
-    ax.set_xticks(LEVELS, [str(v) for v in LEVELS])
+    ax.set_xticks(list(x), [str(v) for v in LEVELS])
+    ax.set(xlabel="Concurrent users", ylabel="p99 latency (ms)", title="p99 latency vs. concurrency")
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
     fig.savefig(latency)
     fig, ax = plt.subplots(figsize=(9.6, 5.4), dpi=100)
-    x = range(len(LEVELS))
     for i, (version, color) in enumerate(zip(RESULTS, ("#94a3b8", "#2563eb"))):
         ax.bar([p + (i - 0.5) * 0.38 for p in x], RESULTS[version]["qps"], width=0.38, color=color, label=version)
     ax.set_xticks(list(x), [str(v) for v in LEVELS])
