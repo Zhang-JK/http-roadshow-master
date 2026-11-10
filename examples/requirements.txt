@@ -1,0 +1,3 @@
+mcp>=1.10
+# Optional: nicer charts for --demo; without it the demo draws plain bar charts.
+matplotlib>=3.8
