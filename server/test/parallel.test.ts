@@ -20,15 +20,32 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *   limit-K   rejects requests beyond K with HTTP 429
  *   fail      always HTTP 503
  *   free-*    no limit
+ *   jitter    no limit, but the 6th request (one of the 3 sent together) waits 600 ms longer for its first
+ *             token, as hosted APIs sometimes do
+ *   count-*   no limit; really counts to the number asked for, 10 numbers every 30 ms
  */
 function startModels() {
   const active = new Map<string, number>();
   const waiting = new Map<string, (() => void)[]>();
   const peak = new Map<string, number>();
   const served = new Map<string, number>();
+  const counts = new Map<string, number[]>();
   const server = http.createServer(async (req, res) => {
-    for await (const _ of req);
+    let raw = '';
+    for await (const c of req) raw += c;
     const name = req.url!.split('/')[1];
+    if (name.startsWith('count-')) {
+      const to = Number(JSON.parse(raw).messages[0].content.match(/count from 1 to (\d+)/)[1]);
+      counts.set(name, [...(counts.get(name) ?? []), to]);
+      await sleep(20);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      for (let i = 1; i <= to; i += 10) {
+        const nums = Array.from({ length: Math.min(10, to - i + 1) }, (_, j) => i + j).join(' ');
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: `${nums} ` } }] })}\n\n`);
+        await sleep(30);
+      }
+      return void res.end('data: [DONE]\n\n');
+    }
     const [kind, k] = [name.split('-')[0], Number(name.split('-')[1])];
     const limited = kind === 'slots' || kind === 'early' || kind === 'limit';
     if (kind === 'fail') return void res.writeHead(503).end(JSON.stringify({ error: { message: 'down' } }));
@@ -41,6 +58,7 @@ function startModels() {
     else active.set(name, (active.get(name) ?? 0) + 1);
     peak.set(name, Math.max(peak.get(name) ?? 0, active.get(name)!));
     served.set(name, (served.get(name) ?? 0) + 1);
+    if (kind === 'jitter' && served.get(name) === 6) await sleep(600);
     await sleep(80);
     if (!res.headersSent) res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     for (let i = 0; i < 4; i++) {
@@ -53,7 +71,7 @@ function startModels() {
     if (next) next();
     else active.set(name, active.get(name)! - 1);
   });
-  return { server, peak, served };
+  return { server, peak, served, counts };
 }
 
 describe('parallel capacity test', () => {
@@ -80,10 +98,24 @@ describe('parallel capacity test', () => {
       .run(name, `${base}/${name}/v1`, maxConcurrency).lastInsertRowid;
     return db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(id) as Endpoint;
   };
-  const probe = async (ep: Endpoint) => {
+  const probe = async (ep: Endpoint, minGenerationMs?: number) => {
     const { testParallel } = await import('../src/llm.js');
-    return testParallel(ep, { idleTimeoutMs: 10_000, timeoutMs: 60_000 });
+    return testParallel(ep, { idleTimeoutMs: 10_000, timeoutMs: 60_000, minGenerationMs });
   };
+
+  it('lengthens the answer for fast endpoints, so that a late first token cannot pass for queueing', async () => {
+    // 100 numbers take ~300 ms: too short for a 900 ms minimum, so the model counts to ~300 (~900 ms).
+    const fast = await probe(endpoint('count-fast'), 900);
+    expect(fast).toMatchObject({ maxParallel: 5, suggested: 0 });
+    expect(fast.count).toBeGreaterThanOrEqual(300);
+    expect(fast.count).toBeLessThanOrEqual(400);
+    expect(models.counts.get('count-fast')).toEqual([100, ...Array(15).fill(fast.count)]);
+    expect(fast.levels[0].wallMs).toBeGreaterThanOrEqual(900);
+    // Long enough already: no extra request.
+    const slow = await probe(endpoint('count-slow'), 200);
+    expect(slow).toMatchObject({ maxParallel: 5, count: 100 });
+    expect(models.counts.get('count-slow')).toEqual(Array(15).fill(100));
+  });
 
   it.each([1, 2, 3, 4, 5])('finds an endpoint that answers %i requests at a time', async (k) => {
     const r = await probe(endpoint(`slots-${k}`));
@@ -93,20 +125,37 @@ describe('parallel capacity test', () => {
     const parallel = r.levels.slice(0, k);
     expect(parallel.map((l) => l.n)).toEqual([1, 2, 3, 4, 5].slice(0, k));
     for (const l of parallel) expect(l).toMatchObject({ ok: l.n, concurrent: l.n, queued: false, error: undefined });
+    for (const l of parallel) expect(l.rechecked).toBeUndefined();
     if (k < 5) {
-      // One more request than slots: all succeed, but the extra one only starts after another has finished.
+      // One more request than slots: all succeed, but the extra one only starts after another has finished, twice.
       expect(r.levels).toHaveLength(k + 1);
-      expect(r.levels[k]).toMatchObject({ n: k + 1, ok: k + 1, concurrent: k, queued: true });
+      expect(r.levels[k]).toMatchObject({ n: k + 1, ok: k + 1, concurrent: k, queued: true, rechecked: true });
       expect(r.levels[k].wallMs).toBeGreaterThanOrEqual(r.levels[0].wallMs * 1.5);
       expect(r.suggested).toBe(k);
+      expect(r.message).toContain('连续两次结果相同');
       expect(r.message).toContain(`建议把并发上限设为 ${k}`);
-      expect(models.served.get(`slots-${k}`)).toBe(((k + 1) * (k + 2)) / 2);
+      // Plus one single request at the start: it answered fast, so the test lengthened the answer.
+      expect(models.served.get(`slots-${k}`)).toBe(1 + (k * (k + 1)) / 2 + 2 * (k + 1));
     } else {
       expect(r.levels).toHaveLength(5);
       expect(r.suggested).toBe(0);
       expect(r.message).toContain('一般无需设置并发上限');
-      expect(models.served.get('slots-5')).toBe(15);
+      expect(models.served.get('slots-5')).toBe(1 + 15);
     }
+    expect(r.count).toBe(600);
+  });
+
+  it('runs a level again when one slow first token makes it look queued, and carries on when it was a fluke', async () => {
+    const r = await probe(endpoint('jitter'));
+    expect(r).toMatchObject({ maxParallel: 5, suggested: 0 });
+    expect(r.levels.map((l) => [l.n, l.concurrent, l.queued, !!l.rechecked])).toEqual([
+      [1, 1, false, false],
+      [2, 2, false, false],
+      [3, 3, false, true],
+      [4, 4, false, false],
+      [5, 5, false, false],
+    ]);
+    expect(models.served.get('jitter')).toBe(1 + 1 + 2 + 3 + 3 + 4 + 5);
   });
 
   it('detects queueing when the endpoint sends headers at once and only the tokens wait', async () => {
@@ -141,7 +190,7 @@ describe('parallel capacity test', () => {
     expect(r).toMatchObject({ maxParallel: 5, suggested: 0, busy: 1 });
     expect(r.levels.map((l) => [l.n, l.concurrent])).toEqual([[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]]);
     expect(models.peak.get('free-a')).toBe(5);
-    expect(models.served.get('free-a')).toBe(16);
+    expect(models.served.get('free-a')).toBe(1 + 1 + 15);
     expect(inflightCount(ep.id)).toBe(0);
   });
 
@@ -210,7 +259,7 @@ describe('endpoint network options over the API', () => {
     ]);
     expect(b.status).toBe(409);
     expect(a.status).toBe(200);
-    expect(a.json.result).toMatchObject({ maxParallel: 5, suggested: 0, busy: 0 });
+    expect(a.json.result).toMatchObject({ maxParallel: 5, suggested: 0, busy: 0, count: 600 });
     expect(a.json.result.levels.map((l: any) => [l.n, l.ok, l.concurrent, l.queued])).toEqual([
       [1, 1, 1, false],
       [2, 2, 2, false],

@@ -658,6 +658,8 @@ test('an endpoint can bypass the system proxy; the parallel test sends up to 5 r
   await expect(levels).toHaveCount(5);
   await expect(levels.nth(4)).toContainText('5 / 5');
   await expect(levels.filter({ hasText: '✓ 并行' })).toHaveCount(5);
+  // The mock answers in a moment, so the test lengthened the answer as far as it goes.
+  await expect(dialog.locator('[data-testid=parallel-count]')).toHaveText('每个请求让模型从 1 数到 600');
   await expect(dialog).toContainText('当前并发上限：2');
   await expect(dialog.locator('[data-testid=apply-parallel]')).toHaveText('将并发上限设为 不限');
   await dialog.locator('[data-testid=apply-parallel]').click();

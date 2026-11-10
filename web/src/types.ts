@@ -241,6 +241,8 @@ export interface ParallelLevel {
   ok: number;
   concurrent: number;
   queued: boolean;
+  /** Looked queued at first, so it was run again; the numbers are from the second run. */
+  rechecked?: boolean;
   wallMs: number;
   maxFirstTokenMs: number | null;
   error?: string;
@@ -253,4 +255,6 @@ export interface ParallelTestResult {
   levels: ParallelLevel[];
   message: string;
   busy: number;
+  /** Each request asked the model to count from 1 to this. */
+  count: number;
 }

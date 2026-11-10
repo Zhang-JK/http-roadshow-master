@@ -663,8 +663,10 @@ export interface ParallelLevel {
   ok: number;
   /** Requests that had started answering before the first one finished. */
   concurrent: number;
-  /** The endpoint answered some of the requests only after others had finished. */
+  /** The endpoint answered some of the requests only after others had finished, in two runs in a row. */
   queued: boolean;
+  /** The first run looked queued, so the level was run again (its numbers are from the second run). */
+  rechecked?: boolean;
   wallMs: number;
   /** Longest wait for a first token, from the moment the requests were sent. */
   maxFirstTokenMs: number | null;
@@ -680,26 +682,37 @@ export interface ParallelTestResult {
   message: string;
   /** Requests from running jobs on this endpoint when the test started (they skew the result). */
   busy: number;
+  /** Each request asked the model to count from 1 to this. */
+  count: number;
 }
 
-const PARALLEL_PROMPT = 'Parallel test: count from 1 to 100, separated by single spaces. Output only the numbers.';
+const PARALLEL_COUNT = 100;
+const PARALLEL_COUNT_MAX = 600;
 
 /**
  * Sends 1, 2, … up to `max` identical requests at once and stops at the first level where a request
  * fails or the endpoint queues them (a request only starts answering after another has finished,
  * and the level takes clearly longer than a single request). Bypasses the endpoint's parallel limit.
+ *
+ * Hosted APIs answer the short request fast while their first token sometimes takes a second or two
+ * longer than usual, which would look like queueing. So when a single request generates for less
+ * than `minGenerationMs` (or 4× its wait for the first token), the answer is lengthened, and a level
+ * that looks queued is run again: a fluke rarely repeats, real queueing always does.
  */
 export async function testParallel(
   ep: Endpoint,
-  opts: { idleTimeoutMs: number; timeoutMs: number; max?: number },
+  opts: { idleTimeoutMs: number; timeoutMs: number; max?: number; minGenerationMs?: number },
 ): Promise<ParallelTestResult> {
   const max = opts.max ?? PARALLEL_TEST_MAX;
+  const minGenerationMs = opts.minGenerationMs ?? 3000;
   const busy = inflightCount(ep.id);
   const levels: ParallelLevel[] = [];
+  let count = PARALLEL_COUNT;
   const one = async (sentAt: number, i: number) => {
     try {
-      const r = await chatWithEndpoint(ep, [{ role: 'user', content: PARALLEL_PROMPT }], `rs-parallel-test-${i}`, {
-        maxTokens: 2048,
+      const prompt = `Parallel test: count from 1 to ${count}, separated by single spaces. Output only the numbers.`;
+      const r = await chatWithEndpoint(ep, [{ role: 'user', content: prompt }], `rs-parallel-test-${i}`, {
+        maxTokens: Math.max(2048, count * 4),
         temperature: 0,
         onDelta: () => {},
         allowEmpty: true,
@@ -712,10 +725,7 @@ export async function testParallel(
       return { ok: false as const, error: (e as Error).message };
     }
   };
-  let maxParallel = 0;
-  let message = '';
-  let suggested: number | null = null;
-  for (let n = 1; n <= max; n++) {
+  const run = async (n: number): Promise<ParallelLevel> => {
     const sentAt = Date.now();
     const runs = await Promise.all(Array.from({ length: n }, (_, i) => one(sentAt, i)));
     const done = runs.flatMap((r) => (r.ok ? [r] : []));
@@ -723,7 +733,7 @@ export async function testParallel(
     const wallMs = Date.now() - sentAt;
     const concurrent = done.filter((r) => r.first <= firstEnd).length;
     const base = levels[0]?.wallMs ?? wallMs;
-    const level: ParallelLevel = {
+    return {
       n,
       ok: done.length,
       concurrent,
@@ -732,6 +742,24 @@ export async function testParallel(
       maxFirstTokenMs: done.length ? Math.max(...done.map((r) => r.first)) : null,
       error: runs.find((r) => !r.ok)?.error,
     };
+  };
+  let maxParallel = 0;
+  let message = '';
+  let suggested: number | null = null;
+  for (let n = 1; n <= max; n++) {
+    let level = await run(n);
+    if (n === 1 && level.ok) {
+      const first = level.maxFirstTokenMs!;
+      const want = Math.max(minGenerationMs, 4 * first);
+      const generated = level.wallMs - first;
+      if (generated < want) {
+        count = Math.min(PARALLEL_COUNT_MAX, Math.ceil((PARALLEL_COUNT * want) / Math.max(generated, 1) / 50) * 50);
+        level = await run(1);
+      }
+    }
+    if (level.queued) level = { ...(await run(n)), rechecked: true };
+    const { concurrent, wallMs } = level;
+    const base = levels[0]?.wallMs ?? wallMs;
     levels.push(level);
     if (level.ok < n) {
       suggested = maxParallel || null;
@@ -743,7 +771,7 @@ export async function testParallel(
     }
     if (level.queued) {
       suggested = maxParallel;
-      message = `同时发送 ${n} 个请求都成功了，但接入点同时只处理了 ${concurrent} 个，其余在服务端排队（用时是单个请求的 ${(wallMs / base).toFixed(1)} 倍）。建议把并发上限设为 ${maxParallel}，多出的请求在本地排队，不会因服务端排队触发无响应超时`;
+      message = `同时发送 ${n} 个请求都成功了，但接入点同时只处理了 ${concurrent} 个，其余在服务端排队（连续两次结果相同，用时是单个请求的 ${(wallMs / base).toFixed(1)} 倍）。建议把并发上限设为 ${maxParallel}，多出的请求在本地排队，不会因服务端排队触发无响应超时`;
       break;
     }
     maxParallel = n;
@@ -752,5 +780,5 @@ export async function testParallel(
     suggested = 0;
     message = `同时发送 ${max} 个请求都能并行处理（测试到 ${max} 个为止），一般无需设置并发上限`;
   }
-  return { maxParallel, suggested, levels, message, busy };
+  return { maxParallel, suggested, levels, message, busy, count };
 }

@@ -492,7 +492,7 @@ export function ModelsPage() {
             }
           >
             <p className="muted small">
-              依次同时发送 1、2 … {PARALLEL_MAX} 个相同的请求（让模型从 1 数到 100），每轮等全部请求完成再进行下一轮。某轮出现失败，或接入点要等前面的请求完成才开始回答后面的请求（服务端排队）时停止。测试请求不受「并发上限」限制，也不计入用量统计。
+              依次同时发送 1、2 … {PARALLEL_MAX} 个相同的请求（让模型从 1 开始数数），每轮等全部请求完成再进行下一轮。某轮出现失败，或接入点要等前面的请求完成才开始回答后面的请求（服务端排队）时停止。为免把偶尔偏慢的首 token 当成排队，输出很快的模型会数得更多（最多到 600），看起来在排队的一轮会复测一次。测试请求不受「并发上限」限制，也不计入用量统计。
             </p>
             {!r && !parallel.error && (
               <div className="parallel-running" data-testid="parallel-running"><span className="spinner tiny" />正在测试，取决于模型速度，可能需要几分钟…</div>
@@ -511,6 +511,7 @@ export function ModelsPage() {
                     测试开始时这个接入点上还有 {r.busy} 个生成任务的请求在运行，结果可能偏低，建议空闲时再测一次。
                   </div>
                 )}
+                <div className="muted small" style={{ marginTop: 10 }} data-testid="parallel-count">每个请求让模型从 1 数到 {r.count}</div>
                 <table className="table compact parallel-levels" data-testid="parallel-levels">
                   <thead>
                     <tr>
@@ -534,9 +535,11 @@ export function ModelsPage() {
                           {l.ok < l.n ? (
                             <span className="err-text" title={l.error}>✗ 失败</span>
                           ) : l.queued ? (
-                            <span className="warn-text">排队</span>
+                            <span className="warn-text" title="连续两次都有请求要等其他请求完成才开始输出">排队</span>
                           ) : (
-                            <span className="ok-text">✓ 并行</span>
+                            <span className="ok-text" title={l.rechecked ? '第一次像是在排队，复测时各请求同时输出（只是首 token 偶尔偏慢）' : undefined}>
+                              ✓ 并行{l.rechecked ? '（复测）' : ''}
+                            </span>
                           )}
                         </td>
                       </tr>
