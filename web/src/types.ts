@@ -4,6 +4,11 @@ export interface User {
   displayName: string;
   isAdmin: boolean;
   createdAt: number;
+  /** The MCP service account: signs in with a token, never with a password. */
+  isService?: boolean;
+  mcpEnabled?: boolean;
+  tokenHint?: string | null;
+  tokenCreatedAt?: number | null;
 }
 
 export interface DeckPage {

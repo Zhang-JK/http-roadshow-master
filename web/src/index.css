@@ -70,6 +70,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .badge-template { background: #ede9fe; color: #5b21b6; }
 .badge-deck { background: #dcfce7; color: #166534; }
 .badge-current { background: var(--primary-50); color: var(--primary); margin-left: 6px; }
+.badge-service { background: #e0f2fe; color: #075985; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
 .pill-busy { background: #fff7ed; color: #9a3412; }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #f97316; animation: pulse 1.2s infinite; }
@@ -202,6 +203,12 @@ textarea { resize: vertical; min-height: 40px; }
 .table.compact td, .table.compact th { padding: 6px 8px; font-size: 13px; }
 .usage-card { margin-top: 20px; overflow: auto; }
 .usage-card h4 { font-size: 13px; margin: 16px 0 4px; color: #3a4055; }
+.mcp-card { margin-top: 20px; }
+.mcp-card .kv { grid-template-columns: 70px 1fr; align-items: center; line-height: 1.7; }
+.mcp-sub { font-size: 13px; margin: 16px 0 0; color: #3a4055; }
+.row.wrap { flex-wrap: wrap; }
+.copy-box { display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; }
+.copy-box pre { flex: 1; min-width: 0; margin: 0; padding: 8px 10px; background: #f6f7fb; border: 1px solid var(--border); border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
 .stat-row { display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
 .stat { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 12px 18px; display: flex; flex-direction: column; gap: 2px; min-width: 150px; }
 .stat-num { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }

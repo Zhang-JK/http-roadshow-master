@@ -113,8 +113,9 @@ test('admin creates another user', async () => {
   await page.fill('input[name=new-display]', '卡罗尔');
   await page.fill('input[name=new-password]', 'carol123');
   await page.click('[data-testid=save-user]');
-  await expect(page.locator('[data-testid=user-row]')).toHaveCount(2);
-  await expect(page.locator('[data-testid=user-row]').nth(1)).toContainText('卡罗尔');
+  await expect(page.locator('[data-testid=user-row]')).toHaveCount(3);
+  await expect(page.locator('[data-testid=user-row]').nth(1)).toContainText('MCP 服务账户');
+  await expect(page.locator('[data-testid=user-row]').nth(2)).toContainText('卡罗尔');
 });
 
 test('create a template through the dialog and watch it generate', async () => {
@@ -697,4 +698,90 @@ test('errors the model never fixes fail the generation after three fix rounds, w
   await expect(page.locator('.gen-state .error-box')).toContainText('图片无法加载');
   await expect(page.locator('[data-testid=regenerate-btn]')).toBeVisible();
   await expect(page.locator('.gen-state')).toContainText('已失败 1 次');
+});
+
+test('admin allows MCP requests and issues a token; an MCP client creates a deck from a template', async ({ baseURL }) => {
+  let token = '';
+  let id = 0;
+  const mcp = async (method: string, params: Record<string, unknown> = {}) => {
+    const res = await fetch(`${baseURL}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const tool = async (name: string, args: Record<string, unknown>) => {
+    const r = await mcp('tools/call', { name, arguments: args });
+    expect(r.body.result.isError, JSON.stringify(r.body)).toBeFalsy();
+    return r.body.result.structuredContent;
+  };
+
+  await page.goto('/users');
+  const row = page.locator('[data-testid=user-row]:has-text("MCP 服务账户")');
+  await expect(row).toContainText('mcp');
+  await expect(row.locator('button:has-text("重置密码")')).toHaveCount(0);
+  await expect(row.locator('[data-testid=mcp-toggle]')).not.toBeChecked();
+  const card = page.locator('[data-testid=mcp-card]');
+  await expect(card).toContainText('未允许 MCP 请求');
+  await expect(card).toContainText('尚未生成');
+  await expect(card.locator('[data-testid=mcp-url]')).toHaveText(`${baseURL}/mcp`);
+
+  await card.locator('[data-testid=mcp-token]').click();
+  const modal = page.locator('.modal:has-text("MCP 令牌")');
+  await expect(modal).toContainText('令牌只显示这一次');
+  await expect(modal).toContainText('「允许 MCP 请求」尚未开启');
+  token = (await modal.locator('[data-testid=mcp-token-value]').textContent())!.trim();
+  expect(token).toMatch(/^rs_mcp_/);
+  await expect(modal).toContainText(`"Authorization": "Bearer ${token}"`);
+  await modal.locator('[data-testid=mcp-token-done]').click();
+  await expect(modal).toHaveCount(0);
+  await expect(card.locator('[data-testid=mcp-token-hint]')).toContainText(`rs_mcp_…${token.slice(-4)}`);
+  await expect(page.locator('body')).not.toContainText(token);
+
+  expect((await mcp('tools/list')).status).toBe(403);
+  await row.locator('[data-testid=mcp-toggle]').check();
+  await expect(page.locator('.toast-success')).toContainText('已允许 MCP 请求');
+  await expect(card).toContainText('已允许 MCP 请求');
+  await page.reload();
+  await expect(row.locator('[data-testid=mcp-toggle]')).toBeChecked();
+
+  const { templates } = await tool('list_roadshow_templates', {});
+  const template = templates.find((t: { name: string }) => t.name === 'E2E 模板 · 改名');
+  expect(template.layoutCount).toBe(3);
+  const created = await tool('create_roadshow_slides', {
+    templateId: template.templateId,
+    name: 'MCP 压测报告',
+    content: '## 结果\n| 指标 | 基线 | v2 |\n|---|---|---|\n| p99 | 48 ms | 31 ms |\n图表见 latency.png',
+    audience: '研发负责人',
+    files: [
+      { filename: 'latency.png', data: PNG_1x1.toString('base64') },
+      { filename: 'results.csv', text: 'case,p99_ms\nbaseline,48\nv2,31\n' },
+    ],
+  });
+  let status = created;
+  for (let i = 0; i < 12 && status.status === 'generating'; i++) {
+    status = await tool('get_roadshow_slides_status', { projectId: created.projectId, waitSeconds: 5 });
+  }
+  expect(status).toMatchObject({ status: 'ready', pageCount: 3 });
+  expect(status.editorUrl).toBe(`${baseURL}/p/${created.projectId}`);
+
+  await page.goto('/decks');
+  const deck = page.locator('[data-testid=project-card]:has-text("MCP 压测报告")');
+  await expect(deck).toContainText('MCP');
+  await deck.click();
+  await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(3);
+  await page.click('.tabs button:has-text("素材")');
+  await expect(page.locator('.asset-list')).toContainText('latency.png');
+  await expect(page.locator('.asset-list')).toContainText('results.csv');
+
+  await page.goto('/users');
+  await row.locator('[data-testid=mcp-toggle]').uncheck();
+  await expect(page.locator('.toast-success').last()).toContainText('已关闭 MCP 请求');
+  expect((await mcp('tools/list')).status).toBe(403);
+  await row.locator('[data-testid=mcp-toggle]').check();
+  page.once('dialog', (d) => d.accept());
+  await card.locator('[data-testid=mcp-revoke]').click();
+  await expect(card).toContainText('尚未生成');
+  expect((await mcp('tools/list')).status).toBe(401);
 });
