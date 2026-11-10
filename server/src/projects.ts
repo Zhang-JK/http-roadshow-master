@@ -472,7 +472,12 @@ export function createProject(db: DB, userId: number, input: CreateInput): Proje
   return getProject(db, id)!;
 }
 
-export function startGeneration(db: DB, projectId: string, userId: number): JobRow {
+export interface GenerationOptions {
+  /** False for callers that cannot answer (MCP): the model must not pause to ask the user. */
+  askUser?: boolean;
+}
+
+export function startGeneration(db: DB, projectId: string, userId: number, opts: GenerationOptions = {}): JobRow {
   const project = getProject(db, projectId)!;
   const meta = JSON.parse(project.meta);
   const job = createJob(db, projectId, userId, 'create', { brief: meta.brief });
@@ -485,7 +490,7 @@ export function startGeneration(db: DB, projectId: string, userId: number): JobR
       const ft = fileToolsFor(db, rows);
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
-      const ask = askToolsFor(db, job);
+      const ask = opts.askUser === false ? undefined : askToolsFor(db, job);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;

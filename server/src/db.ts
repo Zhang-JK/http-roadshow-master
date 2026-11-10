@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { config } from './config.js';
@@ -142,7 +143,18 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE llm_endpoints ADD COLUMN use_proxy INTEGER NOT NULL DEFAULT 1;
   `,
+  `
+  ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD COLUMN mcp_enabled INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE users ADD COLUMN token_hash TEXT;
+  ALTER TABLE users ADD COLUMN token_hint TEXT;
+  ALTER TABLE users ADD COLUMN token_created_at INTEGER;
+  CREATE UNIQUE INDEX idx_users_token ON users(token_hash) WHERE token_hash IS NOT NULL;
+  `,
 ];
+
+/** Service account the MCP endpoint acts as; it has a token instead of a password. */
+export const MCP_USERNAME = 'mcp';
 
 export function openDb(file = config.dbFile): DB {
   const db = new Database(file);
@@ -160,6 +172,7 @@ export function openDb(file = config.dbFile): DB {
     })();
   });
   ensureAdmin(db);
+  ensureMcpAccount(db);
   // Jobs interrupted by a restart can never finish.
   db.prepare(`UPDATE jobs SET status='error', error='服务重启，任务中断', finished_at=updated_at WHERE status IN ('pending','running')`).run();
   db.prepare(`UPDATE projects SET status='error', error='服务重启，生成中断' WHERE status='generating'`).run();
@@ -172,6 +185,17 @@ function ensureAdmin(db: DB) {
   db.prepare(
     'INSERT INTO users (username, display_name, password_hash, is_admin, created_at) VALUES (?, ?, ?, 1, ?)',
   ).run(config.adminUsername, '管理员', bcrypt.hashSync(config.adminPassword, 10), Date.now());
+}
+
+/** MCP requests are off until an admin turns them on and creates a token. */
+function ensureMcpAccount(db: DB) {
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(MCP_USERNAME)) {
+    db.prepare('UPDATE users SET is_service = 1 WHERE username = ? AND is_admin = 0').run(MCP_USERNAME);
+    return;
+  }
+  db.prepare(
+    `INSERT INTO users (username, display_name, password_hash, is_admin, is_service, created_at) VALUES (?, 'MCP', ?, 0, 1, ?)`,
+  ).run(MCP_USERNAME, bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 4), Date.now());
 }
 
 export const DEFAULT_SETTINGS: Record<string, unknown> = {

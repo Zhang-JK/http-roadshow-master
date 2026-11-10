@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { DB } from '../db.js';
-import { HttpError, requireUser } from '../auth.js';
+import { HttpError, requireMcpCaller, requireUser, type ServiceUser } from '../auth.js';
 import { ASPECTS, assembleHtml, deletePage, duplicatePage, movePage, type DeckDoc } from '../deck.js';
 import { assetPath, assetUrl, deleteAsset, makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRole, type AssetRow } from '../assets.js';
 import {
@@ -27,10 +27,9 @@ import { exportBundle } from '../bundle.js';
 import { answerQuestion, pendingQuestion, projectsAsking } from '../questions.js';
 import { cssFiles, fileTree, nameFiles } from '../files.js';
 import { jobDuration, jobStats, type JobStats } from '../calls.js';
+import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from '../create.js';
 
 const MAX_README = 50_000;
-
-const MAX_UPLOAD_FILES = 12;
 
 function userNames(db: DB): Map<number, string> {
   const rows = db.prepare('SELECT id, username, display_name FROM users').all() as any[];
@@ -158,7 +157,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
   app.post('/api/projects', async (req) => {
     const user = requireUser(req);
     const fields: Record<string, string> = {};
-    const files: { filename: string; mime: string; buf: Buffer }[] = [];
+    const files: UploadFile[] = [];
     if (req.isMultipart()) {
       for await (const part of req.parts()) {
         if (part.type === 'file') {
@@ -173,73 +172,15 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     } else {
       Object.assign(fields, req.body ?? {});
     }
-    const type = fields.type === 'deck' ? 'deck' : fields.type === 'template' ? 'template' : null;
-    if (!type) throw new HttpError(400, '项目类型必须是 template 或 deck');
-    const name = String(fields.name ?? '').trim();
-    if (!name) throw new HttpError(400, '请填写名称');
-    const aspectKey = fields.aspect && ASPECTS[fields.aspect] ? fields.aspect : '16:9';
-    let { width, height } = ASPECTS[aspectKey];
-    if (fields.aspect === 'custom') {
-      width = Math.round(Number(fields.width));
-      height = Math.round(Number(fields.height));
-      if (!(width >= 320 && width <= 4000 && height >= 320 && height <= 4000)) throw new HttpError(400, '自定义尺寸需在 320–4000 像素之间');
-    }
-    const pageCount = fields.pageCount ? Math.max(1, Math.min(40, Number(fields.pageCount) || 0)) || undefined : undefined;
-    let brief: Record<string, unknown>;
-    let templateId: string | null = null;
-    if (type === 'template') {
-      if (!String(fields.style ?? '').trim() && !String(fields.purpose ?? '').trim()) throw new HttpError(400, '请至少填写设计风格或计划用途');
-      brief = {
-        name,
-        style: fields.style ?? '',
-        purpose: fields.purpose ?? '',
-        audience: fields.audience ?? '',
-        colors: fields.colors ?? '',
-        pageCount,
-        notes: fields.notes ?? '',
-      };
-    } else {
-      templateId = String(fields.templateId ?? '').trim() || null;
-      if (!templateId) throw new HttpError(400, '请先选择一个模板');
-      const tpl = getProject(db, templateId);
-      if (!tpl || tpl.type !== 'template') throw new HttpError(400, '所选模板不存在');
-      if (tpl.status !== 'ready' || !projectDoc(tpl)?.pages.length) throw new HttpError(400, '所选模板尚未生成完成');
-      if (!String(fields.content ?? '').trim()) throw new HttpError(400, '请详细说明需要添加的内容');
-      const tdoc = projectDoc(tpl)!;
-      if (fields.aspect === undefined || fields.aspect === '' || fields.aspect === 'template') {
-        width = tdoc.width;
-        height = tdoc.height;
-      }
-      brief = {
-        name,
-        purpose: fields.purpose ?? '',
-        audience: fields.audience ?? '',
-        content: fields.content,
-        pageCount,
-        notes: fields.notes ?? '',
-      };
-    }
-    const project = createProject(db, user.id, {
-      type,
-      name,
-      width,
-      height,
-      aspect: fields.aspect === 'custom' ? `${width}x${height}` : aspectKey,
-      templateId,
-      brief: brief as any,
-    });
     let roles: unknown[] = [];
     try {
       roles = JSON.parse(fields.fileRoles || '[]');
     } catch {
       /* default roles */
     }
-    const defaultRole: AssetRole = type === 'template' ? 'reference' : 'embed';
-    for (const [i, f] of files.entries()) {
-      await saveAsset(db, project.id, user.id, f.filename, f.mime, f.buf, roles[i] === undefined ? defaultRole : parseRole(roles[i]));
-    }
-    const job = startGeneration(db, project.id, user.id);
-    return { project: publicProject(getProject(db, project.id)!, userNames(db), false), job: publicJob(job) };
+    for (const [i, f] of files.entries()) if (roles[i] !== undefined) f.role = parseRole(roles[i]);
+    const { project, job } = await createFromForm(db, user.id, fields, files);
+    return { project: publicProject(project, userNames(db), false), job: publicJob(job) };
   });
 
   app.get('/api/projects/:id', async (req) => {
@@ -555,9 +496,13 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     });
   });
 
+  /** Also reachable with the MCP token, for decks the MCP account created. */
   app.get('/api/projects/:id/export', async (req, reply) => {
-    requireUser(req);
+    let mcp: ServiceUser | undefined;
+    if (!req.user && req.headers.authorization) mcp = requireMcpCaller(db, req);
+    else requireUser(req);
     const p = mustProject(db, (req.params as any).id);
+    if (mcp && p.created_by !== mcp.id) throw new HttpError(404, '项目不存在');
     const { format = 'html', version } = req.query as { format?: string; version?: string };
     const doc = version ? versionDoc(p.id, Number(version)) : projectDoc(p);
     if (!doc || !doc.pages.length) throw new HttpError(400, '项目尚无可导出的内容');
