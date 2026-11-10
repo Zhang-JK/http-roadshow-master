@@ -1,13 +1,14 @@
 import path from 'node:path';
+import * as cheerio from 'cheerio';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { DB } from './db.js';
 import { config } from './config.js';
 import { HttpError, requireMcpCaller, type ServiceUser } from './auth.js';
-import { ASPECTS } from './deck.js';
+import { ASPECTS, type DeckDoc } from './deck.js';
 import { makeAssetResolver, projectAssets, slideAssets } from './assets.js';
 import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from './create.js';
 import { getProject, jobProgress, projectDoc, withReadme, type JobRow, type ProjectRow } from './projects.js';
-import { fileTree, readmeBody } from './files.js';
+import { nameFiles, readmeBody } from './files.js';
 import { renderPageImages } from './render.js';
 import { versionInfo } from './system.js';
 
@@ -138,6 +139,18 @@ export function decodeFile(raw: unknown, i: number): UploadFile {
   }
   return { filename, mime: DOC_EXT[ext], buf, role };
 }
+
+/** The first heading (else the first text) of a page, entities decoded. */
+function pageTitle(html: string): string | undefined {
+  const $ = cheerio.load(html);
+  $('style, script, template').remove();
+  const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const text = squash($('h1, h2, h3').first().text()) || squash($.root().text());
+  if (!text) return undefined;
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+}
+
+const pageList = (doc: DeckDoc) => nameFiles(doc.pages).map((p, i) => ({ page: i + 1, file: p.file!, title: pageTitle(p.html) }));
 
 function readyTemplates(db: DB): ProjectRow[] {
   const rows = db.prepare(`SELECT * FROM projects WHERE type = 'template' AND status = 'ready' ORDER BY updated_at DESC`).all() as ProjectRow[];
@@ -295,9 +308,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
         colors: pick('colors'),
         notes: pick('notes'),
         layoutCount: doc.pages.length,
-        layouts: fileTree(doc)
-          .filter((e) => e.kind === 'page')
-          .map((e) => ({ file: e.path, title: e.title || undefined })),
+        layouts: pageList(doc).map(({ file, title }) => ({ file, title })),
         guide: guide.length > GUIDE_LIMIT ? `${guide.slice(0, GUIDE_LIMIT)}…` : guide,
         updatedAt: new Date(p.updated_at).toISOString(),
       };
@@ -402,9 +413,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     if (project.status === 'ready' && doc) {
       result.pageCount = doc.pages.length;
       result.size = `${doc.width}×${doc.height}`;
-      result.pages = fileTree(doc)
-        .filter((e) => e.kind === 'page')
-        .map((e) => ({ page: e.page, file: e.path, title: e.title || undefined }));
+      result.pages = pageList(doc);
       result.durationSeconds = job?.finished_at ? Math.round((job.finished_at - started) / 1000) : undefined;
       result.downloads = Object.fromEntries(EXPORT_FORMATS.map((f) => [f, `${base}/api/projects/${project.id}/export?format=${f}`]));
       result.downloadAuth = 'Send the same "Authorization: Bearer <token>" header used for MCP.';
