@@ -4,6 +4,7 @@ import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
 import { compactHistory, DEFAULT_CONTEXT_TOKENS, estimateTokens, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
 import { liveCalls, recordCall, type LiveCall } from './calls.js';
+import { directDispatcher } from './proxy.js';
 
 export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
 export const DEFAULT_MAX_CALL_MINUTES = 120;
@@ -19,6 +20,8 @@ export interface Endpoint {
   extra_body: string;
   /** Requests sent to this endpoint at the same time (0 = no limit); more wait in our own queue. */
   max_concurrency: number;
+  /** 0: connect directly, ignoring HTTPS_PROXY / HTTP_PROXY (models deployed locally). */
+  use_proxy: number;
   last_test_at: number | null;
   last_test_ok: number | null;
   last_test_message: string | null;
@@ -185,7 +188,8 @@ export async function chatWithEndpoint(
         },
         body: JSON.stringify(body),
         signal,
-      });
+        ...(ep.use_proxy === 0 ? { dispatcher: directDispatcher() } : {}),
+      } as RequestInit);
     } catch (e) {
       throw failure(e, `无法连接接入点 ${ep.name}`);
     }
@@ -642,4 +646,104 @@ export async function testEndpoint(ep: Endpoint, timeoutMs = DEFAULT_IDLE_TIMEOU
       message: visionRejected ? `模型拒绝了图像输入（不支持多模态）: ${msg}` : msg,
     };
   }
+}
+
+export const PARALLEL_TEST_MAX = 5;
+
+export interface ParallelLevel {
+  /** Requests sent at the same time. */
+  n: number;
+  ok: number;
+  /** Requests that had started answering before the first one finished. */
+  concurrent: number;
+  /** The endpoint answered some of the requests only after others had finished. */
+  queued: boolean;
+  wallMs: number;
+  /** Longest wait for a first token, from the moment the requests were sent. */
+  maxFirstTokenMs: number | null;
+  error?: string;
+}
+
+export interface ParallelTestResult {
+  /** Most requests the endpoint answered at the same time, all successfully (0: not even one). */
+  maxParallel: number;
+  /** Value for the parallel limit: 0 = no limit needed up to the tested maximum; null when nothing worked. */
+  suggested: number | null;
+  levels: ParallelLevel[];
+  message: string;
+  /** Requests from running jobs on this endpoint when the test started (they skew the result). */
+  busy: number;
+}
+
+const PARALLEL_PROMPT = 'Parallel test: count from 1 to 100, separated by single spaces. Output only the numbers.';
+
+/**
+ * Sends 1, 2, … up to `max` identical requests at once and stops at the first level where a request
+ * fails or the endpoint queues them (a request only starts answering after another has finished,
+ * and the level takes clearly longer than a single request). Bypasses the endpoint's parallel limit.
+ */
+export async function testParallel(
+  ep: Endpoint,
+  opts: { idleTimeoutMs: number; timeoutMs: number; max?: number },
+): Promise<ParallelTestResult> {
+  const max = opts.max ?? PARALLEL_TEST_MAX;
+  const busy = inflightCount(ep.id);
+  const levels: ParallelLevel[] = [];
+  const one = async (sentAt: number, i: number) => {
+    try {
+      const r = await chatWithEndpoint(ep, [{ role: 'user', content: PARALLEL_PROMPT }], `rs-parallel-test-${i}`, {
+        maxTokens: 2048,
+        temperature: 0,
+        onDelta: () => {},
+        allowEmpty: true,
+        idleTimeoutMs: opts.idleTimeoutMs,
+        timeoutMs: opts.timeoutMs,
+      });
+      const end = Date.now();
+      return { ok: true as const, first: (r.firstTokenAt ?? end) - sentAt, end: end - sentAt };
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message };
+    }
+  };
+  let maxParallel = 0;
+  let message = '';
+  let suggested: number | null = null;
+  for (let n = 1; n <= max; n++) {
+    const sentAt = Date.now();
+    const runs = await Promise.all(Array.from({ length: n }, (_, i) => one(sentAt, i)));
+    const done = runs.flatMap((r) => (r.ok ? [r] : []));
+    const firstEnd = Math.min(...done.map((r) => r.end));
+    const wallMs = Date.now() - sentAt;
+    const concurrent = done.filter((r) => r.first <= firstEnd).length;
+    const base = levels[0]?.wallMs ?? wallMs;
+    const level: ParallelLevel = {
+      n,
+      ok: done.length,
+      concurrent,
+      queued: done.length === n && concurrent < n && wallMs >= base * 1.5 && wallMs - base >= 100,
+      wallMs,
+      maxFirstTokenMs: done.length ? Math.max(...done.map((r) => r.first)) : null,
+      error: runs.find((r) => !r.ok)?.error,
+    };
+    levels.push(level);
+    if (level.ok < n) {
+      suggested = maxParallel || null;
+      message =
+        n === 1
+          ? `单个请求就失败了：${level.error}`
+          : `同时发送 ${n} 个请求时有 ${n - level.ok} 个失败，最多可同时处理 ${maxParallel} 个。失败原因：${level.error}`;
+      break;
+    }
+    if (level.queued) {
+      suggested = maxParallel;
+      message = `同时发送 ${n} 个请求都成功了，但接入点同时只处理了 ${concurrent} 个，其余在服务端排队（用时是单个请求的 ${(wallMs / base).toFixed(1)} 倍）。建议把并发上限设为 ${maxParallel}，多出的请求在本地排队，不会因服务端排队触发无响应超时`;
+      break;
+    }
+    maxParallel = n;
+  }
+  if (maxParallel === max) {
+    suggested = 0;
+    message = `同时发送 ${max} 个请求都能并行处理（测试到 ${max} 个为止），一般无需设置并发上限`;
+  }
+  return { maxParallel, suggested, levels, message, busy };
 }

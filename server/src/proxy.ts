@@ -21,6 +21,11 @@ function normalizeProxyEnv() {
  */
 const NO_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 
+export const maskProxy = (url: string) => url.replace(/\/\/[^/@]+@/, '//***@');
+
+let active: string | undefined;
+let direct: Agent | undefined;
+
 /**
  * Routes outgoing fetch() (model APIs) through the proxy from the environment, honouring NO_PROXY.
  * Always installs the dispatcher, replacing Node's own NODE_USE_ENV_PROXY one, for NO_TIMEOUTS.
@@ -28,19 +33,30 @@ const NO_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 export function setupProxy(): string | undefined {
   normalizeProxyEnv();
   const url = proxyUrl();
-  const masked = url?.replace(/\/\/[^/@]+@/, '//***@');
+  active = undefined;
   if (url && /^https?:\/\//i.test(url)) {
     try {
       setGlobalDispatcher(new EnvHttpProxyAgent(NO_TIMEOUTS));
+      active = url;
       return url;
     } catch (e) {
-      console.warn(`Ignoring unusable proxy ${masked}: ${(e as Error).message}`);
+      console.warn(`Ignoring unusable proxy ${maskProxy(url)}: ${(e as Error).message}`);
     }
   } else if (url) {
-    console.warn(`Ignoring proxy ${masked}: model API calls only support http:// or https:// proxies`);
+    console.warn(`Ignoring proxy ${maskProxy(url)}: model API calls only support http:// or https:// proxies`);
   }
   setGlobalDispatcher(new Agent(NO_TIMEOUTS));
   return undefined;
+}
+
+/** The proxy model API calls go through (credentials hidden), or undefined when they connect directly. */
+export function activeProxy(): string | undefined {
+  return active && maskProxy(active);
+}
+
+/** For endpoints that must bypass the system proxy (models deployed on this machine or the local network). */
+export function directDispatcher(): Agent {
+  return (direct ??= new Agent(NO_TIMEOUTS));
 }
 
 /** Proxy settings for headless Chrome, or undefined when no proxy is configured. */

@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import type { DB } from '../db.js';
 import { getSettings, setSettings } from '../db.js';
 import { HttpError, requireAdmin, requireUser } from '../auth.js';
-import { callTimeouts, inflightCount, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, type Endpoint } from '../llm.js';
+import { callTimeouts, inflightCount, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, testParallel, type Endpoint } from '../llm.js';
 import { SPEED_SQL, tokensPerSec } from '../calls.js';
+import { activeProxy } from '../proxy.js';
 
 const maskKey = (k: string) => (k.length <= 10 ? '****' : `${k.slice(0, 6)}…${k.slice(-4)}`);
 
@@ -17,6 +18,7 @@ const publicEndpoint = (e: Endpoint) => ({
   enabled: !!e.enabled,
   extraBody: e.extra_body,
   maxConcurrency: e.max_concurrency ?? 0,
+  useProxy: e.use_proxy !== 0,
   inflight: inflightCount(e.id),
   lastTestAt: e.last_test_at,
   lastTestOk: e.last_test_ok === null ? null : !!e.last_test_ok,
@@ -41,6 +43,7 @@ function validate(body: any, partial: boolean) {
   else if (!partial) throw new HttpError(400, 'API Token 不能为空');
   if (body.weight !== undefined) out.weight = Math.max(1, Math.min(100, Number(body.weight) || 1));
   if (body.enabled !== undefined) out.enabled = body.enabled ? 1 : 0;
+  if (body.useProxy !== undefined) out.useProxy = body.useProxy ? 1 : 0;
   if (body.maxConcurrency !== undefined) out.maxConcurrency = Math.max(0, Math.min(64, Math.floor(Number(body.maxConcurrency)) || 0));
   if (body.extraBody !== undefined) {
     const raw = String(body.extraBody || '{}').trim() || '{}';
@@ -57,10 +60,12 @@ function validate(body: any, partial: boolean) {
 }
 
 export function llmRoutes(app: FastifyInstance, db: DB) {
+  const parallelTests = new Set<number>();
+
   app.get('/api/llm/endpoints', async (req) => {
     requireAdmin(req);
     const rows = db.prepare('SELECT * FROM llm_endpoints ORDER BY id').all() as Endpoint[];
-    return { endpoints: rows.map(publicEndpoint) };
+    return { endpoints: rows.map(publicEndpoint), systemProxy: activeProxy() ?? null };
   });
 
   app.post('/api/llm/endpoints', async (req) => {
@@ -68,10 +73,10 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     const v = validate(req.body ?? {}, false);
     const r = db
       .prepare(
-        `INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, enabled, extra_body, max_concurrency, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, enabled, extra_body, max_concurrency, use_proxy, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(v.name, v.baseUrl, v.apiKey, v.model, v.weight ?? 1, v.enabled ?? 1, v.extraBody ?? '{}', v.maxConcurrency ?? 0, Date.now());
+      .run(v.name, v.baseUrl, v.apiKey, v.model, v.weight ?? 1, v.enabled ?? 1, v.extraBody ?? '{}', v.maxConcurrency ?? 0, v.useProxy ?? 1, Date.now());
     return { endpoint: publicEndpoint(db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(r.lastInsertRowid) as Endpoint) };
   });
 
@@ -89,6 +94,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       enabled: 'enabled',
       extraBody: 'extra_body',
       maxConcurrency: 'max_concurrency',
+      useProxy: 'use_proxy',
     };
     const entries = Object.entries(v);
     if (entries.length) {
@@ -121,6 +127,21 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     return { result };
   });
 
+  app.post('/api/llm/endpoints/:id/parallel-test', async (req) => {
+    requireAdmin(req);
+    const id = Number((req.params as any).id);
+    const ep = db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(id) as Endpoint | undefined;
+    if (!ep) throw new HttpError(404, '接入点不存在');
+    if (parallelTests.has(id)) throw new HttpError(409, '这个接入点的并发测试正在进行');
+    parallelTests.add(id);
+    try {
+      const { idleTimeoutMs, timeoutMs } = callTimeouts(db);
+      return { result: await testParallel(ep, { idleTimeoutMs: idleTimeoutMs!, timeoutMs: Math.min(timeoutMs!, 10 * 60_000) }) };
+    } finally {
+      parallelTests.delete(id);
+    }
+  });
+
   /** Test a configuration before saving it. */
   app.post('/api/llm/test', async (req) => {
     requireAdmin(req);
@@ -140,6 +161,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       enabled: 1,
       extra_body: String(v.extraBody ?? '{}'),
       max_concurrency: 0,
+      use_proxy: Number(v.useProxy ?? 1),
       last_test_at: null,
       last_test_ok: null,
       last_test_message: null,

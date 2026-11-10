@@ -324,6 +324,22 @@ export async function startMockLlm(opts: MockOptions = {}) {
       res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model overloaded (FAIL_ONCE)' } }));
       return;
     }
+    if (text.startsWith('Parallel test:')) {
+      const counted = Array.from({ length: 100 }, (_, i) => i + 1).join(' ');
+      if (!body.stream) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { content: counted }, finish_reason: 'stop' }] }));
+        return;
+      }
+      // Paced, so requests sent together visibly overlap.
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      for (const c of counted.match(/.{1,30}/g)!) {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`);
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+      return;
+    }
     const review = text.includes('【自检阶段】');
     (review ? reviewCalls : calls).push({ model: body.model, stream: !!body.stream, user: body.user, text, images, body });
 

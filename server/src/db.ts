@@ -139,6 +139,9 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE jobs ADD COLUMN retried_by TEXT;
   CREATE INDEX idx_jobs_status ON jobs(status, created_at);
   `,
+  `
+  ALTER TABLE llm_endpoints ADD COLUMN use_proxy INTEGER NOT NULL DEFAULT 1;
+  `,
 ];
 
 export function openDb(file = config.dbFile): DB {

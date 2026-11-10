@@ -219,6 +219,8 @@ export interface Endpoint {
   extraBody: string;
   /** Requests sent to it at the same time (0 = no limit); more wait in a queue. */
   maxConcurrency: number;
+  /** false: connects directly, bypassing the server's HTTPS_PROXY / HTTP_PROXY. */
+  useProxy: boolean;
   inflight: number;
   lastTestAt: number | null;
   lastTestOk: boolean | null;
@@ -232,4 +234,23 @@ export interface TestResult {
   latencyMs: number;
   message: string;
   reply?: string;
+}
+
+export interface ParallelLevel {
+  n: number;
+  ok: number;
+  concurrent: number;
+  queued: boolean;
+  wallMs: number;
+  maxFirstTokenMs: number | null;
+  error?: string;
+}
+
+export interface ParallelTestResult {
+  maxParallel: number;
+  /** 0 = no limit needed; null when not even one request worked. */
+  suggested: number | null;
+  levels: ParallelLevel[];
+  message: string;
+  busy: number;
 }

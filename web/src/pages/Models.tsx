@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import type { Endpoint, TestResult } from '../types';
+import type { Endpoint, ParallelTestResult, TestResult } from '../types';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import { duration, fullTime, num, speed } from '../lib/format';
@@ -15,6 +15,7 @@ interface Form {
   enabled: boolean;
   extraBody: string;
   maxConcurrency: number;
+  useProxy: boolean;
 }
 
 const EMPTY: Form = {
@@ -26,7 +27,31 @@ const EMPTY: Form = {
   enabled: true,
   extraBody: '{}',
   maxConcurrency: 0,
+  useProxy: true,
 };
+
+const PARALLEL_MAX = 5;
+
+/** Addresses a proxy elsewhere usually cannot reach: this machine, private networks, single-label host names. */
+function isLocalAddress(baseUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return false;
+  }
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    /\.(local|lan|internal|home\.arpa)$/.test(host) ||
+    (!host.includes('.') && !host.includes(':')) ||
+    /^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0$)/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host === '::1' ||
+    /^f[cd][0-9a-f]{2}:/.test(host) ||
+    /^fe80:/.test(host)
+  );
+}
 
 interface Usage {
   username: string | null;
@@ -78,9 +103,20 @@ export function ModelsPage() {
   const [form, setForm] = useState<Form | null>(null);
   const [testing, setTesting] = useState<number | 'form' | null>(null);
   const [formTest, setFormTest] = useState<TestResult | null>(null);
+  const [systemProxy, setSystemProxy] = useState<string | null>(null);
+  const [parallelRunning, setParallelRunning] = useState<number[]>([]);
+  const [parallel, setParallel] = useState<{ ep: Endpoint; result?: ParallelTestResult; error?: string } | null>(null);
+  /** Endpoint whose running parallel test the open dialog is waiting for. */
+  const parallelShown = useRef<number | null>(null);
 
   const load = useCallback(() => {
-    api.get<{ endpoints: Endpoint[] }>('/api/llm/endpoints').then((r) => setEndpoints(r.endpoints)).catch((e) => toast(e.message, 'error'));
+    api
+      .get<{ endpoints: Endpoint[]; systemProxy: string | null }>('/api/llm/endpoints')
+      .then((r) => {
+        setEndpoints(r.endpoints);
+        setSystemProxy(r.systemProxy);
+      })
+      .catch((e) => toast(e.message, 'error'));
     api.get<{ assignments: typeof assignments }>('/api/llm/assignments').then((r) => setAssignments(r.assignments));
     api.get<{ usage: Usage[]; models: ModelStats[] }>('/api/llm/usage').then((r) => {
       setUsage(r.usage);
@@ -128,6 +164,36 @@ export function ModelsPage() {
       toast((e as Error).message, 'error');
     } finally {
       setTesting(null);
+    }
+  };
+
+  const showParallel = (p: typeof parallel) => {
+    parallelShown.current = p && !p.result && !p.error ? p.ep.id : null;
+    setParallel(p);
+  };
+
+  const testParallel = async (ep: Endpoint) => {
+    showParallel({ ep });
+    setParallelRunning((ids) => [...ids, ep.id]);
+    let outcome: { result?: ParallelTestResult; error?: string };
+    try {
+      outcome = { result: (await api.post<{ result: ParallelTestResult }>(`/api/llm/endpoints/${ep.id}/parallel-test`)).result };
+    } catch (e) {
+      outcome = { error: (e as Error).message };
+    }
+    setParallelRunning((ids) => ids.filter((id) => id !== ep.id));
+    if (parallelShown.current === ep.id) showParallel({ ep, ...outcome });
+    else toast(`「${ep.name}」并发测试：${outcome.result?.message ?? outcome.error}`, outcome.result?.maxParallel ? 'success' : 'error');
+  };
+
+  const applyParallel = async (ep: Endpoint, maxConcurrency: number) => {
+    try {
+      await api.put(`/api/llm/endpoints/${ep.id}`, { maxConcurrency });
+      toast(`「${ep.name}」的并发上限已设为 ${maxConcurrency || '不限'}`, 'success');
+      showParallel(null);
+      load();
+    } catch (e) {
+      toast((e as Error).message, 'error');
     }
   };
 
@@ -179,7 +245,10 @@ export function ModelsPage() {
               <tr key={ep.id} data-testid="endpoint-row">
                 <td><strong>{ep.name}</strong></td>
                 <td><code>{ep.model}</code></td>
-                <td className="muted small">{ep.baseUrl}</td>
+                <td className="muted small">
+                  {ep.baseUrl}
+                  {!ep.useProxy && <> <span className="tag" title="不经过系统代理，直接连接接入地址" data-testid="endpoint-direct">直连</span></>}
+                </td>
                 <td><code>{ep.apiKeyMasked}</code></td>
                 <td>{ep.weight}</td>
                 <td className="nowrap" data-testid="endpoint-concurrency">{ep.inflight} / {ep.maxConcurrency || '不限'}</td>
@@ -199,7 +268,16 @@ export function ModelsPage() {
                 </td>
                 <td className="right nowrap">
                   <button className="btn btn-sm" disabled={testing === ep.id} onClick={() => test(ep)} data-testid="test-endpoint">{testing === ep.id ? '测试中…' : '测试'}</button>{' '}
-                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody, maxConcurrency: ep.maxConcurrency }); setFormTest(null); }}>编辑</button>{' '}
+                  <button
+                    className="btn btn-sm"
+                    disabled={parallelRunning.includes(ep.id)}
+                    onClick={() => testParallel(ep)}
+                    title={`依次同时发送 1–${PARALLEL_MAX} 个请求，测出接入点能同时处理几个`}
+                    data-testid="parallel-test"
+                  >
+                    {parallelRunning.includes(ep.id) ? '并发测试中…' : '并发测试'}
+                  </button>{' '}
+                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody, maxConcurrency: ep.maxConcurrency, useProxy: ep.useProxy }); setFormTest(null); }}>编辑</button>{' '}
                   <button className="btn btn-sm btn-danger" onClick={() => remove(ep)}>删除</button>
                 </td>
               </tr>
@@ -367,6 +445,20 @@ export function ModelsPage() {
             </label>
             <label className="switch" style={{ marginTop: 22 }}><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /><span>启用</span></label>
           </div>
+          <div className="field">
+            <label className="switch">
+              <input type="checkbox" checked={form.useProxy} onChange={(e) => setForm({ ...form, useProxy: e.target.checked })} data-testid="ep-use-proxy" />
+              <span>使用系统代理</span>
+            </label>
+            <span className="field-hint" data-testid="proxy-hint">
+              {systemProxy
+                ? `服务器访问模型时经过代理 ${systemProxy}（HTTPS_PROXY / HTTP_PROXY）。模型部署在本机或内网、代理访问不到时关闭，直接连接接入地址。`
+                : '服务器未配置系统代理（HTTPS_PROXY / HTTP_PROXY），所有接入点都直接连接，此选项暂不起作用。'}
+            </span>
+            {systemProxy && form.useProxy && isLocalAddress(form.baseUrl) && (
+              <span className="field-hint warn" data-testid="proxy-local-warning">接入地址是本机或内网地址，经过代理通常无法访问，建议关闭「使用系统代理」。</span>
+            )}
+          </div>
           <label className="field"><span>附加请求参数（JSON，可选，会合并进请求体）</span><textarea rows={3} value={form.extraBody} onChange={(e) => setForm({ ...form, extraBody: e.target.value })} placeholder='例如 {"reasoning":{"effort":"low"}}' /></label>
           {formTest && (
             <div className={`test-result ${formTest.ok ? 'ok' : 'err'}`} data-testid="form-test-result">
@@ -377,6 +469,85 @@ export function ModelsPage() {
           )}
         </Modal>
       )}
+
+      {parallel && (() => {
+        const ep = endpoints.find((e) => e.id === parallel.ep.id) ?? parallel.ep;
+        const r = parallel.result;
+        return (
+          <Modal
+            wide
+            title={`并发测试 · ${ep.name}`}
+            onClose={() => showParallel(null)}
+            footer={
+              <>
+                <span className="muted small">当前并发上限：{ep.maxConcurrency || '不限'}</span>
+                <div className="spacer" />
+                <button className="btn" onClick={() => showParallel(null)}>关闭</button>
+                {r && r.suggested !== null && r.suggested !== ep.maxConcurrency && (
+                  <button className="btn btn-primary" onClick={() => applyParallel(ep, r.suggested!)} data-testid="apply-parallel">
+                    将并发上限设为 {r.suggested || '不限'}
+                  </button>
+                )}
+              </>
+            }
+          >
+            <p className="muted small">
+              依次同时发送 1、2 … {PARALLEL_MAX} 个相同的请求（让模型从 1 数到 100），每轮等全部请求完成再进行下一轮。某轮出现失败，或接入点要等前面的请求完成才开始回答后面的请求（服务端排队）时停止。测试请求不受「并发上限」限制，也不计入用量统计。
+            </p>
+            {!r && !parallel.error && (
+              <div className="parallel-running" data-testid="parallel-running"><span className="spinner tiny" />正在测试，取决于模型速度，可能需要几分钟…</div>
+            )}
+            {parallel.error && <div className="test-result err" data-testid="parallel-result">{parallel.error}</div>}
+            {r && (
+              <>
+                <div className={`test-result ${r.maxParallel === 0 ? 'err' : r.suggested === 0 ? 'ok' : 'warn'}`} data-testid="parallel-result">
+                  <strong>
+                    {r.maxParallel === 0 ? '✗ 测试未通过' : r.suggested === 0 ? `✓ ${PARALLEL_MAX} 个请求都能同时处理` : `最多可同时处理 ${r.maxParallel} 个请求`}
+                  </strong>
+                  <div className="small">{r.message}</div>
+                </div>
+                {r.busy > 0 && (
+                  <div className="test-result warn small" style={{ marginTop: 8 }} data-testid="parallel-busy">
+                    测试开始时这个接入点上还有 {r.busy} 个生成任务的请求在运行，结果可能偏低，建议空闲时再测一次。
+                  </div>
+                )}
+                <table className="table compact parallel-levels" data-testid="parallel-levels">
+                  <thead>
+                    <tr>
+                      <th>同时请求</th>
+                      <th>成功</th>
+                      <th title="第一个请求完成之前已经开始输出的请求数">同时在输出</th>
+                      <th>总耗时</th>
+                      <th title="从发出请求到收到第一个 token 的最长等待">最慢首 token</th>
+                      <th>结果</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {r.levels.map((l) => (
+                      <tr key={l.n} data-testid="parallel-level">
+                        <td>{l.n}</td>
+                        <td>{l.ok} / {l.n}</td>
+                        <td>{l.ok ? l.concurrent : '—'}</td>
+                        <td>{duration(l.wallMs)}</td>
+                        <td>{l.maxFirstTokenMs != null ? duration(l.maxFirstTokenMs) : '—'}</td>
+                        <td>
+                          {l.ok < l.n ? (
+                            <span className="err-text" title={l.error}>✗ 失败</span>
+                          ) : l.queued ? (
+                            <span className="warn-text">排队</span>
+                          ) : (
+                            <span className="ok-text">✓ 并行</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </Modal>
+        );
+      })()}
     </div>
   );
 }

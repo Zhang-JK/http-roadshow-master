@@ -1,8 +1,13 @@
+import fs from 'node:fs';
 import http from 'node:http';
 import net, { type AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { afterEach, describe, expect, it } from 'vitest';
-import { chromeProxy, proxyUrl, setupProxy } from '../src/proxy.js';
+import { activeProxy, chromeProxy, proxyUrl, setupProxy } from '../src/proxy.js';
+
+process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-proxy-'));
 
 const KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_USE_ENV_PROXY'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
@@ -77,6 +82,71 @@ describe('proxy settings from the environment', () => {
       expect(seen).toHaveLength(1);
       expect(seen[0]).toMatch(/^(http:\/\/)?models\.example\.invalid(:80)?(\/v1\/models)?$/);
       expect(await (await fetch(`http://127.0.0.1:${directPort}/`)).text()).toBe('direct');
+      expect(seen).toHaveLength(1);
+    } finally {
+      setGlobalDispatcher(new Agent());
+      for (const s of servers) {
+        s.closeAllConnections();
+        s.close();
+      }
+    }
+  });
+
+  it('reports the active proxy without its credentials', () => {
+    setEnv({ HTTPS_PROXY: 'http://jo:secret@proxy.corp:8080' });
+    setupProxy();
+    expect(activeProxy()).toBe('http://***@proxy.corp:8080');
+    setEnv({ HTTPS_PROXY: 'socks5://proxy.corp:1080' });
+    setupProxy();
+    expect(activeProxy()).toBeUndefined();
+    setEnv({});
+    setupProxy();
+    expect(activeProxy()).toBeUndefined();
+  });
+
+  it('endpoints with "use system proxy" off connect directly, even to addresses the proxy cannot reach', async () => {
+    const { chatWithEndpoint } = await import('../src/llm.js');
+    const seen: string[] = [];
+    const model = http.createServer(async (req, res) => {
+      for await (const _ of req);
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { content: 'local model' } }] }));
+    });
+    // Like a corporate proxy that has no route into the local network.
+    const proxy = http.createServer((req, res) => {
+      seen.push(req.url ?? '');
+      res.writeHead(502).end('proxy cannot reach this host');
+    });
+    proxy.on('connect', (req, client) => {
+      seen.push(req.url ?? '');
+      client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+    });
+    const servers = [model, proxy];
+    await Promise.all(servers.map((s) => new Promise<void>((r) => s.listen(0, '127.0.0.1', r))));
+    const modelUrl = `http://127.0.0.1:${(model.address() as AddressInfo).port}/v1`;
+    const ep = (useProxy: number) => ({
+      id: 0,
+      name: '本地模型',
+      base_url: modelUrl,
+      api_key: 'k',
+      model: 'local',
+      weight: 1,
+      enabled: 1,
+      extra_body: '{}',
+      max_concurrency: 0,
+      use_proxy: useProxy,
+      last_test_at: null,
+      last_test_ok: null,
+      last_test_message: null,
+      created_at: 0,
+    });
+    const hi = [{ role: 'user' as const, content: 'hi' }];
+    try {
+      setEnv({ HTTP_PROXY: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}` });
+      setupProxy();
+      await expect(chatWithEndpoint(ep(1), hi, 'u')).rejects.toThrow(/无法连接接入点 本地模型|HTTP 502/);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain(new URL(modelUrl).host);
+      expect((await chatWithEndpoint(ep(0), hi, 'u')).text).toBe('local model');
       expect(seen).toHaveLength(1);
     } finally {
       setGlobalDispatcher(new Agent());

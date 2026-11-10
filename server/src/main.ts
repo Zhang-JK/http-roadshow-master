@@ -1,7 +1,7 @@
 import { buildApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
-import { setupProxy } from './proxy.js';
+import { maskProxy, setupProxy } from './proxy.js';
 import { closeBrowser } from './render.js';
 import { applyPendingRestore, startPeriodicCheck, versionInfo, writePidFile } from './system.js';
 
@@ -13,7 +13,7 @@ await app.listen({ port: config.port, host: config.host });
 writePidFile();
 startPeriodicCheck();
 app.log.info(`Roadshow Studio ${versionInfo().version} listening on ${config.host}:${config.port}`);
-if (proxy) app.log.info(`Outgoing requests use proxy ${proxy.replace(/\/\/[^/@]+@/, '//***@')}`);
+if (proxy) app.log.info(`Outgoing requests use proxy ${maskProxy(proxy)}`);
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, async () => {

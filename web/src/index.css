@@ -38,6 +38,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .spacer { flex: 1; }
 .ok-text { color: var(--ok); }
 .err-text { color: var(--danger); }
+.warn-text { color: #b45309; }
 .center { display: flex; justify-content: center; padding: 60px; }
 .center-screen { height: 100vh; display: grid; place-items: center; }
 
@@ -223,6 +224,12 @@ textarea { resize: vertical; min-height: 40px; }
 .test-result { padding: 10px 12px; border-radius: 8px; font-size: 13px; }
 .test-result.ok { background: #ecfdf5; color: #065f46; }
 .test-result.err { background: #fef2f2; color: #991b1b; }
+.test-result.warn { background: #fffbeb; color: #92400e; }
+.field > .field-hint { font-size: 12px; font-weight: 400; color: var(--muted); line-height: 1.5; }
+.field > .field-hint.warn { color: #b45309; }
+.parallel-levels { margin-top: 12px; }
+.parallel-levels td, .parallel-levels th { font-variant-numeric: tabular-nums; }
+.parallel-running { display: flex; align-items: center; gap: 10px; padding: 14px 0; color: var(--muted); font-size: 13px; }
 
 /* Editor */
 .editor { height: 100vh; display: flex; flex-direction: column; background: #eef0f5; }
