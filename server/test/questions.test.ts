@@ -193,6 +193,43 @@ describe('questions in jobs', () => {
     expect(pageCall.body.tools).toBeUndefined();
   });
 
+  it('lists my own jobs for notifications: running ones with their question, then those finished since the last poll', async () => {
+    expect((await app.inject({ method: 'GET', url: '/api/jobs/mine' })).statusCode).toBe(401);
+    await req('POST', '/api/users', { username: 'carol', password: 'carol123' });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'carol', password: 'carol123' } });
+    const carol = String(login.headers['set-cookie']).split(';')[0];
+    const mine = async (query = '', as = cookie) => (await app.inject({ method: 'GET', url: `/api/jobs/mine${query}`, headers: { cookie: as } })).json();
+
+    const start = await mine();
+    expect(start).toMatchObject({ now: expect.any(Number), active: [], finished: [] });
+    const { id, jobId } = await create('ASK_ME');
+    const q = (await waitJob(jobId, (j) => !!j.question)).question;
+    const running = await mine(`?since=${start.now}`);
+    expect(running.active).toEqual([
+      expect.objectContaining({
+        id: jobId,
+        projectId: id,
+        projectName: '提问',
+        projectType: 'template',
+        kind: 'create',
+        question: expect.objectContaining({ id: q.id, text: 'MOCK-QUESTION 面向谁？' }),
+      }),
+    ]);
+    expect(running.finished).toEqual([]);
+    expect(await mine(`?since=${start.now}`, carol)).toMatchObject({ active: [], finished: [] });
+
+    await req('POST', `/api/jobs/${jobId}/answer`, { questionId: q.id, choice: 0 });
+    await waitJob(jobId);
+    const after = await mine(`?since=${running.now}`);
+    expect(after.active).toEqual([]);
+    expect(after.finished).toEqual([expect.objectContaining({ id: jobId, status: 'done', projectName: '提问', question: null })]);
+    expect(after.finished[0].finishedAt).toBeGreaterThanOrEqual(running.now);
+    // Later polls leave it out, unless the caller still has it as running.
+    expect((await mine(`?since=${after.now}`)).finished).toEqual([]);
+    expect((await mine(`?since=${after.now}&ids=${jobId}`)).finished.map((j: { id: string }) => j.id)).toEqual([jobId]);
+    expect((await mine(`?since=${start.now}&ids=${jobId}`, carol)).finished).toEqual([]);
+  });
+
   it('a skipped or unanswered question lets the model go on with its own judgement', async () => {
     const a = await create('ASK_ME');
     const q = (await waitJob(a.jobId, (j) => !!j.question)).question;

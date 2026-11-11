@@ -284,6 +284,36 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     return { job: withStats(db, j) };
   });
 
+  /**
+   * The signed-in user's own jobs, for browser notifications: those running now, and those finished
+   * since `since` or listed in `ids` (a restart marks running jobs failed with their old timestamp).
+   */
+  app.get('/api/jobs/mine', async (req) => {
+    const user = requireUser(req);
+    const q = req.query as { since?: string; ids?: string };
+    const now = Date.now();
+    const since = Number(q.since);
+    const ids = String(q.ids ?? '').split(',').filter(Boolean).slice(0, 50);
+    const active = db.prepare(`SELECT * FROM jobs WHERE user_id = ? AND status IN ('pending','running') ORDER BY created_at`).all(user.id) as JobRow[];
+    const finished =
+      since > 0
+        ? (db
+            .prepare(
+              `SELECT * FROM jobs WHERE user_id = ? AND status IN ('done','error')
+                 AND (finished_at >= ? OR id IN (SELECT value FROM json_each(?))) ORDER BY finished_at LIMIT 50`,
+            )
+            .all(user.id, since, JSON.stringify(ids)) as JobRow[])
+        : [];
+    const projectIds = [...new Set([...active, ...finished].map((j) => j.project_id))];
+    const projects = new Map(
+      (db.prepare('SELECT id, name, type FROM projects WHERE id IN (SELECT value FROM json_each(?))').all(JSON.stringify(projectIds)) as Pick<ProjectRow, 'id' | 'name' | 'type'>[]).map(
+        (p) => [p.id, p],
+      ),
+    );
+    const mine = (j: JobRow) => ({ ...publicJob(j), projectName: projects.get(j.project_id)?.name ?? null, projectType: projects.get(j.project_id)?.type ?? null });
+    return { now, active: active.map(mine), finished: finished.map(mine) };
+  });
+
   app.post('/api/jobs/:id/answer', async (req) => {
     const user = requireUser(req);
     const id = (req.params as any).id as string;
