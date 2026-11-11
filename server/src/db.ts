@@ -151,6 +151,9 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE users ADD COLUMN token_created_at INTEGER;
   CREATE UNIQUE INDEX idx_users_token ON users(token_hash) WHERE token_hash IS NOT NULL;
   `,
+  `
+  CREATE INDEX idx_jobs_user ON jobs(user_id, finished_at);
+  `,
 ];
 
 /** Service account the MCP endpoint acts as; it has a token instead of a password. */
