@@ -8,6 +8,8 @@ interface Props {
   failedJobs?: Job[];
   pages?: { id: string }[];
   onRetry?: (j: Job) => void;
+  /** Continue a failed request from its saved progress. */
+  onResume?: (j: Job) => void;
   currentVersionNo: number;
   previewId?: number;
   onPreview: (v: Version) => void;
@@ -38,9 +40,28 @@ function ElementList({ title, items, onLocate, kind }: { title: string; items: E
   );
 }
 
-function FailedItem({ job, pages, canRetry, onRetry }: { job: Job; pages: { id: string }[]; canRetry: boolean; onRetry?: (j: Job) => void }) {
+const resumed = (n: number | undefined) => (n ? ` · 中断后继续 ${n} 次` : '');
+
+function FailedItem({
+  job,
+  pages,
+  canRetry,
+  onRetry,
+  onResume,
+}: {
+  job: Job;
+  pages: { id: string }[];
+  canRetry: boolean;
+  onRetry?: (j: Job) => void;
+  onResume?: (j: Job) => void;
+}) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'' | 'retry' | 'resume'>('');
+  const run = async (what: 'retry' | 'resume') => {
+    setBusy(what);
+    await (what === 'retry' ? onRetry : onResume)?.(job);
+    setBusy('');
+  };
   const scope = (job.request.scope ?? 'global') as Version['scope'];
   const pageNo = job.request.pageId ? pages.findIndex((p) => p.id === job.request.pageId) + 1 : 0;
   const target =
@@ -66,24 +87,28 @@ function FailedItem({ job, pages, canRetry, onRetry }: { job: Job; pages: { id: 
       </div>
       {job.request.prompt && <div className="hist-prompt">{job.request.prompt}</div>}
       <div className="hist-error" title={error}>{error.length > 200 && !open ? `${error.slice(0, 200)}…` : error}</div>
-      <div className="hist-cost" data-testid="hist-cost">{costText(job.durationMs, job.stats)}</div>
+      <div className="hist-cost" data-testid="hist-cost">
+        {costText(job.durationMs, job.stats)}
+        {resumed(job.resumeCount)}
+      </div>
+      {job.resume && (
+        <div className="hist-resume" data-testid="resume-info" title={`进度保存于 ${fullTime(job.resume.savedAt)}`}>
+          已保存进度：{job.resume.label}
+        </div>
+      )}
       <div className="hist-actions">
         {error.length > 200 && <button className="link" onClick={() => setOpen(!open)}>{open ? '收起' : '完整错误'}</button>}
+        {job.resume && (
+          <button className="link strong" disabled={!!busy} data-testid="resume-btn" onClick={() => run('resume')}>
+            {busy === 'resume' ? '提交中…' : '从中断处继续'}
+          </button>
+        )}
         {job.retriedBy ? (
           <span className="muted small" data-testid="retried">已重试</span>
         ) : (
           canRetry && (
-            <button
-              className="link"
-              disabled={busy}
-              data-testid="retry-btn"
-              onClick={async () => {
-                setBusy(true);
-                await onRetry?.(job);
-                setBusy(false);
-              }}
-            >
-              {busy ? '提交中…' : '重试'}
+            <button className="link" disabled={!!busy} data-testid="retry-btn" onClick={() => run('retry')}>
+              {busy === 'retry' ? '提交中…' : job.resume ? '从头重试' : '重试'}
             </button>
           )
         )}
@@ -92,7 +117,7 @@ function FailedItem({ job, pages, canRetry, onRetry }: { job: Job; pages: { id: 
   );
 }
 
-export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, currentVersionNo, previewId, onPreview, onRevert, onLocate }: Props) {
+export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, onResume, currentVersionNo, previewId, onPreview, onRevert, onLocate }: Props) {
   const [open, setOpen] = useState<number | null>(null);
   if (!versions.length && !failedJobs.length) return <div className="panel-empty muted">暂无历史记录</div>;
   const items = [
@@ -104,7 +129,9 @@ export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, c
       {items.map((item) => {
         if ('j' in item) {
           const j = item.j;
-          return <FailedItem key={j.id} job={j} pages={pages} canRetry={j.kind === 'edit' || currentVersionNo === 0} onRetry={onRetry} />;
+          return (
+            <FailedItem key={j.id} job={j} pages={pages} canRetry={j.kind === 'edit' || currentVersionNo === 0} onRetry={onRetry} onResume={onResume} />
+          );
         }
         const v = item.v;
         const s = v.summary;
@@ -147,7 +174,12 @@ export function HistoryPanel({ versions, failedJobs = [], pages = [], onRetry, c
               v.prompt && <div className="hist-prompt">{cut(v.prompt, isOpen)}</div>
             )}
             {counts.length > 0 && <div className="hist-counts">{counts.join(' · ')}</div>}
-            {v.jobId && <div className="hist-cost" data-testid="hist-cost">{costText(v.durationMs, v.stats)}</div>}
+            {v.jobId && (
+              <div className="hist-cost" data-testid="hist-cost">
+                {costText(v.durationMs, v.stats)}
+                {resumed(v.resumeCount)}
+              </div>
+            )}
             {isOpen && (
               <div className="hist-detail">
                 {s.pagesRemoved?.length > 0 && <div className="small">删除页面：{s.pagesRemoved.join('、')}</div>}

@@ -20,6 +20,7 @@ interface Session {
   endpoints: string[];
   retryOf: string | null;
   retriedBy: string | null;
+  resumeCount?: number;
   createdAt: number;
   finishedAt: number | null;
   durationMs: number;
@@ -174,6 +175,7 @@ export function SessionsPage() {
                       {ACTION_LABELS[s.kind] ?? s.kind}
                       {s.kind === 'edit' && <span className="muted small"> · {SCOPE_LABELS[s.scope] ?? s.scope}</span>}
                       {s.retryOf && <span className="muted small"> · 重试</span>}
+                      {!!s.resumeCount && <span className="muted small"> · 中断后继续 {s.resumeCount} 次</span>}
                     </td>
                     <td className="session-prompt" title={s.prompt}>{s.prompt || '—'}</td>
                     <td className="session-stage">

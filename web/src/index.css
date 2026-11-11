@@ -363,6 +363,8 @@ textarea { resize: vertical; min-height: 40px; }
 .hist-error { margin-top: 6px; background: #fef2f2; color: #991b1b; border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .busy-flag { display: inline-flex; vertical-align: -2px; margin-right: 6px; }
 .hist-actions { display: flex; gap: 12px; margin-top: 6px; }
+.hist-resume { margin-top: 6px; background: #eff6ff; color: #1e40af; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+.link.strong { font-weight: 600; }
 .hist-detail { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; }
 .el-group { margin-bottom: 8px; }
 .el-group-title { font-size: 11px; font-weight: 700; margin-bottom: 4px; }

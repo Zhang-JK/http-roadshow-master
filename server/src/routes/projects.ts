@@ -428,7 +428,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       .prepare(
         `SELECT v.id, v.version_no, v.user_id, v.action, v.scope, v.page_index, v.page_id, v.element_ids, v.prompt, v.summary, v.created_at,
                 u.username, u.display_name, j.id AS job_id, j.status AS job_status, j.created_at AS job_created, j.updated_at AS job_updated,
-                j.finished_at AS job_finished, j.resumed_at AS job_resumed, j.prior_ms AS job_prior
+                j.finished_at AS job_finished, j.resumed_at AS job_resumed, j.prior_ms AS job_prior, j.resume_count AS job_resumes
          FROM project_versions v LEFT JOIN users u ON u.id = v.user_id LEFT JOIN jobs j ON j.version_id = v.id
          WHERE v.project_id = ? ORDER BY v.version_no DESC`,
       )
@@ -459,6 +459,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
             })
           : null,
         stats: r.job_id ? stats.get(r.job_id) ?? null : null,
+        resumeCount: r.job_resumes ?? 0,
         id: r.id,
         versionNo: r.version_no,
         userId: r.user_id,
