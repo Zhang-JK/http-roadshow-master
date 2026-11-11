@@ -45,6 +45,22 @@ export interface GenerateDeps {
   call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages') => Promise<ChatResult>;
   onStage?: (stage: string) => void;
   pagesPerCall: number;
+  /** Continue a generation saved by onCheckpoint. */
+  resume?: GenerateState;
+  /** Called before each model call once there is work worth keeping. */
+  onCheckpoint?: (state: GenerateState) => void;
+}
+
+/** How far a staged generation got. */
+export type GenerateState =
+  | { step: 'plan'; doc: DeckDoc; early: FileBlock[]; messages: ChatMessage[]; attempt: number }
+  | { step: 'pages'; doc: DeckDoc; done: string[]; skipped: string[]; size: number; failures: number; lastCut: boolean };
+
+/** A short description of a saved generation, for the user deciding whether to continue it. */
+export function describeGenerateState(s: GenerateState): string {
+  if (s.step === 'plan') return '已写出部分 README 与样式';
+  const planned = Math.min(plannedPages(s.doc.readme ?? '').length, MAX_PLANNED_PAGES);
+  return `已完成规划与 ${s.done.length}/${planned} 页`;
 }
 
 export interface GenerateInput {
@@ -88,19 +104,22 @@ function continueMessages(messages: ChatMessage[], reply: string, note: string):
 
 export async function generateFiles(input: GenerateInput, deps: GenerateDeps): Promise<DeckDoc> {
   const { base, kind, brief, template, assets } = input;
-  let doc: DeckDoc = {
+  const resume = deps.resume;
+  let doc: DeckDoc = resume?.doc ?? {
     ...base,
     head: template?.head ?? base.head,
     css: template ? joinCssFiles(cssFiles(template.css)) : '',
     pages: [],
     readme: '',
   };
-  const early: FileBlock[] = [];
+  const early: FileBlock[] = resume?.step === 'plan' ? resume.early : [];
+  const planOf = () => plannedPages(doc.readme ?? '').slice(0, MAX_PLANNED_PAGES);
 
   // Step 1: README and styles.
-  let messages = buildPlanPrompt(doc, kind, brief, template, assets);
-  let plan: PlannedPage[] = [];
-  for (let attempt = 0; ; attempt++) {
+  let plan: PlannedPage[] = resume?.step === 'pages' ? planOf() : [];
+  let messages = resume?.step === 'plan' ? resume.messages : buildPlanPrompt(doc, kind, brief, template, assets);
+  for (let attempt = resume?.step === 'plan' ? resume.attempt : 0; resume?.step !== 'pages'; attempt++) {
+    if (attempt) deps.onCheckpoint?.({ step: 'plan', doc, early, messages, attempt });
     const r = await deps.call(messages, attempt ? '规划：补全 README 与样式文件' : '规划：编写 README 与样式文件', 'plan');
     const parsed = parseFileBlocks(r.text);
     const blocks = parsed.flatMap((b) => {
@@ -119,7 +138,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
         doc.css = joinCssFiles([...files, { path: c.path, css: b.content }]);
       } else early.push({ ...b, path: c.path });
     }
-    plan = plannedPages(doc.readme ?? '').slice(0, MAX_PLANNED_PAGES);
+    plan = planOf();
     const missing: string[] = [];
     if (!doc.readme) missing.push(README);
     else if (!plan.length) missing.push(`${README}（「页面规划」中没有找到 pages/名称.html 格式的条目，请按格式重写整个 README）`);
@@ -158,16 +177,28 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     done.add(path);
     return true;
   };
-  for (const b of early) if (order.has(b.path) && !done.has(b.path)) addFile(b.path, b.content);
-
   let size = Math.max(1, deps.pagesPerCall);
   let failures = 0;
   let lastCut = false;
   // Pages the model failed to write three times running: left to the delivery check, which reports them as missing.
   const skipped = new Set<string>();
+  if (resume?.step === 'pages') {
+    resume.done.forEach((p) => done.add(p));
+    resume.skipped.forEach((p) => skipped.add(p));
+    ({ size, failures, lastCut } = resume);
+    // Each file's pages follow its first page, which names the file.
+    let rank = plan.length;
+    let n = 0;
+    for (const p of doc.pages) {
+      if (p.file) [rank, n] = [order.get(p.file) ?? plan.length, 0];
+      rankOf.set(p, rank + n++ / 1000);
+    }
+  } else for (const b of early) if (order.has(b.path) && !done.has(b.path)) addFile(b.path, b.content);
+
   for (;;) {
     const queue = plan.filter((p) => !done.has(p.path) && !skipped.has(p.path));
     if (!queue.length) break;
+    deps.onCheckpoint?.({ step: 'pages', doc, done: [...done], skipped: [...skipped], size, failures, lastCut });
     const batch = queue.slice(0, size);
     const from = plan.indexOf(batch[0]) + 1;
     const stage = `生成页面：第 ${from}${batch.length > 1 ? `–${from + batch.length - 1}` : ''} 页（共 ${plan.length} 页）`;

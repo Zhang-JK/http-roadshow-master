@@ -73,9 +73,18 @@ export const SPEED_SQL = `SUM(CASE WHEN c.status = 'ok' AND c.first_token_at IS 
 export const tokensPerSec = (tokens: number | null | undefined, ms: number | null | undefined): number | null =>
   tokens && ms && ms >= 200 ? Math.round((tokens / ms) * 10_000) / 10 : null;
 
-/** Wall time of a job: until it finished, or until now while it runs. */
-export const jobDuration = (j: { status: string; created_at: number; updated_at: number; finished_at?: number | null }) =>
-  (j.finished_at ?? (j.status === 'done' || j.status === 'error' ? j.updated_at : Date.now())) - j.created_at;
+/**
+ * Wall time of a job: until it finished, or until now while it runs. A job continued after a failure
+ * counts its earlier runs (prior_ms) but not the time it sat failed.
+ */
+export const jobDuration = (j: {
+  status: string;
+  created_at: number;
+  updated_at: number;
+  finished_at?: number | null;
+  resumed_at?: number | null;
+  prior_ms?: number | null;
+}) => (j.prior_ms ?? 0) + (j.finished_at ?? (j.status === 'done' || j.status === 'error' ? j.updated_at : Date.now())) - (j.resumed_at ?? j.created_at);
 
 export interface JobStats {
   calls: number;

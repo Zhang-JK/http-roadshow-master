@@ -71,6 +71,7 @@ export function sessionRoutes(app: FastifyInstance, db: DB) {
           endpoints: j.endpoints ? j.endpoints.split(',') : [],
           retryOf: j.retry_of ?? null,
           retriedBy: j.retried_by ?? null,
+          resumeCount: j.resume_count ?? 0,
           createdAt: j.created_at,
           finishedAt: j.finished_at ?? null,
           durationMs: jobDuration(j),

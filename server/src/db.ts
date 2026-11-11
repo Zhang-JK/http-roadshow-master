@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { config } from './config.js';
+import { pruneCheckpoints } from './checkpoint.js';
 
 export type DB = Database.Database;
 
@@ -162,6 +163,18 @@ export const MIGRATIONS: string[] = [
     WHERE e.weight > llm_endpoints.weight OR (e.weight = llm_endpoints.weight AND e.id <= llm_endpoints.id)
   );
   `,
+  // Progress of a running job, kept after a failure so that it can continue (see checkpoint.ts).
+  `
+  CREATE TABLE job_checkpoints (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    data BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  ALTER TABLE jobs ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE jobs ADD COLUMN resumed_at INTEGER;
+  ALTER TABLE jobs ADD COLUMN prior_ms INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Service account the MCP endpoint acts as; it has a token instead of a password. */
@@ -187,6 +200,7 @@ export function openDb(file = config.dbFile): DB {
   // Jobs interrupted by a restart can never finish.
   db.prepare(`UPDATE jobs SET status='error', error='服务重启，任务中断', finished_at=updated_at WHERE status IN ('pending','running')`).run();
   db.prepare(`UPDATE projects SET status='error', error='服务重启，生成中断' WHERE status='generating'`).run();
+  pruneCheckpoints(db);
   return db;
 }
 

@@ -465,6 +465,21 @@ export interface ToolLoopOptions extends ChatOptions {
   onRound?: (r: ChatResult) => void;
   /** Called when the conversation had to be compacted to fit the context window. */
   onCompact?: (steps: string[]) => void;
+  /** Continue a conversation saved by onCheckpoint (`messages` is then only the original prompt). */
+  resume?: ToolLoopState;
+  /** Called after every round of tool results: enough to continue the conversation from there. */
+  onCheckpoint?: (state: ToolLoopState) => void;
+}
+
+/** A tool conversation between two rounds. */
+export interface ToolLoopState {
+  history: ChatMessage[];
+  /** The next round. */
+  round: number;
+  /** Messages at the start of the history that compaction must keep (the original prompt). */
+  keepHead: number;
+  imagesLeft: number;
+  toolCallCount: number;
 }
 
 export interface ToolLoopResult extends ChatResult {
@@ -480,21 +495,22 @@ export interface ToolLoopResult extends ChatResult {
  * The last round disables tools so the model has to answer.
  */
 export async function chatWithTools(db: DB, userId: number, messages: ChatMessage[], opts: ToolLoopOptions): Promise<ToolLoopResult> {
-  const { tools, execute, onTool, maxRounds = 10, maxImages = 24, allowEmptyFinal, onRound, onCompact, ...chatOpts } = opts;
-  let history = [...messages];
+  const { tools, execute, onTool, maxRounds = 10, maxImages = 24, allowEmptyFinal, onRound, onCompact, resume, onCheckpoint, ...chatOpts } = opts;
+  let history = [...(resume?.history ?? messages)];
+  const keepHead = resume?.keepHead ?? messages.length;
   const ctx = chatOpts.contextTokens ?? callTimeouts(db).contextTokens ?? DEFAULT_CONTEXT_TOKENS;
   // Room kept for each reply: tool calls are short, but a rewritten page or file can be long.
   const budget = inputBudget(ctx, Math.min(chatOpts.maxTokens ?? 24_000, 24_000));
   const total = { promptTokens: 0, completionTokens: 0, cost: 0, hasCost: false };
-  let imagesLeft = maxImages;
-  let toolCallCount = 0;
-  for (let round = 0; ; round++) {
+  let imagesLeft = resume?.imagesLeft ?? maxImages;
+  let toolCallCount = resume?.toolCallCount ?? 0;
+  for (let round = resume?.round ?? 0; ; round++) {
     const last = round >= maxRounds;
     if (last && round > 0) {
       history.push({ role: 'user', content: '（工具调用次数已用完：不要再调用或模拟调用任何工具，请直接给出最终答复。）' });
     }
     if (requestTokens(history, tools) > budget) {
-      const c = compactHistory(history, budget, { keepHead: messages.length, tools });
+      const c = compactHistory(history, budget, { keepHead, tools });
       history = c.messages;
       onCompact?.(c.steps);
     }
@@ -548,6 +564,7 @@ export async function chatWithTools(db: DB, userId: number, messages: ChatMessag
       history.push({ role: 'tool', tool_call_id: tc.id, content });
     }
     if (images.length) history.push({ role: 'user', content: [{ type: 'text', text: '以下是上述工具调用返回的图片：' }, ...images] });
+    onCheckpoint?.({ history, round: round + 1, keepHead, imagesLeft, toolCallCount });
   }
 }
 
