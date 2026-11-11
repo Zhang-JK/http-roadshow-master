@@ -180,7 +180,8 @@ export function NotifyProvider({ children }: { children: ReactNode }) {
         for (const j of r.active) {
           if (j.question) tell(`rs-q-${j.question.id}`, j, ['AI 在等你回答', clip(`${j.projectName ? `「${j.projectName}」` : ''}：${j.question.text}`)]);
         }
-        for (const j of r.finished) tell(`rs-job-${j.id}`, j, finishedText(j));
+        // A failed job continued from its saved progress finishes again: each run is told once.
+        for (const j of r.finished) tell(`rs-job-${j.id}${j.resumeCount ? `-${j.resumeCount}` : ''}`, j, finishedText(j));
       } catch {
         /* offline for a moment: try again on the next tick */
       }
