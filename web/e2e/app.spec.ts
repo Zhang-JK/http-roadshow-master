@@ -750,10 +750,10 @@ test('errors the model never fixes fail the generation after three fix rounds, w
 });
 
 /** The mock model comes back after going offline (OFFLINE_* markers in server/test/mockLlm.ts). */
-async function mockOnline() {
-  const r = await page.request.get('/api/llm/endpoints');
+async function mockOnline(on: Page = page) {
+  const r = await on.request.get('/api/llm/endpoints');
   const ep = ((await r.json()).endpoints as { name: string; baseUrl: string }[]).find((e) => e.name === 'Mock LLM')!;
-  expect((await page.request.post(`${new URL(ep.baseUrl).origin}/__mock/online`)).ok()).toBe(true);
+  expect((await on.request.post(`${new URL(ep.baseUrl).origin}/__mock/online`)).ok()).toBe(true);
 }
 
 test('the model goes offline halfway through a generation; continuing keeps the pages already written', async () => {
@@ -962,6 +962,7 @@ const waitDone = async (p: Page, jobId: string) => {
 };
 
 test('asks once for browser notifications, then notifies when my task finishes or the AI asks; switchable in the user menu', async ({ browser }) => {
+  test.slow();
   const p = await notifyPage(browser);
   const banner = p.locator('[data-testid=notify-banner]');
   await expect(banner).toContainText('开启浏览器通知？');
@@ -1014,6 +1015,17 @@ test('asks once for browser notifications, then notifies when my task finishes o
   const edit = await call(p, 'POST', `/api/projects/${projectId}/edit`, { prompt: '配色换成深蓝', scope: 'global' });
   await expect.poll(() => notes(p), { timeout: 30_000 }).toContainEqual(
     expect.objectContaining({ title: '修改已应用', body: '「通知模板」：配色换成深蓝', tag: `rs-job-${edit.job.id}` }),
+  );
+
+  // A failed edit continued from its saved progress is notified again when it finishes.
+  const cut = await call(p, 'POST', `/api/projects/${projectId}/edit`, { prompt: '加粗标题 OFFLINE_IN_EDIT', scope: 'global' });
+  await expect.poll(() => notes(p), { timeout: 30_000 }).toContainEqual(
+    expect.objectContaining({ title: '修改失败', tag: `rs-job-${cut.job.id}` }),
+  );
+  await mockOnline(p);
+  expect((await call(p, 'POST', `/api/jobs/${cut.job.id}/resume`, {})).job.resumeCount).toBe(1);
+  await expect.poll(() => notes(p), { timeout: 30_000 }).toContainEqual(
+    expect.objectContaining({ title: '修改已应用', body: '「通知模板」：加粗标题 OFFLINE_IN_EDIT', tag: `rs-job-${cut.job.id}-1` }),
   );
 
   // Switched off in the user menu: nothing more, and it stays off after a reload.
