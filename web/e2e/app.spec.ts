@@ -749,6 +749,76 @@ test('errors the model never fixes fail the generation after three fix rounds, w
   await expect(page.locator('.gen-state')).toContainText('已失败 1 次');
 });
 
+/** The mock model comes back after going offline (OFFLINE_* markers in server/test/mockLlm.ts). */
+async function mockOnline() {
+  const r = await page.request.get('/api/llm/endpoints');
+  const ep = ((await r.json()).endpoints as { name: string; baseUrl: string }[]).find((e) => e.name === 'Mock LLM')!;
+  expect((await page.request.post(`${new URL(ep.baseUrl).origin}/__mock/online`)).ok()).toBe(true);
+}
+
+test('the model goes offline halfway through a generation; continuing keeps the pages already written', async () => {
+  await page.goto('/templates');
+  await page.click('[data-testid=create-btn]');
+  await page.fill('input[name=name]', '断线续做模板');
+  await page.fill('textarea[name=style]', '简约');
+  await page.fill('textarea[name=notes]', 'MANY_PAGES OFFLINE_AT_PAGES');
+  await page.click('[data-testid=submit-create]');
+  await expect(page).toHaveURL(/\/p\//);
+  await expect(page.locator('.gen-state h2')).toHaveText('生成失败', { timeout: 60_000 });
+  await expect(page.locator('.gen-state .error-box')).toContainText('model offline (MOCK)');
+  await expect(page.locator('.toast-error')).toContainText('已保存进度，可从中断处继续');
+  await expect(page.locator('[data-testid=resume-generation-info]')).toContainText('已保存进度：已完成规划与 3/7 页');
+  await expect(page.locator('[data-testid=regenerate-btn]')).toHaveText('从头重新生成');
+
+  await mockOnline();
+  await page.click('[data-testid=resume-generation-btn]');
+  await expect(page.locator('.toast-info')).toContainText('正在从中断处继续：已完成规划与 3/7 页');
+  await expect(page.locator('.gen-state h2')).toContainText('AI 正在生成');
+  await expect(page.locator('[data-testid=job-progress]')).toContainText(/第 4–6 页|第 7 页|自检|交付检查/, { timeout: 30_000 });
+  await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(7, { timeout: 60_000 });
+  await expect(page.locator('.toast-success')).toContainText('生成完成');
+  await page.click('.tabs button:has-text("修改历史")');
+  await expect(historyItems()).toHaveCount(1);
+  await expect(page.locator('[data-testid=history-failed]')).toHaveCount(0);
+  await expect(historyItems().first().locator('[data-testid=hist-cost]')).toContainText('中断后继续 1 次');
+});
+
+test('a failed edit keeps its progress only while it is the latest change; continuing it adds one history entry', async () => {
+  await page.click('.tabs button:has-text("修改历史")');
+  const failed = page.locator('[data-testid=history-failed]');
+  await page.click('[data-testid=scope-seg] button:has-text("整份材料")');
+
+  // An older failure loses its progress once a newer change is requested.
+  await page.fill('[data-testid=prompt-input]', '先改一版 OFFLINE_IN_EDIT');
+  await page.click('[data-testid=send-btn]');
+  await expect(failed).toHaveCount(1, { timeout: 30_000 });
+  await expect(failed.locator('[data-testid=resume-info]')).toHaveText('已保存进度：已进行 1 轮修改（1 处改动）');
+  await page.fill('[data-testid=prompt-input]', '再改一版');
+  await page.click('[data-testid=send-btn]');
+  await expect(failed).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator('[data-testid=resume-btn]')).toHaveCount(0);
+  await expect(failed.locator('[data-testid=retry-btn]')).toHaveText(['重试', '重试']);
+  await mockOnline();
+
+  await page.fill('[data-testid=prompt-input]', '改主色 OFFLINE_IN_EDIT');
+  await page.click('[data-testid=send-btn]');
+  await expect(failed).toHaveCount(3, { timeout: 30_000 });
+  const latest = failed.first();
+  await expect(latest).toContainText('改主色 OFFLINE_IN_EDIT');
+  await expect(latest.locator('[data-testid=resume-info]')).toHaveText('已保存进度：已进行 1 轮修改（1 处改动）');
+  await expect(latest.locator('[data-testid=retry-btn]')).toHaveText('从头重试');
+  await expect(page.locator('.toast-error', { hasText: '已保存进度，可从中断处继续' }).last()).toBeVisible();
+
+  await mockOnline();
+  await latest.locator('[data-testid=resume-btn]').click();
+  await expect(page.locator('.toast-info', { hasText: '正在从中断处继续' })).toBeVisible();
+  await expect(failed).toHaveCount(2);
+  await expect(historyItems()).toHaveCount(2, { timeout: 30_000 });
+  await expect(historyItems().first()).toContainText('改主色 OFFLINE_IN_EDIT');
+  await expect(historyItems().first().locator('[data-testid=hist-cost]')).toContainText('中断后继续 1 次');
+  await expect(page.locator('.toast-success', { hasText: '修改已应用' })).toBeVisible();
+});
+
 test('admin allows MCP requests and issues a token; an MCP client creates a deck from a template', async ({ baseURL }) => {
   let token = '';
   let id = 0;
