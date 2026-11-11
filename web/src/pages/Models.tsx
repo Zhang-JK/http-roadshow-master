@@ -11,7 +11,6 @@ interface Form {
   baseUrl: string;
   apiKey: string;
   model: string;
-  weight: number;
   enabled: boolean;
   extraBody: string;
   maxConcurrency: number;
@@ -23,7 +22,6 @@ const EMPTY: Form = {
   baseUrl: 'https://openrouter.ai/api/v1',
   apiKey: '',
   model: '',
-  weight: 1,
   enabled: true,
   extraBody: '{}',
   maxConcurrency: 0,
@@ -81,7 +79,6 @@ interface ModelStats {
 export function ModelsPage() {
   const toast = useToast();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
-  const [assignments, setAssignments] = useState<{ userId: number; username: string; endpointName: string | null }[]>([]);
   const [usage, setUsage] = useState<Usage[]>([]);
   const [models, setModels] = useState<ModelStats[]>([]);
   const [settings, setSettings] = useState<{
@@ -108,6 +105,12 @@ export function ModelsPage() {
   const [parallel, setParallel] = useState<{ ep: Endpoint; result?: ParallelTestResult; error?: string } | null>(null);
   /** Endpoint whose running parallel test the open dialog is waiting for. */
   const parallelShown = useRef<number | null>(null);
+  /** The endpoint being dragged, and the row it is over: it would land before or after that row. */
+  const [drag, setDrag] = useState<{ id: number; over?: number; after?: boolean } | null>(null);
+  /** Order changes reach the server one at a time, in the order they were made. */
+  const orderSaves = useRef<Promise<unknown>>(Promise.resolve());
+  /** Endpoint whose drag handle gets the focus back after a keyboard move re-renders the rows. */
+  const refocus = useRef<number | null>(null);
 
   const load = useCallback(() => {
     api
@@ -117,7 +120,6 @@ export function ModelsPage() {
         setSystemProxy(r.systemProxy);
       })
       .catch((e) => toast(e.message, 'error'));
-    api.get<{ assignments: typeof assignments }>('/api/llm/assignments').then((r) => setAssignments(r.assignments));
     api.get<{ usage: Usage[]; models: ModelStats[] }>('/api/llm/usage').then((r) => {
       setUsage(r.usage);
       setModels(r.models ?? []);
@@ -125,6 +127,54 @@ export function ModelsPage() {
     api.get<{ settings: typeof settings }>('/api/settings').then((r) => setSettings(r.settings));
   }, [toast]);
   useEffect(load, [load]);
+
+  useEffect(() => {
+    if (refocus.current === null) return;
+    document.querySelector<HTMLElement>(`[data-handle-for="${refocus.current}"]`)?.focus();
+    refocus.current = null;
+  }, [endpoints]);
+
+  const saveOrder = (ids: number[]) => {
+    const byId = new Map(endpoints.map((e) => [e.id, e]));
+    const rank = new Map(ids.map((id, i) => [id, i]));
+    setEndpoints(ids.map((id) => byId.get(id)!));
+    setModels((ms) => [...ms].sort((a, b) => (rank.get(a.endpointId) ?? 0) - (rank.get(b.endpointId) ?? 0)));
+    orderSaves.current = orderSaves.current
+      .then(() => api.put('/api/llm/endpoints/order', { ids }))
+      .then(
+        () => toast('优先级已更新', 'success'),
+        (e) => {
+          toast((e as Error).message, 'error');
+          load();
+        },
+      );
+  };
+
+  /** The new order if the dragged endpoint were dropped now, or null when it would stay where it is. */
+  const dropOrder = (d: typeof drag) => {
+    if (!d || d.over === undefined) return null;
+    const ids = endpoints.map((e) => e.id).filter((id) => id !== d.id);
+    const at = ids.indexOf(d.over);
+    if (at < 0) return null;
+    ids.splice(at + (d.after ? 1 : 0), 0, d.id);
+    return ids.join() === endpoints.map((e) => e.id).join() ? null : ids;
+  };
+  const pendingOrder = dropOrder(drag);
+
+  const drop = () => {
+    setDrag(null);
+    if (pendingOrder) saveOrder(pendingOrder);
+  };
+
+  const move = (id: number, delta: number) => {
+    const ids = endpoints.map((e) => e.id);
+    const i = ids.indexOf(id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    refocus.current = id;
+    saveOrder(ids);
+  };
 
   const save = async () => {
     if (!form) return;
@@ -226,7 +276,7 @@ export function ModelsPage() {
         <div>
           <h1>模型接入</h1>
           <p className="muted">
-            配置兼容 OpenAI Chat Completions 协议的大模型接入点（模型必须支持图像输入）。启用多个接入点时，<strong>每个请求</strong>单独选择接入点：优先发往该用户的首选接入点（利用提示词缓存），它正在处理其他请求时改发最空闲的接入点，因此不同请求（包括同一用户的）可以并行；接入点故障时自动切换到下一个。设置了「并发上限」的接入点满载时，新请求在本地排队等待，排队时间不计入无响应超时。
+            配置兼容 OpenAI Chat Completions 协议的大模型接入点（模型必须支持图像输入）。所有用户使用同一套调度：<strong>每个请求</strong>（包括同一任务中的每次模型调用）发往排在最前、未达到「并发上限」的已启用接入点，它满载时改发下一个；全部满载时在本地排队，排队时间不计入无响应超时；请求失败时自动切换到下一个接入点。拖动 <GripIcon /> 调整优先级。排在前面的接入点不设并发上限时，后面的接入点只在它出错时才会用到；需要分流时为它设置并发上限（可用「并发测试」测出合适的值）。
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => { setForm({ ...EMPTY }); setFormTest(null); }} data-testid="add-endpoint">＋ 添加接入点</button>
@@ -235,14 +285,64 @@ export function ModelsPage() {
       <div className="table-card">
         <table className="table">
           <thead>
-            <tr><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th className="nowrap">权重</th><th title="正在处理的请求 / 并发上限">并发</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
+            <tr><th className="nowrap" title="请求优先发往排在前面的接入点。拖动 ⠿ 调整顺序，或聚焦后按 ↑ ↓">优先级</th><th>名称</th><th>模型</th><th>接入地址</th><th>Token</th><th title="正在处理的请求 / 并发上限">并发</th><th>状态</th><th>联通测试</th><th className="right">操作</th></tr>
           </thead>
-          <tbody>
+          <tbody onDragLeave={(e) => { if (drag && !e.currentTarget.contains(e.relatedTarget as Node)) setDrag({ id: drag.id }); }}>
             {endpoints.length === 0 && (
               <tr><td colSpan={9} className="muted center-text">尚未配置接入点，AI 生成功能不可用</td></tr>
             )}
-            {endpoints.map((ep) => (
-              <tr key={ep.id} data-testid="endpoint-row">
+            {endpoints.map((ep, i) => (
+              <tr
+                key={ep.id}
+                data-testid="endpoint-row"
+                className={[
+                  drag?.id === ep.id ? 'dragging' : '',
+                  pendingOrder && drag?.over === ep.id ? (drag.after ? 'drop-after' : 'drop-before') : '',
+                ].join(' ').trim() || undefined}
+                onDragOver={(e) => {
+                  if (!drag) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  const box = e.currentTarget.getBoundingClientRect();
+                  const after = e.clientY > box.top + box.height / 2;
+                  if (drag.over !== ep.id || drag.after !== after) setDrag({ id: drag.id, over: ep.id, after });
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  drop();
+                }}
+              >
+                <td className="prio-cell">
+                  <span
+                    className="drag-handle"
+                    draggable
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`「${ep.name}」排第 ${i + 1}，拖动或按上下方向键调整优先级`}
+                    title="拖动调整优先级（也可聚焦后按 ↑ ↓）"
+                    data-handle-for={ep.id}
+                    data-testid="priority-handle"
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('text/plain', ep.name);
+                      const row = e.currentTarget.closest('tr');
+                      if (row) {
+                        const box = row.getBoundingClientRect();
+                        e.dataTransfer.setDragImage(row, e.clientX - box.left, e.clientY - box.top);
+                      }
+                      setDrag({ id: ep.id });
+                    }}
+                    onDragEnd={() => setDrag(null)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+                      e.preventDefault();
+                      move(ep.id, e.key === 'ArrowUp' ? -1 : 1);
+                    }}
+                  >
+                    <GripIcon />
+                  </span>
+                  <span className={`prio-no${ep.enabled ? '' : ' off'}`} title={ep.enabled ? undefined : '已停用，不参与调度'} data-testid="endpoint-priority">{i + 1}</span>
+                </td>
                 <td><strong>{ep.name}</strong></td>
                 <td><code>{ep.model}</code></td>
                 <td className="muted small">
@@ -250,7 +350,6 @@ export function ModelsPage() {
                   {!ep.useProxy && <> <span className="tag" title="不经过系统代理，直接连接接入地址" data-testid="endpoint-direct">直连</span></>}
                 </td>
                 <td className="nowrap"><code>{ep.apiKeyMasked}</code></td>
-                <td>{ep.weight}</td>
                 <td className="nowrap" data-testid="endpoint-concurrency">{ep.inflight} / {ep.maxConcurrency || '不限'}</td>
                 <td className="nowrap">
                   <label className="switch">
@@ -277,7 +376,7 @@ export function ModelsPage() {
                   >
                     {parallelRunning.includes(ep.id) ? '并发测试中…' : '并发测试'}
                   </button>{' '}
-                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, weight: ep.weight, enabled: ep.enabled, extraBody: ep.extraBody, maxConcurrency: ep.maxConcurrency, useProxy: ep.useProxy }); setFormTest(null); }}>编辑</button>{' '}
+                  <button className="btn btn-sm" onClick={() => { setForm({ id: ep.id, name: ep.name, baseUrl: ep.baseUrl, apiKey: '', model: ep.model, enabled: ep.enabled, extraBody: ep.extraBody, maxConcurrency: ep.maxConcurrency, useProxy: ep.useProxy }); setFormTest(null); }}>编辑</button>{' '}
                   <button className="btn btn-sm btn-danger" onClick={() => remove(ep)}>删除</button>
                 </td>
               </tr>
@@ -328,96 +427,83 @@ export function ModelsPage() {
         </table>
       </div>
 
-      <div className="two-col">
-        <div className="panel-card">
-          <h3>用户 → 首选接入点</h3>
-          <p className="muted small">基于加权一致性哈希（Rendezvous Hashing），增删接入点时只有少量用户会被重新分配。首选接入点忙时，请求会改发最空闲的接入点。</p>
-          <table className="table compact">
-            <tbody>
-              {assignments.map((a) => (
-                <tr key={a.userId}><td>{a.username}</td><td>{a.endpointName ?? <span className="muted">—</span>}</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="panel-card">
-          <h3>生成设置</h3>
-          {settings && (
-            <div className="settings-form">
-              <label className="switch">
-                <input type="checkbox" checked={settings.attachScreenshots} onChange={(e) => saveSettings({ attachScreenshots: e.target.checked })} />
-                <span>修改单页/元素时附带页面截图（红框标出选中元素，利用多模态能力）</span>
+      <div className="panel-card settings-card">
+        <h3>生成设置</h3>
+        {settings && (
+          <div className="settings-form">
+            <label className="switch">
+              <input type="checkbox" checked={settings.attachScreenshots} onChange={(e) => saveSettings({ attachScreenshots: e.target.checked })} />
+              <span>修改单页/元素时附带页面截图（红框标出选中元素，利用多模态能力）</span>
+            </label>
+            <label className="switch">
+              <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
+              <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存（之后的交付检查始终运行：组装 index.html、检查 README 与各文件，有错误时交回模型修复）</span>
+            </label>
+            <label className="switch">
+              <input type="checkbox" checked={settings.askUser} onChange={(e) => saveSettings({ askUser: e.target.checked })} data-testid="ask-user-toggle" />
+              <span>允许 AI 向用户提问：需求含糊时先确认（任务暂停，在编辑页回答）；修改选中元素后发现其他页面有同类内容时，询问是否一起修改（修改要求里写明「全部 / 统一」时不再询问）</span>
+            </label>
+            {settings.askUser && (
+              <label className="field inline" title="超时或跳过时，AI 按自己的判断继续；同类内容不会扩大修改范围">
+                <span>等待回答最长（分钟）</span>
+                <input type="number" min="1" max="1440" defaultValue={settings.askTimeoutMinutes} onBlur={(e) => saveSettings({ askTimeoutMinutes: Number(e.target.value) })} data-testid="ask-timeout" />
               </label>
-              <label className="switch">
-                <input type="checkbox" checked={settings.selfCheck} onChange={(e) => saveSettings({ selfCheck: e.target.checked })} data-testid="self-check-toggle" />
-                <span>生成后自检：在无头浏览器中渲染草稿、检查布局，由模型查看截图并用工具修复后再保存（之后的交付检查始终运行：组装 index.html、检查 README 与各文件，有错误时交回模型修复）</span>
+            )}
+            <label className="field inline" title="分步生成：先写 README（需求、风格约定、页面规划）与样式文件，再每次生成几页，单次输出短、被截断也只需重做一页；单次生成：一次输出整份 HTML">
+              <span>生成方式</span>
+              <select value={settings.generateMode} onChange={(e) => saveSettings({ generateMode: e.target.value as 'files' | 'single' })} data-testid="generate-mode">
+                <option value="files">分步生成多文件（推荐）</option>
+                <option value="single">单次生成整份 HTML</option>
+              </select>
+            </label>
+            {settings.generateMode !== 'single' && (
+              <label className="field inline" title="分步生成时每次调用生成的页数；模型较慢或页面复杂时调小">
+                <span>每次生成页数</span>
+                <input type="number" min="1" max="10" defaultValue={settings.genPagesPerCall} onBlur={(e) => saveSettings({ genPagesPerCall: Number(e.target.value) })} data-testid="pages-per-call" />
               </label>
-              <label className="switch">
-                <input type="checkbox" checked={settings.askUser} onChange={(e) => saveSettings({ askUser: e.target.checked })} data-testid="ask-user-toggle" />
-                <span>允许 AI 向用户提问：需求含糊时先确认（任务暂停，在编辑页回答）；修改选中元素后发现其他页面有同类内容时，询问是否一起修改（修改要求里写明「全部 / 统一」时不再询问）</span>
-              </label>
-              {settings.askUser && (
-                <label className="field inline" title="超时或跳过时，AI 按自己的判断继续；同类内容不会扩大修改范围">
-                  <span>等待回答最长（分钟）</span>
-                  <input type="number" min="1" max="1440" defaultValue={settings.askTimeoutMinutes} onBlur={(e) => saveSettings({ askTimeoutMinutes: Number(e.target.value) })} data-testid="ask-timeout" />
-                </label>
-              )}
-              <label className="field inline" title="分步生成：先写 README（需求、风格约定、页面规划）与样式文件，再每次生成几页，单次输出短、被截断也只需重做一页；单次生成：一次输出整份 HTML">
-                <span>生成方式</span>
-                <select value={settings.generateMode} onChange={(e) => saveSettings({ generateMode: e.target.value as 'files' | 'single' })} data-testid="generate-mode">
-                  <option value="files">分步生成多文件（推荐）</option>
-                  <option value="single">单次生成整份 HTML</option>
-                </select>
-              </label>
-              {settings.generateMode !== 'single' && (
-                <label className="field inline" title="分步生成时每次调用生成的页数；模型较慢或页面复杂时调小">
-                  <span>每次生成页数</span>
-                  <input type="number" min="1" max="10" defaultValue={settings.genPagesPerCall} onBlur={(e) => saveSettings({ genPagesPerCall: Number(e.target.value) })} data-testid="pages-per-call" />
-                </label>
-              )}
-              <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">
-                <span>AI 修改方式</span>
-                <select value={settings.editMode} onChange={(e) => saveSettings({ editMode: e.target.value as 'tools' | 'rewrite' })} data-testid="edit-mode">
-                  <option value="tools">工具修改（推荐，只改相关部分）</option>
-                  <option value="rewrite">整页重写</option>
-                </select>
-              </label>
-              {settings.editMode === 'tools' && (
-                <label className="field inline">
-                  <span>修改最多工具轮数</span>
-                  <input type="number" min="2" max="40" defaultValue={settings.editToolRounds} onBlur={(e) => saveSettings({ editToolRounds: Number(e.target.value) })} />
-                </label>
-              )}
+            )}
+            <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">
+              <span>AI 修改方式</span>
+              <select value={settings.editMode} onChange={(e) => saveSettings({ editMode: e.target.value as 'tools' | 'rewrite' })} data-testid="edit-mode">
+                <option value="tools">工具修改（推荐，只改相关部分）</option>
+                <option value="rewrite">整页重写</option>
+              </select>
+            </label>
+            {settings.editMode === 'tools' && (
               <label className="field inline">
-                <span>自检最多工具轮数</span>
-                <input type="number" min="1" max="20" defaultValue={settings.selfCheckRounds} onBlur={(e) => saveSettings({ selfCheckRounds: Number(e.target.value) })} />
+                <span>修改最多工具轮数</span>
+                <input type="number" min="2" max="40" defaultValue={settings.editToolRounds} onBlur={(e) => saveSettings({ editToolRounds: Number(e.target.value) })} />
               </label>
-              <label className="field inline">
-                <span>最大输出 tokens</span>
-                <input type="number" defaultValue={settings.maxTokens} onBlur={(e) => saveSettings({ maxTokens: Number(e.target.value) })} data-testid="max-tokens" />
-              </label>
-              <label className="field inline" title="模型的上下文窗口（输入 + 输出）。每次调用会自动把输出上限收窄到剩余空间，对话过长时自动压缩早先的工具结果与截图">
-                <span>模型上下文 tokens</span>
-                <input type="number" min="8000" defaultValue={settings.contextTokens} onBlur={(e) => saveSettings({ contextTokens: Number(e.target.value) })} data-testid="context-tokens" />
-              </label>
-              <label className="field inline">
-                <span>Temperature</span>
-                <input type="number" step="0.1" min="0" max="2" defaultValue={settings.temperature} onBlur={(e) => saveSettings({ temperature: Number(e.target.value) })} />
-              </label>
-              <label className="field inline" title="模型持续这么久没有返回任何数据（包括长输入的预填充阶段）才判定为卡住并中止">
-                <span>无响应超时（秒）</span>
-                <input type="number" min="30" max="7200" defaultValue={settings.llmIdleTimeoutSec} onBlur={(e) => saveSettings({ llmIdleTimeoutSec: Number(e.target.value) })} data-testid="idle-timeout" />
-              </label>
-              <label className="field inline" title="单次模型调用（即使一直在输出）的最长时间">
-                <span>单次调用上限（分钟）</span>
-                <input type="number" min="5" max="1440" defaultValue={settings.llmMaxCallMinutes} onBlur={(e) => saveSettings({ llmMaxCallMinutes: Number(e.target.value) })} />
-              </label>
-              <p className="muted small">
-                只要模型还在持续输出就不会中止。按输出速度估算：「最大输出 tokens」÷ 每秒 tokens 数 ≈ 一次调用的最长耗时，例如 65536 tokens 在 20 tokens/秒 下约 55 分钟；单次调用上限应大于该值。分步生成时每次只输出几页（通常几千 tokens），回复被截断时会自动续写或重做缺失的页面。
-              </p>
-            </div>
-          )}
-        </div>
+            )}
+            <label className="field inline">
+              <span>自检最多工具轮数</span>
+              <input type="number" min="1" max="20" defaultValue={settings.selfCheckRounds} onBlur={(e) => saveSettings({ selfCheckRounds: Number(e.target.value) })} />
+            </label>
+            <label className="field inline">
+              <span>最大输出 tokens</span>
+              <input type="number" defaultValue={settings.maxTokens} onBlur={(e) => saveSettings({ maxTokens: Number(e.target.value) })} data-testid="max-tokens" />
+            </label>
+            <label className="field inline" title="模型的上下文窗口（输入 + 输出）。每次调用会自动把输出上限收窄到剩余空间，对话过长时自动压缩早先的工具结果与截图">
+              <span>模型上下文 tokens</span>
+              <input type="number" min="8000" defaultValue={settings.contextTokens} onBlur={(e) => saveSettings({ contextTokens: Number(e.target.value) })} data-testid="context-tokens" />
+            </label>
+            <label className="field inline">
+              <span>Temperature</span>
+              <input type="number" step="0.1" min="0" max="2" defaultValue={settings.temperature} onBlur={(e) => saveSettings({ temperature: Number(e.target.value) })} />
+            </label>
+            <label className="field inline" title="模型持续这么久没有返回任何数据（包括长输入的预填充阶段）才判定为卡住并中止">
+              <span>无响应超时（秒）</span>
+              <input type="number" min="30" max="7200" defaultValue={settings.llmIdleTimeoutSec} onBlur={(e) => saveSettings({ llmIdleTimeoutSec: Number(e.target.value) })} data-testid="idle-timeout" />
+            </label>
+            <label className="field inline" title="单次模型调用（即使一直在输出）的最长时间">
+              <span>单次调用上限（分钟）</span>
+              <input type="number" min="5" max="1440" defaultValue={settings.llmMaxCallMinutes} onBlur={(e) => saveSettings({ llmMaxCallMinutes: Number(e.target.value) })} />
+            </label>
+            <p className="muted small">
+              只要模型还在持续输出就不会中止。按输出速度估算：「最大输出 tokens」÷ 每秒 tokens 数 ≈ 一次调用的最长耗时，例如 65536 tokens 在 20 tokens/秒 下约 55 分钟；单次调用上限应大于该值。分步生成时每次只输出几页（通常几千 tokens），回复被截断时会自动续写或重做缺失的页面。
+            </p>
+          </div>
+        )}
       </div>
 
       {form && (
@@ -438,8 +524,7 @@ export function ModelsPage() {
           <label className="field"><span>模型名称</span><input name="ep-model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="例如 deepseek/deepseek-v4.1-flash-1017" /></label>
           <label className="field"><span>API Token{form.id ? '（留空则保持不变）' : ''}</span><input name="ep-key" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." /></label>
           <div className="row gap">
-            <label className="field"><span>权重（1–100）</span><input type="number" min={1} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: Number(e.target.value) })} /></label>
-            <label className="field" title="同一时间最多发给这个接入点的请求数，0 表示不限。模型一次只能处理少量请求（例如自部署、单卡）时设置，超出的请求在本地排队，不会因等待而触发无响应超时">
+            <label className="field" title="同一时间最多发给这个接入点的请求数，0 表示不限。达到上限时新请求改发下一个接入点，全部满载时在本地排队，不会因等待而触发无响应超时">
               <span>并发上限（0 = 不限）</span>
               <input type="number" min={0} max={64} value={form.maxConcurrency} onChange={(e) => setForm({ ...form, maxConcurrency: Number(e.target.value) })} data-testid="ep-max-concurrency" />
             </label>
@@ -552,5 +637,13 @@ export function ModelsPage() {
         );
       })()}
     </div>
+  );
+}
+
+function GripIcon() {
+  return (
+    <svg className="grip-icon" viewBox="0 0 10 16" width="10" height="16" aria-hidden="true">
+      {[3, 8, 13].flatMap((y) => [2.5, 7.5].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1.5" fill="currentColor" />))}
+    </svg>
   );
 }
