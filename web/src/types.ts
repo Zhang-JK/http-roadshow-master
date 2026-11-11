@@ -219,10 +219,11 @@ export interface Endpoint {
   baseUrl: string;
   apiKeyMasked: string;
   model: string;
-  weight: number;
+  /** Requests try endpoints in this order, lowest first. */
+  priority: number;
   enabled: boolean;
   extraBody: string;
-  /** Requests sent to it at the same time (0 = no limit); more wait in a queue. */
+  /** Requests sent to it at the same time (0 = no limit); more go to the next endpoint, or wait when all are full. */
   maxConcurrency: number;
   /** false: connects directly, bypassing the server's HTTPS_PROXY / HTTP_PROXY. */
   useProxy: boolean;

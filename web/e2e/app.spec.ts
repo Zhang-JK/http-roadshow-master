@@ -83,7 +83,55 @@ test('admin manages model endpoints and runs connectivity tests', async () => {
   await expect(page.locator('[data-testid=form-test-result]')).toContainText('测试通过', { timeout: 20_000 });
   await page.click('[data-testid=save-endpoint]');
   await expect(page.locator('[data-testid=endpoint-row]')).toHaveCount(2);
-  await expect(page.locator('.panel-card:has(h3:has-text("用户 → 首选接入点"))')).toContainText('admin');
+  // A new endpoint goes to the end of the priority order.
+  await expect(page.locator('[data-testid=endpoint-row] td:nth-child(2) strong')).toHaveText(['Mock LLM', 'Backup']);
+  await expect(page.locator('[data-testid=endpoint-priority]')).toHaveText(['1', '2']);
+});
+
+test('admin drags endpoints to set their priority, or moves them with the arrow keys', async () => {
+  const rows = page.locator('[data-testid=endpoint-row]');
+  const names = rows.locator('td:nth-child(2) strong');
+  const savedOrder = () =>
+    page.evaluate(() => fetch('/api/llm/endpoints').then((r) => r.json()).then((d) => d.endpoints.map((e: { name: string; priority: number }) => [e.name, e.priority])));
+  await expect(page.locator('h3:has-text("用户 → 首选接入点")')).toHaveCount(0);
+  await expect(page.locator('.page-head')).toContainText('所有用户使用同一套调度');
+
+  // While Backup is dragged by its handle over the top of Mock LLM, a line marks where it would land; Esc cancels.
+  const backupHandle = rows.nth(1).locator('[data-testid=priority-handle]');
+  await backupHandle.hover();
+  await page.mouse.down();
+  const target = (await rows.nth(0).boundingBox())!;
+  await page.mouse.move(target.x + 300, target.y + 8);
+  await page.mouse.move(target.x + 300, target.y + 6);
+  await expect(rows.nth(0)).toHaveClass(/drop-before/);
+  await expect(rows.nth(1)).toHaveClass(/dragging/);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await expect(rows.nth(0)).not.toHaveClass(/drop-before/);
+  await expect(rows.nth(1)).not.toHaveClass(/dragging/);
+  await expect(names).toHaveText(['Mock LLM', 'Backup']);
+
+  await backupHandle.dragTo(rows.nth(0), { targetPosition: { x: 300, y: 6 } });
+  await expect(names).toHaveText(['Backup', 'Mock LLM']);
+  await expect(page.locator('[data-testid=endpoint-priority]')).toHaveText(['1', '2']);
+  await expect(page.locator('.toast-success', { hasText: '优先级已更新' })).toBeVisible();
+  await expect(rows.nth(0)).not.toHaveClass(/drop-before|dragging/);
+  expect(await savedOrder()).toEqual([['Backup', 1], ['Mock LLM', 2]]);
+  await page.reload();
+  await expect(names).toHaveText(['Backup', 'Mock LLM']);
+
+  // Dropping a row where it already is changes nothing.
+  await rows.nth(0).locator('[data-testid=priority-handle]').dragTo(rows.nth(1), { targetPosition: { x: 300, y: 4 } });
+  await expect(names).toHaveText(['Backup', 'Mock LLM']);
+
+  // From the keyboard: focus Mock LLM's handle and press ↑; the focus stays on it.
+  await rows.nth(1).locator('[data-testid=priority-handle]').focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(names).toHaveText(['Mock LLM', 'Backup']);
+  await expect(rows.nth(0).locator('[data-testid=priority-handle]')).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(names).toHaveText(['Mock LLM', 'Backup']);
+  await expect.poll(savedOrder).toEqual([['Mock LLM', 1], ['Backup', 2]]);
 });
 
 test('generation settings default to staged multi-file output within a 200K context', async () => {
@@ -585,7 +633,7 @@ test('the dashboard marks a project being edited; admins follow live and past se
   await expect(row).toContainText('ASK_ME 会话测试');
   await expect(row).toContainText('等待回答：MOCK-QUESTION');
   await expect(row).toContainText(deckName);
-  await expect(row).toContainText(/Mock LLM|Backup/);
+  await expect(row).toContainText('Mock LLM');
   await row.click();
   await expect(page.locator('[data-testid=session-call]').first()).toContainText('成功');
 
@@ -609,13 +657,14 @@ test('the dashboard marks a project being edited; admins follow live and past se
   await expect(page.locator('[data-testid=session-call]').nth(1)).toBeVisible();
 });
 
-test('model access page shows usage with output speed above the user assignments, and the parallel limit', async () => {
+test('model access page shows usage with output speed above the generation settings, and the parallel limit', async () => {
   await page.click('nav >> text=模型接入');
   const usage = page.locator('[data-testid=usage-card]');
   await expect(usage).toBeVisible();
   const usageTop = (await usage.boundingBox())!.y;
-  const assignTop = (await page.locator('h3:has-text("用户 → 首选接入点")').boundingBox())!.y;
-  expect(usageTop).toBeLessThan(assignTop);
+  const settingsTop = (await page.locator('h3:has-text("生成设置")').boundingBox())!.y;
+  expect(usageTop).toBeLessThan(settingsTop);
+  await expect(usage.locator('[data-testid=model-stats-row] td:first-child')).toHaveText(['Mock LLM', 'Backup']);
   await expect(usage.locator('[data-testid=model-stats-row]').first()).toContainText('Mock LLM');
   await expect(usage.locator('[data-testid=model-speed]', { hasText: 'tok/s' }).first()).toBeVisible();
   const row = page.locator('[data-testid=endpoint-row]').first();
