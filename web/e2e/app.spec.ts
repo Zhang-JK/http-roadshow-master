@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 import fs from 'node:fs';
 
 test.describe.configure({ mode: 'serial' });
@@ -784,4 +784,168 @@ test('admin allows MCP requests and issues a token; an MCP client creates a deck
   await card.locator('[data-testid=mcp-revoke]').click();
   await expect(card).toContainText('尚未生成');
   expect((await mcp('tools/list')).status).toBe(401);
+});
+
+/** A page whose Notification is a recorder: permission is kept in localStorage, focus is up to the test. */
+async function notifyPage(browser: Browser, opts: { insecure?: boolean } = {}) {
+  const ctx = await browser.newContext();
+  await ctx.addInitScript((insecure) => {
+    const w = window as any;
+    w.__notes = [];
+    w.__focused = true;
+    class FakeNotification {
+      static get permission() {
+        return localStorage.getItem('fake-permission') ?? 'default';
+      }
+      static async requestPermission() {
+        w.__asked = (w.__asked ?? 0) + 1;
+        localStorage.setItem('fake-permission', 'granted');
+        return 'granted';
+      }
+      title: string;
+      body: string;
+      tag: string;
+      icon: string;
+      closed = false;
+      onclick: (() => void) | null = null;
+      constructor(title: string, o: { body: string; tag: string; icon: string }) {
+        Object.assign(this, { title, body: o.body, tag: o.tag, icon: o.icon });
+        w.__notes.push(this);
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+    w.Notification = FakeNotification;
+    document.hasFocus = () => w.__focused;
+    if (insecure) Object.defineProperty(window, 'isSecureContext', { value: false });
+  }, !!opts.insecure);
+  const p = await ctx.newPage();
+  await p.goto('/login');
+  await p.fill('input[name=username]', 'admin');
+  await p.fill('input[name=password]', 'admin123');
+  await p.click('button:has-text("登录")');
+  await expect(p.locator('[data-testid=user-menu]')).toBeVisible();
+  return p;
+}
+
+const notes = (p: Page) => p.evaluate(() => (window as any).__notes.map((n: any) => ({ title: n.title, body: n.body, tag: n.tag, icon: n.icon })));
+const call = (p: Page, method: string, url: string, body?: unknown) =>
+  p.evaluate(
+    async ([method, url, body]) => {
+      const r = await fetch(url as string, { method: method as string, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+      return r.json();
+    },
+    [method, url, body] as const,
+  );
+const waitDone = async (p: Page, jobId: string) => {
+  await expect.poll(async () => (await call(p, 'GET', `/api/jobs/${jobId}`)).job.status, { timeout: 60_000 }).toMatch(/done|error/);
+};
+
+test('asks once for browser notifications, then notifies when my task finishes or the AI asks; switchable in the user menu', async ({ browser }) => {
+  const p = await notifyPage(browser);
+  const banner = p.locator('[data-testid=notify-banner]');
+  await expect(banner).toContainText('开启浏览器通知？');
+  await p.click('[data-testid=notify-enable]');
+  await expect(banner).toHaveCount(0);
+  await expect(p.locator('.toast-success').last()).toContainText('已开启任务通知');
+  expect(await p.evaluate(() => (window as any).__asked)).toBe(1);
+  expect(await notes(p)).toEqual([expect.objectContaining({ title: '任务通知已开启', icon: '/notification-icon.png' })]);
+  await p.reload();
+  await expect(p.locator('[data-testid=user-menu]')).toBeVisible();
+  await expect(banner).toHaveCount(0);
+  await p.click('[data-testid=user-menu]');
+  await expect(p.locator('[data-testid=notify-toggle]')).toBeChecked();
+  await expect(p.locator('[data-testid=notify-hint]')).toHaveText('任务完成时提醒你');
+  await p.click('[data-testid=user-menu]');
+
+  // In the background: the AI's question, then the finished generation; clicking opens the project.
+  await p.evaluate(() => ((window as any).__focused = false));
+  const created = await call(p, 'POST', '/api/projects', { type: 'template', name: '通知模板', style: '简约', notes: 'ASK_ME' });
+  const projectId = created.project.id as string;
+  await expect.poll(() => notes(p), { timeout: 30_000 }).toContainEqual(
+    expect.objectContaining({ title: 'AI 在等你回答', body: '「通知模板」：MOCK-QUESTION 面向谁？' }),
+  );
+  const { job } = await call(p, 'GET', `/api/jobs/${created.job.id}`);
+  await call(p, 'POST', `/api/jobs/${job.id}/answer`, { questionId: job.question.id, choice: 0 });
+  await expect.poll(() => notes(p), { timeout: 60_000 }).toContainEqual({
+    title: '模板生成完成',
+    body: '「通知模板」已生成，点击打开查看',
+    tag: `rs-job-${job.id}`,
+    icon: '/notification-icon.png',
+  });
+  await p.evaluate((tag) => (window as any).__notes.find((n: any) => n.tag === tag).onclick(), `rs-job-${job.id}`);
+  await expect(p).toHaveURL(new RegExp(`/p/${projectId}$`));
+  await expect(p.locator('[data-testid=page-thumb]')).toHaveCount(3);
+  expect(await p.evaluate((tag) => (window as any).__notes.find((n: any) => n.tag === tag).closed, `rs-job-${job.id}`)).toBe(true);
+
+  // Looking at the project's editor: its own toast says it, no notification.
+  await p.evaluate(() => ((window as any).__focused = true));
+  const before = (await notes(p)).length;
+  await p.click('[data-testid=scope-seg] button:has-text("整份材料")');
+  await p.fill('[data-testid=prompt-input]', '标题再醒目一些');
+  await p.click('[data-testid=send-btn]');
+  await expect(p.locator('.toast-success').last()).toContainText('修改已应用', { timeout: 30_000 });
+  await p.waitForTimeout(4000);
+  expect(await notes(p)).toHaveLength(before);
+
+  // On another page, even with the window focused, my edit finishing is notified.
+  await p.click('text=← 返回');
+  await expect(p.locator('[data-testid=project-card]:has-text("通知模板")')).toBeVisible();
+  const edit = await call(p, 'POST', `/api/projects/${projectId}/edit`, { prompt: '配色换成深蓝', scope: 'global' });
+  await expect.poll(() => notes(p), { timeout: 30_000 }).toContainEqual(
+    expect.objectContaining({ title: '修改已应用', body: '「通知模板」：配色换成深蓝', tag: `rs-job-${edit.job.id}` }),
+  );
+
+  // Switched off in the user menu: nothing more, and it stays off after a reload.
+  await p.click('[data-testid=user-menu]');
+  await p.locator('[data-testid=notify-toggle]').uncheck();
+  await expect(p.locator('[data-testid=notify-hint]')).toHaveText('已关闭');
+  await expect(p.locator('.toast-info').last()).toContainText('已关闭任务通知');
+  await p.click('[data-testid=user-menu]');
+  await p.evaluate(() => ((window as any).__focused = false));
+  const count = (await notes(p)).length;
+  const quiet = await call(p, 'POST', `/api/projects/${projectId}/edit`, { prompt: '字号统一', scope: 'global' });
+  await waitDone(p, quiet.job.id);
+  await p.waitForTimeout(3500);
+  expect(await notes(p)).toHaveLength(count);
+  await p.reload();
+  await p.click('[data-testid=user-menu]');
+  await expect(p.locator('[data-testid=notify-toggle]')).not.toBeChecked();
+  await expect(banner).toHaveCount(0);
+
+  // Blocked in the browser's site settings: no banner, and the switch says why.
+  await p.evaluate(() => localStorage.setItem('fake-permission', 'denied'));
+  await p.reload();
+  await p.click('[data-testid=user-menu]');
+  await expect(p.locator('[data-testid=notify-toggle]')).toBeDisabled();
+  await expect(p.locator('[data-testid=notify-hint]')).toHaveText('已被浏览器阻止，请在网站设置中允许');
+  await p.context().close();
+});
+
+test('"not now" on the banner asks nothing; notifications can be turned on later from the user menu, and need HTTPS', async ({ browser }) => {
+  const p = await notifyPage(browser);
+  await p.click('[data-testid=notify-later]');
+  await expect(p.locator('[data-testid=notify-banner]')).toHaveCount(0);
+  await expect(p.locator('.toast-info').last()).toContainText('之后可在右上角头像菜单开启任务通知');
+  expect(await p.evaluate(() => (window as any).__asked)).toBeUndefined();
+  await p.reload();
+  await expect(p.locator('[data-testid=user-menu]')).toBeVisible();
+  await expect(p.locator('[data-testid=notify-banner]')).toHaveCount(0);
+  await p.click('[data-testid=user-menu]');
+  await expect(p.locator('[data-testid=notify-hint]')).toHaveText('已关闭');
+  await p.locator('[data-testid=notify-toggle]').check();
+  await expect(p.locator('[data-testid=notify-toggle]')).toBeChecked();
+  expect(await p.evaluate(() => (window as any).__asked)).toBe(1);
+  expect(await notes(p)).toEqual([expect.objectContaining({ title: '任务通知已开启' })]);
+  await p.context().close();
+
+  const insecure = await notifyPage(browser, { insecure: true });
+  await expect(insecure.locator('.page-head')).toBeVisible();
+  await expect(insecure.locator('[data-testid=notify-banner]')).toHaveCount(0);
+  await insecure.click('[data-testid=user-menu]');
+  await expect(insecure.locator('[data-testid=notify-toggle]')).toBeDisabled();
+  await expect(insecure.locator('[data-testid=notify-hint]')).toHaveText('需通过 HTTPS 或 localhost 访问');
+  await expect(insecure.locator('[data-testid=notify-menu]')).toHaveAttribute('title', /chrome:\/\/flags/);
+  await insecure.context().close();
 });
