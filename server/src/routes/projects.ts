@@ -14,6 +14,7 @@ import {
   MAX_ELEMENT_TEXT,
   jobProgress,
   projectDoc,
+  resumeJob,
   retryJob,
   startEdit,
   startGeneration,
@@ -27,6 +28,7 @@ import { exportBundle } from '../bundle.js';
 import { answerQuestion, pendingQuestion, projectsAsking } from '../questions.js';
 import { cssFiles, fileTree, nameFiles } from '../files.js';
 import { jobDuration, jobStats, type JobStats } from '../calls.js';
+import { resumableJobs, type CheckpointInfo } from '../checkpoint.js';
 import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from '../create.js';
 
 const MAX_README = 50_000;
@@ -71,7 +73,8 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
   };
 }
 
-function publicJob(j: JobRow, stats?: JobStats) {
+/** `resume`: the saved progress a failed job can continue from. */
+function publicJob(j: JobRow, stats?: JobStats, resume?: CheckpointInfo) {
   const progress = jobProgress.get(j.id);
   return {
     id: j.id,
@@ -93,13 +96,15 @@ function publicJob(j: JobRow, stats?: JobStats) {
     finishedAt: j.finished_at ?? null,
     retryOf: j.retry_of ?? null,
     retriedBy: j.retried_by ?? null,
+    resume: resume ?? null,
+    resumeCount: j.resume_count ?? 0,
     userId: j.user_id,
     createdAt: j.created_at,
     updatedAt: j.updated_at,
   };
 }
 
-const withStats = (db: DB, j: JobRow) => publicJob(j, jobStats(db, [j.id]).get(j.id));
+const withStats = (db: DB, j: JobRow) => publicJob(j, jobStats(db, [j.id]).get(j.id), resumableJobs(db, [j.id]).get(j.id));
 
 const publicAsset = (db: DB, a: AssetRow) => {
   const slides = a.kind === 'document' ? slideAssets(db, a.id) : [];
@@ -330,6 +335,18 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     return { job: withStats(db, j) };
   });
 
+  /** Any user may continue the latest failed change of a project from its saved progress; it stays its requester's. */
+  app.post('/api/jobs/:id/resume', async (req) => {
+    const user = requireUser(req);
+    const j = db.prepare('SELECT * FROM jobs WHERE id = ?').get((req.params as any).id) as JobRow | undefined;
+    if (!j) throw new HttpError(404, '任务不存在');
+    try {
+      return { job: publicJob(resumeJob(db, j, user.id)) };
+    } catch (e) {
+      throw new HttpError(409, (e as Error).message);
+    }
+  });
+
   /** Any user may run a failed request again; it runs as theirs. */
   app.post('/api/jobs/:id/retry', async (req) => {
     const user = requireUser(req);
@@ -353,7 +370,10 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     ) as JobRow[];
     const names = userNames(db);
     const stats = jobStats(db, rows.map((j) => j.id));
-    return { jobs: rows.map((j) => ({ ...publicJob(j, stats.get(j.id)), userName: j.user_id ? names.get(j.user_id) ?? null : null })) };
+    const resume = resumableJobs(db, rows.map((j) => j.id));
+    return {
+      jobs: rows.map((j) => ({ ...publicJob(j, stats.get(j.id), resume.get(j.id)), userName: j.user_id ? names.get(j.user_id) ?? null : null })),
+    };
   });
 
   const pageOp = (op: 'delete' | 'duplicate' | 'move') =>
@@ -408,7 +428,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       .prepare(
         `SELECT v.id, v.version_no, v.user_id, v.action, v.scope, v.page_index, v.page_id, v.element_ids, v.prompt, v.summary, v.created_at,
                 u.username, u.display_name, j.id AS job_id, j.status AS job_status, j.created_at AS job_created, j.updated_at AS job_updated,
-                j.finished_at AS job_finished
+                j.finished_at AS job_finished, j.resumed_at AS job_resumed, j.prior_ms AS job_prior
          FROM project_versions v LEFT JOIN users u ON u.id = v.user_id LEFT JOIN jobs j ON j.version_id = v.id
          WHERE v.project_id = ? ORDER BY v.version_no DESC`,
       )
@@ -420,15 +440,23 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       )
       .all(p.id) as (JobRow & { username: string | null; display_name: string | null })[];
     const stats = jobStats(db, [...rows.filter((r) => r.job_id).map((r) => r.job_id as string), ...failed.map((j) => j.id)]);
+    const resume = resumableJobs(db, failed.map((j) => j.id));
     return {
       failedJobs: failed.map((j) => ({
-        ...publicJob(j, stats.get(j.id)),
+        ...publicJob(j, stats.get(j.id), resume.get(j.id)),
         userName: j.display_name || j.username || '（已删除用户）',
       })),
       versions: rows.map((r) => ({
         jobId: r.job_id ?? null,
         durationMs: r.job_id
-          ? jobDuration({ status: r.job_status, created_at: r.job_created, updated_at: r.job_updated, finished_at: r.job_finished })
+          ? jobDuration({
+              status: r.job_status,
+              created_at: r.job_created,
+              updated_at: r.job_updated,
+              finished_at: r.job_finished,
+              resumed_at: r.job_resumed,
+              prior_ms: r.job_prior,
+            })
           : null,
         stats: r.job_id ? stats.get(r.job_id) ?? null : null,
         id: r.id,

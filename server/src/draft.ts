@@ -18,7 +18,7 @@ import {
 import { sliceText, type FileTools, type ToolDef, type ToolOutput } from './fileTools.js';
 import { ADDITIONS_CSS, checkPath, cssFiles, fileTree, joinCssFiles, nameFiles, parseFileBlocks, README } from './files.js';
 import { checkProject, formatProjectReport, unbalancedTags, type CheckInput, type ProjectIssue, type TemplateCheck } from './projectCheck.js';
-import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart } from './llm.js';
+import { chatWithTools, type ChatMessage, type ChatOptions, type ChatResult, type ContentPart, type ToolLoopState } from './llm.js';
 import { inspectLayout, renderContactSheets, renderPageImages, type PageReport } from './render.js';
 
 type Resolver = (html: string) => string;
@@ -41,9 +41,28 @@ function withoutIds(html: string): string {
   return $.html();
 }
 
+/** Everything a Draft holds (see Draft.save). */
+export interface DraftState {
+  mode: 'doc' | 'fragment';
+  doc: DeckDoc;
+  pages: DeckPage[];
+  extraCss: string;
+  targetPageId?: string;
+  edits: number;
+  fixups: string[];
+  readmeEdit?: string;
+  templateCheck?: TemplateCheck;
+  expectedPages?: string[];
+  opened: string[];
+  changed: string[];
+  sharedOpen: boolean;
+  sharedChanged: boolean;
+}
+
 /**
- * The model's work in progress for one job. It lives only in memory: the draft tools edit this object
- * and nothing else, and the job saves it as a new version once the review is over.
+ * The model's work in progress for one job. The draft tools edit this object and nothing else, and
+ * the job saves it as a new version once the review is over; until then it is only kept with the
+ * job's progress (Draft.save), so that a job whose model went away can continue.
  * In fragment mode (page/element edits) only the pages that replace the target page are editable.
  */
 export class Draft {
@@ -96,6 +115,39 @@ export class Draft {
     const frag = parseFragment(text);
     if (!snapshot.pages.some((p) => p.id === pageId)) throw new Error('目标页面不存在');
     return new Draft('fragment', cloneDoc(snapshot), frag.pages, frag.css, pageId);
+  }
+
+  save(): DraftState {
+    return {
+      mode: this.mode,
+      doc: this.doc,
+      pages: this.pages,
+      extraCss: this.extraCss,
+      targetPageId: this.targetPageId,
+      edits: this.edits,
+      fixups: this.fixups,
+      readmeEdit: this.readmeEdit,
+      templateCheck: this.templateCheck,
+      expectedPages: this.expectedPages,
+      opened: [...this.opened],
+      changed: [...this.changed],
+      sharedOpen: this.sharedOpen,
+      sharedChanged: this.sharedChanged,
+    };
+  }
+
+  static restore(s: DraftState): Draft {
+    const d = new Draft(s.mode, s.doc, s.pages, s.extraCss, s.targetPageId);
+    d.edits = s.edits;
+    d.fixups = s.fixups;
+    d.readmeEdit = s.readmeEdit;
+    d.templateCheck = s.templateCheck;
+    d.expectedPages = s.expectedPages;
+    d.opened = new Set(s.opened);
+    d.changed = new Set(s.changed);
+    d.sharedOpen = s.sharedOpen;
+    d.sharedChanged = s.sharedChanged;
+    return d;
   }
 
   /** The draft as it would be saved, with ids assigned; page n of the model is pages[n - 1]. */
@@ -1194,6 +1246,22 @@ export interface ReviewOptions extends ChatOptions {
   finalCheck?: boolean;
   /** Errors the project already had before this job (an edit is not failed for those). */
   baseline?: () => Promise<ProjectIssue[]>;
+  /** Continue a review saved by onCheckpoint. */
+  resume?: ReviewState;
+  /** Called whenever the review gets further: each tool round, each layout pass and each delivery check. */
+  onCheckpoint?: (state: ReviewState) => void;
+}
+
+/** How far a review got (the draft itself is saved separately). */
+export interface ReviewState {
+  log: ReviewLog;
+  editsBefore: number;
+  /** The review conversation so far; the delivery check continues it. */
+  history?: ChatMessage[];
+  /** The layout review pass under way: its opening messages and the tool conversation so far. */
+  layout?: { pass: number; messages: ChatMessage[]; loop?: ToolLoopState };
+  /** The delivery check round under way (0 = the first check) and, while the model fixes, its conversation. */
+  check?: { fix: number; loop?: ToolLoopState };
 }
 
 /** Times a failed delivery check goes back to the model; still failing after that fails the job. */
@@ -1220,8 +1288,9 @@ ${report}`;
  * the checker itself never fail the job: the draft as it stands is kept.
  */
 export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): Promise<ReviewLog> {
-  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, baseline, ...chatOpts } = opts;
-  const editsBefore = draft.edits;
+  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, baseline, resume, onCheckpoint, ...chatOpts } =
+    opts;
+  const editsBefore = resume?.editsBefore ?? draft.edits;
   const focus = () => (draft.mode === 'fragment' ? draft.editablePages() : undefined);
   const inspect = async () => {
     const view = draft.view();
@@ -1229,9 +1298,11 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
     const reports = await inspectLayout(view, resolver, pages?.map((n) => view.pages[n - 1].id));
     return { view, reports, text: formatReport(view, reports, pages) };
   };
-  const log: ReviewLog = { before: { errors: 0, warnings: 0 }, after: { errors: 0, warnings: 0 }, passes: 0, toolCalls: 0, edits: 0 };
+  const log: ReviewLog = resume?.log ?? { before: { errors: 0, warnings: 0 }, after: { errors: 0, warnings: 0 }, passes: 0, toolCalls: 0, edits: 0 };
+  let history: ChatMessage[] | undefined = resume?.history;
+  const save = (at: Pick<ReviewState, 'layout' | 'check'>) => onCheckpoint?.({ log, editsBefore, history, ...at });
   const tools = combineTools(createDraftTools(draft, resolver, db), fileTools);
-  const converse = async (messages: ChatMessage[], rounds: number) => {
+  const converse = async (messages: ChatMessage[], rounds: number, at: (loop: ToolLoopState) => Pick<ReviewState, 'layout' | 'check'>, loop?: ToolLoopState) => {
     const r = await chatWithTools(db, userId, messages, {
       ...chatOpts,
       tools: tools.defs,
@@ -1244,6 +1315,8 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
       maxRounds: rounds,
       maxImages: 16,
       allowEmptyFinal: true,
+      resume: loop,
+      onCheckpoint: (state) => save(at(state)),
     });
     if (r.text && draft.replaceFromText(r.text)) log.summary = '（模型重新输出了完整内容）';
     else if (r.text) log.summary = cleanSummary(r.text);
@@ -1256,41 +1329,55 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
       content: `（初稿已完成：共 ${pages} 页，页面 HTML 约 ${draft.view().pages.reduce((n, p) => n + p.html.length, 0)} 字符，已保存为草稿；可用 read_draft 查看文件列表与源码。）`,
     },
   ];
-  let history: ChatMessage[] | undefined;
-  if (!layoutReview) log.layoutSkipped = true;
+  if (resume?.check) {
+    // The layout review was over.
+  } else if (!layoutReview && !resume?.layout) log.layoutSkipped = true;
   else {
     try {
-      onStage?.('自检：渲染并检查初稿');
-      const first = await inspect();
-      log.before = log.after = countIssues(first.reports);
-      if (!(skipIfClean && !log.before.errors)) {
-        const labels = first.view.pages.map((p, i) => `第 ${i + 1} 页 ${p.file ?? ''}${draft.mode === 'fragment' && !draft.isEditable(i + 1) ? '（只读）' : ''}`);
-        const sheets = await renderContactSheets(first.view, resolver, { labels });
-        const images: ContentPart[] = sheets.flatMap((s, i) => [
-          { type: 'text' as const, text: sheets.length > 1 ? `缩略图总览 ${i + 1}/${sheets.length}：` : '缩略图总览：' },
-          { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${s.toString('base64')}` } },
-        ]);
-        let messages: ChatMessage[] = [
-          ...opening(first.view.pages.length),
-          { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text) }, ...images] },
-        ];
-        for (let pass = 0; pass < 2; pass++) {
-          log.passes++;
-          onStage?.('自检：模型检查草稿');
-          const r = await converse(messages, pass === 0 ? maxRounds : Math.max(2, Math.ceil(maxRounds / 2)));
-          history = r.history;
-          onStage?.('自检：复查布局');
-          const report = await inspect();
-          log.after = countIssues(report.reports);
-          if (!log.after.errors || pass > 0) break;
+      let messages: ChatMessage[] | undefined;
+      let pass = 0;
+      let resumed = resume?.layout;
+      if (resumed) ({ messages, pass } = resumed);
+      else {
+        onStage?.('自检：渲染并检查初稿');
+        const first = await inspect();
+        log.before = log.after = countIssues(first.reports);
+        if (!(skipIfClean && !log.before.errors)) {
+          const labels = first.view.pages.map((p, i) => `第 ${i + 1} 页 ${p.file ?? ''}${draft.mode === 'fragment' && !draft.isEditable(i + 1) ? '（只读）' : ''}`);
+          const sheets = await renderContactSheets(first.view, resolver, { labels });
+          const images: ContentPart[] = sheets.flatMap((s, i) => [
+            { type: 'text' as const, text: sheets.length > 1 ? `缩略图总览 ${i + 1}/${sheets.length}：` : '缩略图总览：' },
+            { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${s.toString('base64')}` } },
+          ]);
           messages = [
-            ...r.history,
-            {
-              role: 'user',
-              content: `【自动复查】草稿中仍检测到以下问题，请继续修复（若确属有意设计，可说明理由后结束）：\n${report.text}`,
-            },
+            ...opening(first.view.pages.length),
+            { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text) }, ...images] },
           ];
         }
+      }
+      for (; messages && pass < 2; pass++) {
+        const p = pass;
+        const current = messages;
+        if (!resumed) {
+          log.passes++;
+          save({ layout: { pass: p, messages: current } });
+        }
+        const loop = resumed?.loop;
+        resumed = undefined;
+        onStage?.('自检：模型检查草稿');
+        const r = await converse(current, p === 0 ? maxRounds : Math.max(2, Math.ceil(maxRounds / 2)), (l) => ({ layout: { pass: p, messages: current, loop: l } }), loop);
+        history = r.history;
+        onStage?.('自检：复查布局');
+        const report = await inspect();
+        log.after = countIssues(report.reports);
+        if (!log.after.errors || p > 0) break;
+        messages = [
+          ...r.history,
+          {
+            role: 'user',
+            content: `【自动复查】草稿中仍检测到以下问题，请继续修复（若确属有意设计，可说明理由后结束）：\n${report.text}`,
+          },
+        ];
       }
     } catch (e) {
       log.error = (e as Error).message;
@@ -1299,7 +1386,12 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
   if (finalCheck) {
     let errors: ProjectIssue[] = [];
     let fixError: string | undefined;
-    for (let fix = 0; ; fix++) {
+    // Continued after a failure: at least one more round to fix what is left.
+    const maxFixes = resume?.check ? Math.max(MAX_CHECK_FIXES, resume.check.fix + 1) : MAX_CHECK_FIXES;
+    // A fix round the model was in the middle of: the check runs again, then that conversation continues.
+    let pending = resume?.check?.loop;
+    for (let fix = resume?.check?.fix ?? 0; ; fix++) {
+      if (!pending) save({ check: { fix } });
       onStage?.('交付检查：组装 index.html，检查 README、样式与页面文件');
       const input = draft.checkInput();
       let issues: ProjectIssue[];
@@ -1318,12 +1410,17 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
         fixes: fix,
         remaining: errors.slice(0, 5).map((i) => `${i.file}：${i.message}`.slice(0, 200)),
       };
-      if (!errors.length || fix >= MAX_CHECK_FIXES) break;
-      onStage?.(`交付检查：模型修复问题（第 ${fix + 1}/${MAX_CHECK_FIXES} 轮）`);
+      if (!errors.length || fix >= maxFixes) break;
+      onStage?.(`交付检查：模型修复问题（第 ${fix + 1}/${maxFixes} 轮）`);
+      const loop = pending;
+      pending = undefined;
       try {
+        const f = fix;
         const r = await converse(
-          [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues)) }],
+          loop ? [] : [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues)) }],
           Math.max(3, Math.ceil(maxRounds / 2)),
+          (l) => ({ check: { fix: f, loop: l } }),
+          loop,
         );
         history = r.history;
       } catch (e) {

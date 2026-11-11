@@ -10,7 +10,7 @@ import {
   type DeckDoc,
   type DiffSummary,
 } from './deck.js';
-import { chat, chatWithTools, type ChatMessage, type ChatResult } from './llm.js';
+import { chat, chatWithTools, type ChatMessage, type ChatResult, type ToolLoopState } from './llm.js';
 import {
   buildDeckPrompt,
   buildEditPrompt,
@@ -25,12 +25,24 @@ import {
 } from './prompts.js';
 import { logEdit, plannedPages, readmeFromBrief } from './files.js';
 import { checkProject } from './projectCheck.js';
-import { generateFiles } from './generate.js';
+import { describeGenerateState, generateFiles, type GenerateState } from './generate.js';
 import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
 import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
-import { cleanSummary, combineTools, createDraftTools, DRAFT_EDIT_TOOLS, DRAFT_TOOL_NAMES, Draft, reviewDraft, type ReviewLog } from './draft.js';
+import {
+  cleanSummary,
+  combineTools,
+  createDraftTools,
+  DRAFT_EDIT_TOOLS,
+  DRAFT_TOOL_NAMES,
+  Draft,
+  reviewDraft,
+  type DraftState,
+  type ReviewLog,
+  type ReviewState,
+} from './draft.js';
+import { deleteCheckpoint, loadCheckpoint, pruneCheckpoints, saveCheckpoint } from './checkpoint.js';
 
 export interface ProjectRow {
   id: string;
@@ -65,6 +77,11 @@ export interface JobRow {
   finished_at?: number | null;
   retry_of?: string | null;
   retried_by?: string | null;
+  /** Times the job continued from its checkpoint after failing. */
+  resume_count?: number;
+  resumed_at?: number | null;
+  /** Run time before the last resume. */
+  prior_ms?: number;
   /** Questions the model asked the user during the job, with the answers (QaEntry[]). */
   questions: string | null;
   created_at: number;
@@ -179,7 +196,63 @@ function createJob(db: DB, projectId: string, userId: number, kind: JobRow['kind
     `INSERT INTO jobs (id, project_id, user_id, kind, status, request, created_at, updated_at)
      VALUES (@id, @project_id, @user_id, @kind, @status, @request, @created_at, @updated_at)`,
   ).run(job);
+  // Only the latest change of a project can continue after failing.
+  pruneCheckpoints(db, projectId);
   return job;
+}
+
+/**
+ * How far a running job got, saved as it goes (see checkpoint.ts) so that a failed job can continue
+ * from there. Which parts are set says where it stopped.
+ */
+interface JobCheckpoint {
+  /** Staged generation, before the draft exists. */
+  gen?: GenerateState;
+  /** A long reply being continued (single-call generation, rewrite edits). */
+  write?: WriteState;
+  /** Edits: the document as the job found it and the prompt built from it. */
+  edit?: { snapshot: DeckDoc; messages: ChatMessage[]; mode: EditMode };
+  /** A tool edit under way. */
+  tools?: { draft: DraftState; loop: ToolLoopState };
+  /** The draft is written and under review. */
+  review?: { draft: DraftState; prompt: ChatMessage[]; state?: ReviewState };
+}
+
+interface WriteState {
+  text: string;
+  /** Replies so far; the last one was cut off by the output limit. */
+  parts: number;
+}
+
+/** Resume from and save one step's progress. */
+interface Progress<T> {
+  resume?: T;
+  save?: (state: T) => void;
+}
+
+function describeCheckpoint(cp: JobCheckpoint): string {
+  if (cp.review) {
+    const s = cp.review.state;
+    const what = cp.edit ? '修改已完成' : `草稿已完成（${cp.review.draft.doc.pages.length} 页）`;
+    if (s?.check) return `${what}，交付检查第 ${s.check.fix + 1} 轮`;
+    if (s?.layout) return `${what}，自检第 ${s.layout.pass + 1} 轮`;
+    return what;
+  }
+  if (cp.tools) return `已进行 ${cp.tools.loop.round} 轮修改（${cp.tools.draft.edits} 处改动）`;
+  if (cp.write) return `已输出 ${cp.write.parts} 段（约 ${cp.write.text.length} 字符）`;
+  if (cp.gen) return describeGenerateState(cp.gen);
+  return '已开始';
+}
+
+function checkpointer(db: DB, jobId: string) {
+  return (cp: JobCheckpoint) => {
+    try {
+      saveCheckpoint(db, jobId, describeCheckpoint(cp), cp);
+    } catch (e) {
+      // The job goes on; it only loses the chance to continue from here (or was deleted with its project).
+      console.warn(`checkpoint of job ${jobId} not saved: ${(e as Error).message}`);
+    }
+  };
 }
 
 function updateJob(db: DB, id: string, patch: Partial<JobRow>) {
@@ -274,7 +347,7 @@ function askToolsFor(db: DB, job: JobRow, extra: { draft?: Draft; prompt?: strin
   const jobId = job.id;
   const settings = getSettings(db);
   const minutes = Math.max(0.01, Number(settings.askTimeoutMinutes) || 30);
-  const qa: QaEntry[] = [];
+  const qa: QaEntry[] = job.questions ? JSON.parse(job.questions) : [];
   return createAskTools({
     ask: settings.askUser === false ? undefined : (q) => askQuestion({ id: jobId, projectId: job.project_id }, q, minutes * 60_000),
     timeoutMinutes: minutes,
@@ -322,6 +395,7 @@ async function selfReview(
   fileTools?: FileTools,
   skipIfClean = false,
   before?: DeckDoc,
+  progress: Progress<ReviewState> = {},
 ): Promise<ReviewLog> {
   const settings = getSettings(db);
   const log = await reviewDraft(db, userId, {
@@ -341,6 +415,8 @@ async function selfReview(
     skipIfClean,
     layoutReview: !!settings.selfCheck,
     baseline: before ? () => checkProject(db, Draft.ofDocument(before).checkInput()) : undefined,
+    resume: progress.resume,
+    onCheckpoint: progress.save,
   });
   updateJob(db, jobId, { review: JSON.stringify(log) });
   const left = log.check?.unresolved;
@@ -393,29 +469,41 @@ async function runStep(
 const MAX_CONTINUATIONS = 3;
 
 /** A single complete answer; a reply cut off by the output limit is continued where it stopped. */
-async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessage[], tools?: FileTools) {
-  let r = await runStep(db, jobId, userId, messages, tools, '模型生成中');
-  let text = r.text;
-  for (let i = 0; r.finishReason === 'length' && i < MAX_CONTINUATIONS; i++) {
+async function runLlm(db: DB, jobId: string, userId: number, messages: ChatMessage[], tools?: FileTools, progress: Progress<WriteState> = {}) {
+  let { text, parts } = progress.resume ?? { text: '', parts: 0 };
+  if (!parts) {
+    const r = await runStep(db, jobId, userId, messages, tools, '模型生成中');
+    if (r.finishReason !== 'length') return r.text;
+    [text, parts] = [r.text, 1];
+  }
+  for (; parts <= MAX_CONTINUATIONS; parts++) {
+    progress.save?.({ text, parts });
     const next: ChatMessage[] = [
       ...messages,
       { role: 'assistant', content: text },
       { role: 'user', content: '你的回复因达到最大输出长度被截断。请从中断处继续输出剩余内容：不要重复已输出的部分，不要重新开始，也不要加任何说明。' },
     ];
-    r = await runStep(db, jobId, userId, next, undefined, `模型继续输出（第 ${i + 2} 段）`);
+    const r = await runStep(db, jobId, userId, next, undefined, `模型继续输出（第 ${parts + 1} 段）`);
     text += r.text.replace(/^\s*```(?:html)?\s*\n/, '');
+    if (r.finishReason !== 'length') return text;
   }
-  if (r.finishReason === 'length') {
-    throw new Error('模型输出多次达到长度上限仍未完成，请提高「最大输出 tokens」设置、减少页数，或使用分步生成后重试');
-  }
-  return text;
+  throw new Error('模型输出多次达到长度上限仍未完成，请提高「最大输出 tokens」设置、减少页数，或使用分步生成后重试');
 }
 
 /**
  * Tool-first edit: the model changes the loaded draft with the structured tools instead of re-typing
  * whole pages, which matters most for slow models. A reply with complete HTML is still accepted.
  */
-async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft, messages: ChatMessage[], fileTools?: FileTools, askTools?: FileTools) {
+async function editWithTools(
+  db: DB,
+  jobId: string,
+  userId: number,
+  draft: Draft,
+  messages: ChatMessage[],
+  fileTools?: FileTools,
+  askTools?: FileTools,
+  progress: Progress<ToolLoopState> = {},
+) {
   const settings = getSettings(db);
   const tools = combineTools(createDraftTools(draft, makeAssetResolver(db), db), fileTools, askTools);
   jobProgress.set(jobId, { chars: 0, stage: '模型修改中' });
@@ -432,6 +520,8 @@ async function editWithTools(db: DB, jobId: string, userId: number, draft: Draft
     onRound: (round) => recordUsage(db, jobId, round),
     maxRounds: Number(settings.editToolRounds) || 12,
     allowEmptyFinal: true,
+    resume: progress.resume,
+    onCheckpoint: progress.save,
   });
   if (draft.edits) return;
   if (r.text && draft.replaceFromText(r.text)) return;
@@ -480,59 +570,84 @@ export interface GenerationOptions {
 export function startGeneration(db: DB, projectId: string, userId: number, opts: GenerationOptions = {}): JobRow {
   const project = getProject(db, projectId)!;
   const meta = JSON.parse(project.meta);
-  const job = createJob(db, projectId, userId, 'create', { brief: meta.brief });
+  const job = createJob(db, projectId, userId, 'create', { brief: meta.brief, ...(opts.askUser === false ? { askUser: false } : {}) });
+  runGeneration(db, job, userId);
+  return job;
+}
+
+/** Generates the project's first version (from the checkpoint `cp` when continuing a failed job). */
+function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
+  const projectId = job.project_id;
+  const save = checkpointer(db, job.id);
   void (async () => {
     try {
       updateJob(db, job.id, { status: 'running' });
       db.prepare(`UPDATE projects SET status='generating', error=NULL WHERE id=?`).run(projectId);
+      const project = getProject(db, projectId)!;
+      const meta = JSON.parse(project.meta);
       const base = projectDoc(project)!;
       const rows = projectAssets(db, projectId);
       const ft = fileToolsFor(db, rows);
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
-      const ask = opts.askUser === false ? undefined : askToolsFor(db, job);
+      const ask = JSON.parse(job.request || '{}').askUser === false ? undefined : askToolsFor(db, job);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;
       let reviewContext: ChatMessage[];
-      if (settings.generateMode !== 'single') {
-        const doc = await generateFiles(
-          { base, kind: project.type, brief: meta.brief, template, assets },
-          {
-            call: (messages, stage, step) =>
-              step === 'plan' && ask
-                ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
-                : runStep(db, job.id, userId, messages, ft?.tools, stage, true),
-            pagesPerCall: Number(settings.genPagesPerCall) || 3,
-          },
-        );
-        draft = Draft.ofDocument(assignIds({ ...doc, title: project.name }, { keepScripts: true }));
-        reviewContext = buildReviewContext(doc, project.type);
+      if (cp.review) {
+        draft = Draft.restore(cp.review.draft);
+        reviewContext = cp.review.prompt;
       } else {
-        reviewContext =
-          project.type === 'template' ? buildTemplatePrompt(base, meta.brief, assets) : buildDeckPrompt(base, template, meta.brief, assets);
-        const text = await runLlm(db, job.id, userId, ask ? withNote(reviewContext, ASK_NOTE) : reviewContext, combineTools(ft?.tools, ask));
-        draft = Draft.fromDocument(text, {
-          width: base.width,
-          height: base.height,
-          title: project.name,
-          readme: readmeFromBrief(project.type, project.name, meta.brief),
-        });
+        if (cp.gen || (!cp.write && settings.generateMode !== 'single')) {
+          const doc = await generateFiles(
+            { base, kind: project.type, brief: meta.brief, template, assets },
+            {
+              call: (messages, stage, step) =>
+                step === 'plan' && ask
+                  ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
+                  : runStep(db, job.id, userId, messages, ft?.tools, stage, true),
+              pagesPerCall: Number(settings.genPagesPerCall) || 3,
+              resume: cp.gen,
+              onCheckpoint: (gen) => save({ gen }),
+            },
+          );
+          draft = Draft.ofDocument(assignIds({ ...doc, title: project.name }, { keepScripts: true }));
+          draft.expectedPages = plannedPages(draft.view().readme ?? '').map((p) => p.path);
+          reviewContext = buildReviewContext(doc, project.type);
+        } else {
+          reviewContext =
+            project.type === 'template' ? buildTemplatePrompt(base, meta.brief, assets) : buildDeckPrompt(base, template, meta.brief, assets);
+          const text = await runLlm(db, job.id, userId, ask ? withNote(reviewContext, ASK_NOTE) : reviewContext, combineTools(ft?.tools, ask), {
+            resume: cp.write,
+            save: (write) => save({ write }),
+          });
+          draft = Draft.fromDocument(text, {
+            width: base.width,
+            height: base.height,
+            title: project.name,
+            readme: readmeFromBrief(project.type, project.name, meta.brief),
+          });
+        }
+        if (project.type === 'template') {
+          draft.templateCheck = {
+            referenceTexts: assets.flatMap((a) => (a.kind === 'document' && a.text ? [a.text] : [])),
+            allowed: Object.values(meta.brief ?? {}).map(String).join('\n'),
+          };
+        }
+        save({ review: { draft: draft.save(), prompt: reviewContext } });
       }
-      if (settings.generateMode !== 'single') draft.expectedPages = plannedPages(draft.view().readme ?? '').map((p) => p.path);
-      if (project.type === 'template') {
-        draft.templateCheck = {
-          referenceTexts: assets.flatMap((a) => (a.kind === 'document' && a.text ? [a.text] : [])),
-          allowed: Object.values(meta.brief ?? {}).map(String).join('\n'),
-        };
-      }
-      await selfReview(db, job.id, userId, draft, reviewContext, ft?.tools);
+      await selfReview(db, job.id, userId, draft, reviewContext, ft?.tools, false, undefined, {
+        resume: cp.review?.state,
+        save: (state) => save({ review: { draft: draft.save(), prompt: reviewContext, state } }),
+      });
       jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });
       const doc = draft.result();
       doc.title = project.name;
       const { versionId } = await withProjectLock(projectId, () =>
         commitVersion(db, projectId, userId, doc, { action: 'create', scope: 'global', prompt: describeBrief(meta.brief) }),
       );
+      deleteCheckpoint(db, job.id);
       updateJob(db, job.id, { status: 'done', version_id: versionId });
     } catch (e) {
       const msg = (e as Error).message;
@@ -540,12 +655,12 @@ export function startGeneration(db: DB, projectId: string, userId: number, opts:
       const p = getProject(db, projectId);
       if (p && p.version_no === 0) db.prepare(`UPDATE projects SET status='error', error=? WHERE id=?`).run(msg, projectId);
       else db.prepare(`UPDATE projects SET status='ready' WHERE id=?`).run(projectId);
+      pruneCheckpoints(db, projectId);
     } finally {
       cancelQuestion(job.id);
       jobProgress.delete(job.id);
     }
   })();
-  return job;
 }
 
 /** The saved document, with a README written from the creation brief when the project predates READMEs. */
@@ -574,73 +689,52 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
     if (!input.pageId || !doc.pages.some((p) => p.id === input.pageId)) throw new Error('请指定要修改的页面');
   }
   const job = createJob(db, projectId, userId, 'edit', { ...input, scope, elementIds });
+  runEdit(db, job, userId);
+  return job;
+}
+
+/** Applies the edit requested by `job` (from the checkpoint `cp` when continuing a failed job). */
+function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
+  const projectId = job.project_id;
+  const input = JSON.parse(job.request || '{}') as EditInput;
+  const { scope } = input;
+  const elementIds = input.elementIds ?? [];
+  const save = checkpointer(db, job.id);
   void (async () => {
     try {
       updateJob(db, job.id, { status: 'running' });
-      const settings = getSettings(db);
-      const snapshot = withReadme(getProject(db, projectId)!);
       const attachmentIds = input.attachmentIds ?? [];
       const attachedRows = assetsByIds(db, projectId, attachmentIds);
       const otherRows = projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id));
       const ft = fileToolsFor(db, [...otherRows, ...attachedRows]);
-      const attachments = toAssetRefs(db, attachedRows, true, ft?.ids);
-      const assets = toAssetRefs(db, otherRows, false, ft?.ids);
-      const resolver = makeAssetResolver(db);
-      let pageIndex: number | undefined;
-      let elements: ReturnType<typeof findElements> = [];
-      let screenshot: string | undefined;
-      if (scope !== 'global') {
-        pageIndex = snapshot.pages.findIndex((p) => p.id === input.pageId);
-        if (pageIndex < 0) throw new Error('目标页面不存在（可能已被其他用户删除）');
-        if (scope === 'element') {
-          elements = findElements(snapshot, input.pageId!, elementIds);
-          if (!elements.length) throw new Error('选中的元素已不存在（可能已被其他用户修改），请重新选择');
-        }
-        if (settings.attachScreenshots) {
-          jobProgress.set(job.id, { chars: 0, stage: '渲染页面截图' });
-          try {
-            const [shot] = await renderPageImages(snapshot, resolver, {
-              pageIds: [input.pageId!],
-              highlight: scope === 'element' ? elementIds : [],
-              scale: 0.5,
-              type: 'jpeg',
-            });
-            if (shot) screenshot = `data:image/jpeg;base64,${shot.image.toString('base64')}`;
-          } catch {
-            /* screenshots are an optional hint for the model */
-          }
-        }
-      }
-      const mode: EditMode = settings.editMode === 'rewrite' ? 'rewrite' : 'tools';
-      const messages = buildEditPrompt(
-        snapshot,
-        {
-          scope,
-          prompt: input.prompt,
-          pageIndex,
-          pageHtml: pageIndex !== undefined ? snapshot.pages[pageIndex].html : undefined,
-          elements,
-          screenshot,
-          attachments,
-          ask: settings.askUser !== false,
-          explicitAll: asksForAll(input.prompt),
-        },
-        assets,
-        project.type,
-        mode,
-      );
+      const ctx = cp.edit ? { edit: cp.edit } : await prepareEdit(db, job, input, ft?.ids);
+      const { snapshot, messages, mode } = ctx.edit;
       let draft: Draft;
-      if (mode === 'tools') {
-        draft = scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
-        await editWithTools(db, job.id, userId, draft, messages, ft?.tools, askToolsFor(db, job, { draft, prompt: input.prompt }));
-      } else {
-        const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, askToolsFor(db, job)));
-        if (scope === 'global') {
-          draft = Draft.ofDocument(snapshot);
-          if (!draft.replaceFromText(text)) throw new Error(`模型没有输出任何文件修改${cleanSummary(text) ? `：${cleanSummary(text)}` : ''}`);
-        } else draft = Draft.fromFragment(text, snapshot, input.pageId!);
+      if (cp.review) draft = Draft.restore(cp.review.draft);
+      else {
+        if (mode === 'tools') {
+          const d = cp.tools ? Draft.restore(cp.tools.draft) : scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
+          draft = d;
+          await editWithTools(db, job.id, userId, d, messages, ft?.tools, askToolsFor(db, job, { draft: d, prompt: input.prompt }), {
+            resume: cp.tools?.loop,
+            save: (loop) => save({ ...ctx, tools: { draft: d.save(), loop } }),
+          });
+        } else {
+          const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, askToolsFor(db, job)), {
+            resume: cp.write,
+            save: (write) => save({ ...ctx, write }),
+          });
+          if (scope === 'global') {
+            draft = Draft.ofDocument(snapshot);
+            if (!draft.replaceFromText(text)) throw new Error(`模型没有输出任何文件修改${cleanSummary(text) ? `：${cleanSummary(text)}` : ''}`);
+          } else draft = Draft.fromFragment(text, snapshot, input.pageId!);
+        }
+        save({ ...ctx, review: { draft: draft.save(), prompt: messages } });
       }
-      await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools', snapshot);
+      await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools', snapshot, {
+        resume: cp.review?.state,
+        save: (state) => save({ ...ctx, review: { draft: draft.save(), prompt: messages, state } }),
+      });
       jobProgress.set(job.id, { chars: 0, stage: '解析与保存' });
       const { versionId } = await withProjectLock(projectId, () => {
         const latestRow = getProject(db, projectId)!;
@@ -668,15 +762,78 @@ export function startEdit(db: DB, projectId: string, userId: number, input: Edit
           prompt: input.prompt,
         });
       });
+      deleteCheckpoint(db, job.id);
       updateJob(db, job.id, { status: 'done', version_id: versionId });
     } catch (e) {
       updateJob(db, job.id, { status: 'error', error: (e as Error).message });
+      pruneCheckpoints(db, projectId);
     } finally {
       cancelQuestion(job.id);
       jobProgress.delete(job.id);
     }
   })();
-  return job;
+}
+
+/** The document as the edit finds it and the prompt for the model. */
+async function prepareEdit(db: DB, job: JobRow, input: EditInput, fileIds?: Map<string, string>): Promise<Required<Pick<JobCheckpoint, 'edit'>>> {
+  const projectId = job.project_id;
+  const { scope } = input;
+  const elementIds = input.elementIds ?? [];
+  const settings = getSettings(db);
+  const project = getProject(db, projectId)!;
+  const snapshot = withReadme(project);
+  const attachmentIds = input.attachmentIds ?? [];
+  const attachments = toAssetRefs(db, assetsByIds(db, projectId, attachmentIds), true, fileIds);
+  const assets = toAssetRefs(
+    db,
+    projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id)),
+    false,
+    fileIds,
+  );
+  let pageIndex: number | undefined;
+  let elements: ReturnType<typeof findElements> = [];
+  let screenshot: string | undefined;
+  if (scope !== 'global') {
+    pageIndex = snapshot.pages.findIndex((p) => p.id === input.pageId);
+    if (pageIndex < 0) throw new Error('目标页面不存在（可能已被其他用户删除）');
+    if (scope === 'element') {
+      elements = findElements(snapshot, input.pageId!, elementIds);
+      if (!elements.length) throw new Error('选中的元素已不存在（可能已被其他用户修改），请重新选择');
+    }
+    if (settings.attachScreenshots) {
+      jobProgress.set(job.id, { chars: 0, stage: '渲染页面截图' });
+      try {
+        const [shot] = await renderPageImages(snapshot, makeAssetResolver(db), {
+          pageIds: [input.pageId!],
+          highlight: scope === 'element' ? elementIds : [],
+          scale: 0.5,
+          type: 'jpeg',
+        });
+        if (shot) screenshot = `data:image/jpeg;base64,${shot.image.toString('base64')}`;
+      } catch {
+        /* screenshots are an optional hint for the model */
+      }
+    }
+  }
+  const mode: EditMode = settings.editMode === 'rewrite' ? 'rewrite' : 'tools';
+  const messages = buildEditPrompt(
+    snapshot,
+    {
+      scope,
+      prompt: input.prompt,
+      pageIndex,
+      pageHtml: pageIndex !== undefined ? snapshot.pages[pageIndex].html : undefined,
+      elements,
+      screenshot,
+      attachments,
+      ask: settings.askUser !== false,
+      explicitAll: asksForAll(input.prompt),
+    },
+    assets,
+    project.type,
+    mode,
+  );
+  return { edit: { snapshot, messages, mode } };
 }
 
 /** Runs a failed request again as a new job of `userId`; each failed job is retried at most once. */
@@ -703,6 +860,36 @@ export function retryJob(db: DB, failed: JobRow, userId: number): JobRow {
   db.prepare('UPDATE jobs SET retry_of = ? WHERE id = ?').run(failed.id, job.id);
   db.prepare('UPDATE jobs SET retried_by = ? WHERE id = ?').run(job.id, failed.id);
   return db.prepare('SELECT * FROM jobs WHERE id = ?').get(job.id) as JobRow;
+}
+
+/**
+ * Continues a failed job where it stopped, as the same job (still its requester's). Only the latest
+ * change of a project keeps its progress after failing, so only that one can continue.
+ */
+export function resumeJob(db: DB, failed: JobRow, userId: number): JobRow {
+  if (failed.status !== 'error') throw new Error('只有失败的请求可以继续');
+  const cp = loadCheckpoint<JobCheckpoint>(db, failed.id);
+  if (!cp) throw new Error('这个请求没有可继续的进度（只有项目中最近一次失败的修改可以继续）');
+  const project = getProject(db, failed.project_id);
+  if (!project) throw new Error('项目不存在');
+  if (failed.kind === 'create') {
+    if (project.version_no > 0) throw new Error('项目已生成，请通过修改对话框进行调整');
+    if (project.status === 'generating') throw new Error('正在生成中');
+  } else if (!projectDoc(project)?.pages.length) throw new Error('项目尚未生成完成，无法修改');
+  const now = Date.now();
+  const claimed = db
+    .prepare(
+      `UPDATE jobs SET status = 'running', error = NULL, finished_at = NULL, resume_count = resume_count + 1,
+         prior_ms = prior_ms + COALESCE(finished_at, updated_at) - COALESCE(resumed_at, created_at), resumed_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'error'`,
+    )
+    .run(now, now, failed.id);
+  if (claimed.changes !== 1) throw new Error('这个请求已经在继续了');
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(failed.id) as JobRow;
+  const owner = job.user_id ?? userId;
+  if (job.kind === 'create') runGeneration(db, job, owner, cp.data);
+  else runEdit(db, job, owner, cp.data);
+  return job;
 }
 
 export function applyManual(
