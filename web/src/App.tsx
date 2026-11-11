@@ -10,6 +10,7 @@ import { UsersPage } from './pages/Users';
 import { ModelsPage } from './pages/Models';
 import { SessionsPage } from './pages/Sessions';
 import { PasswordDialog } from './components/PasswordDialog';
+import { NotifyBanner, NotifyMenuItem } from './components/Notify';
 
 const GITHUB_URL = 'https://github.com/Zhang-JK/http-roadshow-master';
 
@@ -57,6 +58,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           {menu && (
             <div className="dropdown" onMouseLeave={() => setMenu(false)}>
               {sys && <div className="dropdown-note">版本 {sys.version.version}</div>}
+              <NotifyMenuItem />
               <button onClick={() => { setPwd(true); setMenu(false); }}>修改密码</button>
               <button onClick={logout}>退出登录</button>
               <div className="dropdown-author" data-testid="author">
@@ -69,7 +71,10 @@ function Shell({ children }: { children: React.ReactNode }) {
           )}
         </div>
       </header>
-      <main className="main">{children}</main>
+      <main className="main">
+        <NotifyBanner />
+        {children}
+      </main>
       {pwd && <PasswordDialog onClose={() => setPwd(false)} />}
     </div>
   );

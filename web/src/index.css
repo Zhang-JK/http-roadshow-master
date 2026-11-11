@@ -159,6 +159,18 @@ textarea { resize: vertical; min-height: 40px; }
 .dropdown-author a { display: inline-flex; padding: 4px; border-radius: 6px; color: #24292f; }
 .dropdown-author a:hover { background: #f1f3f8; color: #000; }
 .dropdown-author svg { width: 18px; height: 18px; }
+.dropdown-switch { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.dropdown-switch:hover { background: #f1f3f8; }
+.dropdown-switch > svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.dropdown-switch-text { flex: 1; display: flex; flex-direction: column; line-height: 1.35; }
+.dropdown-switch-text small { font-size: 11px; color: var(--muted); }
+.dropdown-switch input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
+.dropdown-switch.disabled { cursor: not-allowed; }
+.dropdown-switch.disabled .dropdown-switch-text { color: var(--muted); }
+.notify-banner { display: flex; align-items: center; gap: 12px; width: calc(100% - 48px); max-width: 1272px; margin: 16px auto -8px; padding: 10px 14px; background: var(--primary-50); border: 1px solid #c7d2fe; border-radius: 10px; font-size: 13px; color: #312e81; }
+.notify-banner > svg { width: 20px; height: 20px; flex: none; color: var(--primary); }
+.notify-banner-text { flex: 1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.notify-banner-text span { color: #4a5168; }
 .avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #818cf8, #4f46e5); color: #fff; display: inline-grid; place-items: center; font-weight: 700; font-size: 13px; flex: none; }
 .avatar.sm { width: 22px; height: 22px; font-size: 11px; vertical-align: middle; }
 .main { min-height: calc(100vh - 56px); }
