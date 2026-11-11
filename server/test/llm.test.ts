@@ -74,12 +74,12 @@ describe('timeouts for slow models', () => {
 
 describe('endpoint priority', () => {
   it('starts existing endpoints in the order of their old weights, heaviest first', async () => {
-    const { openDb } = await import('../src/db.js');
+    const { MIGRATIONS, openDb } = await import('../src/db.js');
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rs-priority-')), 'old.db');
     let db = openDb(file);
     // Back to the schema before endpoints had a priority.
-    const last = (db.prepare('SELECT MAX(version) AS v FROM _migrations').get() as { v: number }).v;
-    db.prepare('DELETE FROM _migrations WHERE version = ?').run(last);
+    const version = MIGRATIONS.findIndex((m) => m.includes('ADD COLUMN priority')) + 1;
+    db.prepare('DELETE FROM _migrations WHERE version = ?').run(version);
     db.exec('ALTER TABLE llm_endpoints DROP COLUMN priority');
     const insert = db.prepare(`INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, created_at) VALUES (?, 'http://x', 'k', 'm', ?, 0)`);
     for (const [name, weight] of [['a', 1], ['b', 5], ['c', 1], ['d', 3]] as const) insert.run(name, weight);
