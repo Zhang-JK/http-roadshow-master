@@ -96,6 +96,10 @@ export interface Job {
   retryOf?: string | null;
   /** The job that ran this failed request again. */
   retriedBy?: string | null;
+  /** Saved progress this failed job can continue from (only the latest change of a project keeps it). */
+  resume?: { label: string; savedAt: number } | null;
+  /** Times the job continued from its saved progress after failing. */
+  resumeCount?: number;
   cost: number | null;
   review?: JobReview | null;
   /** A question the job is waiting on. */
@@ -175,6 +179,8 @@ export interface Version {
   jobId?: string | null;
   durationMs?: number | null;
   stats?: JobStats | null;
+  /** Times the job behind this version continued after failing. */
+  resumeCount?: number;
 }
 
 export interface ProjectFile {

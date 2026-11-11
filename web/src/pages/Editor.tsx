@@ -115,7 +115,8 @@ export function EditorPage() {
       const { job } = await api.get<{ job: Job }>(`/api/jobs/${jid}`);
       if (job.status === 'done')
         toast(`${job.kind === 'create' ? '生成完成' : '修改已应用'}${job.review ? `（${reviewText(job.review)}）` : ''}`, 'success');
-      else if (job.status === 'error') toast(`${job.kind === 'create' ? '生成' : '修改'}失败（已记入修改历史，可重试）：${job.error}`, 'error');
+      else if (job.status === 'error')
+        toast(`${job.kind === 'create' ? '生成' : '修改'}失败（已记入修改历史，${job.resume ? `已保存进度，可从中断处继续` : '可重试'}）：${job.error}`, 'error');
       loadProject();
     }
   }, [id, toast, loadProject, loadHistory]);
@@ -126,6 +127,20 @@ export function EditorPage() {
       myJobs.current.add(r.job.id);
       setJobs((list) => [...list, { ...r.job, userName: user?.displayName }]);
       toast('已重新提交该请求', 'info');
+      loadHistory();
+      loadProject();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+      loadHistory();
+    }
+  };
+
+  const resume = async (j: Job) => {
+    try {
+      const r = await api.post<{ job: Job }>(`/api/jobs/${j.id}/resume`);
+      myJobs.current.add(r.job.id);
+      setJobs((list) => [...list.filter((x) => x.id !== r.job.id), { ...r.job, userName: j.userName }]);
+      toast(`正在从中断处继续：${j.resume?.label ?? ''}`, 'info');
       loadHistory();
       loadProject();
     } catch (e) {
@@ -334,6 +349,7 @@ export function EditorPage() {
   };
 
   const createJob = jobs.find((j) => j.kind === 'create');
+  const resumableCreate = failedJobs.find((j) => j.kind === 'create' && j.resume);
   const editJobs = jobs.filter((j) => j.kind === 'edit');
   const initialSelection = useMemo(() => selection.map((s) => s.eid), [doc, frameNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -390,8 +406,18 @@ export function EditorPage() {
               <div className="gen-icon">⚠️</div>
               <h2>生成失败</h2>
               <pre className="error-box">{project.error}</pre>
+              {resumableCreate && (
+                <>
+                  <button className="btn btn-primary" onClick={() => resume(resumableCreate)} data-testid="resume-generation-btn">
+                    从中断处继续
+                  </button>
+                  <p className="muted small" data-testid="resume-generation-info">
+                    已保存进度：{resumableCreate.resume!.label}，继续时不会重做已完成的部分
+                  </p>
+                </>
+              )}
               <button
-                className="btn btn-primary"
+                className={`btn ${resumableCreate ? '' : 'btn-primary'}`}
                 onClick={async () => {
                   const failed = failedJobs.find((j) => j.kind === 'create' && !j.retriedBy);
                   if (failed) return retry(failed);
@@ -406,7 +432,7 @@ export function EditorPage() {
                 }}
                 data-testid="regenerate-btn"
               >
-                重新生成
+                {resumableCreate ? '从头重新生成' : '重新生成'}
               </button>
               {failedJobs.length > 0 && (
                 <p className="muted small">
@@ -616,6 +642,7 @@ export function EditorPage() {
                 failedJobs={failedJobs}
                 pages={pages}
                 onRetry={retry}
+                onResume={resume}
                 currentVersionNo={project.versionNo}
                 previewId={preview?.version.id}
                 onPreview={openPreview}
