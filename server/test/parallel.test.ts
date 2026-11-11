@@ -205,6 +205,87 @@ describe('parallel capacity test', () => {
   });
 });
 
+describe('per-request scheduling by priority', () => {
+  const models = startModels();
+  let base = '';
+  let db: import('../src/db.js').DB;
+
+  beforeAll(async () => {
+    await new Promise<void>((r) => models.server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(models.server.address() as AddressInfo).port}`;
+    const { openDb } = await import('../src/db.js');
+    db = openDb(path.join(tmp, 'schedule.db'));
+  });
+  afterAll(() => {
+    models.server.closeAllConnections();
+    models.server.close();
+  });
+
+  /** Replaces the endpoints with these, first = highest priority: [test model, parallel limit, enabled]. */
+  const setEndpoints = (list: [string, number, boolean?][]) => {
+    db.prepare('DELETE FROM llm_endpoints').run();
+    const insert = db.prepare(
+      `INSERT INTO llm_endpoints (name, base_url, api_key, model, max_concurrency, enabled, priority, created_at) VALUES (?, ?, 'k', 'm', ?, ?, ?, 0)`,
+    );
+    // Inserted last to first, so that the ids run against the priority order.
+    for (let i = list.length - 1; i >= 0; i--) {
+      const [name, limit, enabled = true] = list[i];
+      insert.run(name, `${base}/${name}/v1`, limit, enabled ? 1 : 0, i + 1);
+    }
+  };
+  const ask = async (userId: number) => {
+    const { chat } = await import('../src/llm.js');
+    return chat(db, userId, [{ role: 'user', content: '你好' }], { onDelta: () => {} });
+  };
+
+  it.each([
+    ['one', [7, 7, 7, 7, 7, 7]],
+    ['many', [1, 2, 3, 4, 5, 6]],
+  ])('sends each request to the first endpoint below its parallel limit (%s user)', async (tag, users) => {
+    const { inflightCount } = await import('../src/llm.js');
+    const [a, b, c] = ['a', 'b', 'c'].map((x) => `free-${tag}-${x}`);
+    setEndpoints([[a, 2], [b, 1], [c, 0]]);
+    await Promise.all(users.map(ask));
+    expect([a, b, c].map((m) => models.served.get(m))).toEqual([2, 1, 3]);
+    expect([a, b, c].map((m) => models.peak.get(m))).toEqual([2, 1, 3]);
+    // With the first endpoint free again, the next request goes back to it.
+    await ask(users[0]);
+    expect([a, b, c].map((m) => models.served.get(m))).toEqual([3, 1, 3]);
+    const ids = (db.prepare('SELECT id FROM llm_endpoints').all() as { id: number }[]).map((r) => r.id);
+    expect(ids.map(inflightCount)).toEqual([0, 0, 0]);
+  });
+
+  it('spills over only while the first endpoint is full', async () => {
+    setEndpoints([['free-top', 1], ['free-spare', 0]]);
+    const first = ask(1);
+    await sleep(20);
+    const second = ask(1);
+    await Promise.all([first, second]);
+    expect([models.served.get('free-top'), models.served.get('free-spare')]).toEqual([1, 1]);
+    await ask(2);
+    await ask(3);
+    expect([models.served.get('free-top'), models.served.get('free-spare')]).toEqual([3, 1]);
+  });
+
+  it('queues when every endpoint is full', async () => {
+    setEndpoints([['free-q1', 1], ['free-q2', 1]]);
+    const started = Date.now();
+    await Promise.all([1, 2, 3, 4].map(ask));
+    expect(models.peak.get('free-q1')).toBe(1);
+    expect(models.peak.get('free-q2')).toBe(1);
+    expect((models.served.get('free-q1') ?? 0) + (models.served.get('free-q2') ?? 0)).toBe(4);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2 * 200);
+  });
+
+  it('falls over down the priority order and skips disabled endpoints', async () => {
+    setEndpoints([['fail', 0], ['free-off', 0, false], ['free-next', 0]]);
+    const r = await ask(1);
+    expect(r.endpointId).toBe((db.prepare(`SELECT id FROM llm_endpoints WHERE name = 'free-next'`).get() as { id: number }).id);
+    expect(models.served.get('free-next')).toBe(1);
+    expect(models.served.get('free-off')).toBeUndefined();
+  });
+});
+
 describe('endpoint network options over the API', () => {
   let app: FastifyInstance;
   let mock: Awaited<ReturnType<typeof startMockLlm>>;

@@ -147,22 +147,38 @@ describe('LLM endpoints', () => {
     expect(reuse.json.result.ok).toBe(true);
   });
 
-  it('per-user assignment, and failover when a user\'s endpoint is down', async () => {
-    const broken = await req('POST', '/api/llm/endpoints', adminCookie, { name: 'Broken', baseUrl: mock.brokenUrl, model: 'mock-vision', apiKey: 'good-key', weight: 100 });
-    const a = await req('GET', '/api/llm/assignments', adminCookie);
-    expect(a.json.assignments.length).toBeGreaterThanOrEqual(2);
-    expect(a.json.assignments.every((x: any) => x.endpointName)).toBe(true);
-    // With weight 100 most users land on the broken endpoint; generation must still succeed via failover.
+  it('admin sets the priority order; every request falls over down that order', async () => {
+    const broken = await req('POST', '/api/llm/endpoints', adminCookie, { name: 'Broken', baseUrl: mock.brokenUrl, model: 'mock-vision', apiKey: 'good-key' });
+    const brokenId = broken.json.endpoint.id;
+    const order = async () => (await req('GET', '/api/llm/endpoints', adminCookie)).json.endpoints.map((e: any) => e.id);
+    expect(await order()).toEqual([goodId, brokenId]);
+
+    const setOrder = (ids: unknown, cookie = adminCookie) => req('PUT', '/api/llm/endpoints/order', cookie, { ids });
+    expect((await setOrder([brokenId, goodId], aliceCookie)).status).toBe(403);
+    expect((await setOrder('x')).status).toBe(400);
+    expect((await setOrder([brokenId])).status).toBe(409);
+    expect((await setOrder([brokenId, brokenId])).status).toBe(409);
+    expect((await setOrder([brokenId, goodId, 9999])).status).toBe(409);
+    expect(await order()).toEqual([goodId, brokenId]);
+    const moved = await setOrder([brokenId, goodId]);
+    expect(moved.status).toBe(200);
+    expect(moved.json.endpoints.map((e: any) => [e.id, e.priority])).toEqual([[brokenId, 1], [goodId, 2]]);
+    expect(await order()).toEqual([brokenId, goodId]);
+    expect((await req('GET', '/api/llm/assignments', adminCookie)).status).toBe(404);
+
+    // Broken now comes first for everyone; each request still succeeds on the next endpoint.
     const { chat } = await import('../src/llm.js');
     const { openDb } = await import('../src/db.js');
     const db = openDb(path.join(tmp, 'test.db'));
-    const before = mock.calls.length;
-    const r = await chat(db, 1, [{ role: 'user', content: 'hello 【模板名称】X' }]);
-    expect(r.endpointId).toBe(goodId);
-    expect(mock.calls.length).toBe(before + 1);
-    expect(mock.calls.at(-1)!.user).toBe('rs-user-1');
+    for (const userId of [1, 3]) {
+      const before = mock.calls.length;
+      const r = await chat(db, userId, [{ role: 'user', content: 'hello 【模板名称】X' }]);
+      expect(r.endpointId).toBe(goodId);
+      expect(mock.calls.length).toBe(before + 1);
+      expect(mock.calls.at(-1)!.user).toBe(`rs-user-${userId}`);
+    }
     db.close();
-    await req('PUT', `/api/llm/endpoints/${broken.json.endpoint.id}`, adminCookie, { enabled: false });
+    await req('PUT', `/api/llm/endpoints/${brokenId}`, adminCookie, { enabled: false });
   });
 
   it('settings can be read and updated by admin', async () => {
