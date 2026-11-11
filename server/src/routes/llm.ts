@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { DB } from '../db.js';
 import { getSettings, setSettings } from '../db.js';
 import { HttpError, requireAdmin, requireUser } from '../auth.js';
-import { callTimeouts, inflightCount, listEnabledEndpoints, rankEndpointsForUser, testEndpoint, testParallel, type Endpoint } from '../llm.js';
+import { callTimeouts, inflightCount, testEndpoint, testParallel, type Endpoint } from '../llm.js';
 import { SPEED_SQL, tokensPerSec } from '../calls.js';
 import { activeProxy } from '../proxy.js';
 
@@ -14,7 +14,7 @@ const publicEndpoint = (e: Endpoint) => ({
   baseUrl: e.base_url,
   apiKeyMasked: maskKey(e.api_key),
   model: e.model,
-  weight: e.weight,
+  priority: e.priority,
   enabled: !!e.enabled,
   extraBody: e.extra_body,
   maxConcurrency: e.max_concurrency ?? 0,
@@ -41,7 +41,6 @@ function validate(body: any, partial: boolean) {
   str('model', true);
   if (body.apiKey !== undefined && String(body.apiKey).trim()) out.apiKey = String(body.apiKey).trim();
   else if (!partial) throw new HttpError(400, 'API Token 不能为空');
-  if (body.weight !== undefined) out.weight = Math.max(1, Math.min(100, Number(body.weight) || 1));
   if (body.enabled !== undefined) out.enabled = body.enabled ? 1 : 0;
   if (body.useProxy !== undefined) out.useProxy = body.useProxy ? 1 : 0;
   if (body.maxConcurrency !== undefined) out.maxConcurrency = Math.max(0, Math.min(64, Math.floor(Number(body.maxConcurrency)) || 0));
@@ -61,11 +60,11 @@ function validate(body: any, partial: boolean) {
 
 export function llmRoutes(app: FastifyInstance, db: DB) {
   const parallelTests = new Set<number>();
+  const listAll = () => db.prepare('SELECT * FROM llm_endpoints ORDER BY priority, id').all() as Endpoint[];
 
   app.get('/api/llm/endpoints', async (req) => {
     requireAdmin(req);
-    const rows = db.prepare('SELECT * FROM llm_endpoints ORDER BY id').all() as Endpoint[];
-    return { endpoints: rows.map(publicEndpoint), systemProxy: activeProxy() ?? null };
+    return { endpoints: listAll().map(publicEndpoint), systemProxy: activeProxy() ?? null };
   });
 
   app.post('/api/llm/endpoints', async (req) => {
@@ -73,11 +72,25 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     const v = validate(req.body ?? {}, false);
     const r = db
       .prepare(
-        `INSERT INTO llm_endpoints (name, base_url, api_key, model, weight, enabled, extra_body, max_concurrency, use_proxy, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO llm_endpoints (name, base_url, api_key, model, priority, enabled, extra_body, max_concurrency, use_proxy, created_at)
+         VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(priority), 0) + 1 FROM llm_endpoints), ?, ?, ?, ?, ?)`,
       )
-      .run(v.name, v.baseUrl, v.apiKey, v.model, v.weight ?? 1, v.enabled ?? 1, v.extraBody ?? '{}', v.maxConcurrency ?? 0, v.useProxy ?? 1, Date.now());
+      .run(v.name, v.baseUrl, v.apiKey, v.model, v.enabled ?? 1, v.extraBody ?? '{}', v.maxConcurrency ?? 0, v.useProxy ?? 1, Date.now());
     return { endpoint: publicEndpoint(db.prepare('SELECT * FROM llm_endpoints WHERE id = ?').get(r.lastInsertRowid) as Endpoint) };
+  });
+
+  /** Sets the priority order. `ids` lists every endpoint; requests try them from the first. */
+  app.put('/api/llm/endpoints/order', async (req) => {
+    requireAdmin(req);
+    const ids = (req.body as { ids?: unknown } | undefined)?.ids;
+    if (!Array.isArray(ids) || !ids.every((id) => Number.isInteger(id))) throw new HttpError(400, 'ids 必须是接入点 ID 列表');
+    const current = new Set(listAll().map((e) => e.id));
+    if (new Set(ids).size !== ids.length || ids.length !== current.size || !ids.every((id) => current.has(id))) {
+      throw new HttpError(409, '接入点列表已变化，请刷新后重试');
+    }
+    const setPriority = db.prepare('UPDATE llm_endpoints SET priority = ? WHERE id = ?');
+    db.transaction(() => ids.forEach((id, i) => setPriority.run(i + 1, id)))();
+    return { endpoints: listAll().map(publicEndpoint) };
   });
 
   app.put('/api/llm/endpoints/:id', async (req) => {
@@ -90,7 +103,6 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       baseUrl: 'base_url',
       apiKey: 'api_key',
       model: 'model',
-      weight: 'weight',
       enabled: 'enabled',
       extraBody: 'extra_body',
       maxConcurrency: 'max_concurrency',
@@ -157,7 +169,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       base_url: String(v.baseUrl),
       api_key: String(v.apiKey),
       model: String(v.model),
-      weight: 1,
+      priority: 0,
       enabled: 1,
       extra_body: String(v.extraBody ?? '{}'),
       max_concurrency: 0,
@@ -168,19 +180,6 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
       created_at: Date.now(),
     };
     return { result: await testEndpoint(ep, callTimeouts(db).idleTimeoutMs) };
-  });
-
-  /** Shows which endpoint each user is pinned to (rendezvous hashing over enabled endpoints). */
-  app.get('/api/llm/assignments', async (req) => {
-    requireAdmin(req);
-    const eps = listEnabledEndpoints(db);
-    const users = db.prepare('SELECT id, username FROM users ORDER BY id').all() as { id: number; username: string }[];
-    return {
-      assignments: users.map((u) => {
-        const ranked = rankEndpointsForUser(eps, `rs-user-${u.id}`);
-        return { userId: u.id, username: u.username, endpointId: ranked[0]?.id ?? null, endpointName: ranked[0]?.name ?? null };
-      }),
-    };
   });
 
   app.get('/api/llm/usage', async (req) => {
@@ -209,7 +208,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
                   SUM(c.prompt_tokens) AS promptTokens, SUM(c.completion_tokens) AS completionTokens,
                   AVG(CASE WHEN c.first_token_at IS NOT NULL THEN c.first_token_at - c.started_at END) AS firstTokenMs,
                   AVG(c.queued_ms) AS queuedMs, ${SPEED_SQL}
-           FROM llm_endpoints e LEFT JOIN llm_calls c ON c.endpoint_id = e.id GROUP BY e.id ORDER BY e.id`,
+           FROM llm_endpoints e LEFT JOIN llm_calls c ON c.endpoint_id = e.id GROUP BY e.id ORDER BY e.priority, e.id`,
         )
         .all() as any[]
     ).map((r) => ({

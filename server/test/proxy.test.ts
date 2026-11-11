@@ -129,7 +129,7 @@ describe('proxy settings from the environment', () => {
       base_url: baseUrl,
       api_key: 'k',
       model: 'local',
-      weight: 1,
+      priority: 1,
       enabled: 1,
       extra_body: '{}',
       max_concurrency: 0,

@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
@@ -15,7 +14,8 @@ export interface Endpoint {
   base_url: string;
   api_key: string;
   model: string;
-  weight: number;
+  /** Position in the admin's list: requests try endpoints from the lowest number up. */
+  priority: number;
   enabled: number;
   extra_body: string;
   /** Requests sent to this endpoint at the same time (0 = no limit); more wait in our own queue. */
@@ -91,23 +91,9 @@ export class LlmError extends Error {
   }
 }
 
+/** Enabled endpoints in priority order. */
 export function listEnabledEndpoints(db: DB): Endpoint[] {
-  return db.prepare('SELECT * FROM llm_endpoints WHERE enabled = 1 ORDER BY id').all() as Endpoint[];
-}
-
-/**
- * Weighted rendezvous hashing: each user is pinned to one endpoint so that the provider-side
- * prompt cache stays warm; when endpoints are added/removed only a minimal share of users move.
- * Returns endpoints ordered by preference (first = primary, the rest = failover order).
- */
-export function rankEndpointsForUser<T extends { id: number; weight: number }>(endpoints: T[], userKey: string): T[] {
-  const scored = endpoints.map((ep) => {
-    const h = crypto.createHash('sha256').update(`${userKey}:${ep.id}`).digest();
-    const u = (h.readUInt32BE(0) + 1) / 4294967297;
-    const score = -Math.max(ep.weight, 0.0001) / Math.log(u);
-    return { ep, score };
-  });
-  return scored.sort((a, b) => b.score - a.score).map((s) => s.ep);
+  return db.prepare('SELECT * FROM llm_endpoints WHERE enabled = 1 ORDER BY priority, id').all() as Endpoint[];
 }
 
 function chatUrl(baseUrl: string) {
@@ -344,10 +330,9 @@ function release(endpointId: number) {
 }
 
 /**
- * The endpoint for one call. Requests run in parallel across endpoints: the user's preferred
- * endpoint (rendezvous hashing, which keeps the prompt cache warm) is used while it is idle;
- * otherwise the least loaded endpoint (relative to its weight) with a free slot. When every endpoint
- * is at its parallel limit the call waits here, before any timeout starts, until a slot frees up.
+ * The endpoint for one call, chosen per request and the same for every user: the first candidate
+ * (in priority order) below its parallel limit. When every endpoint is at its limit the call waits
+ * here, before any timeout starts, until a slot frees up.
  */
 async function acquireEndpoint(
   candidates: Endpoint[],
@@ -355,10 +340,8 @@ async function acquireEndpoint(
   onQueue: () => void,
 ): Promise<Endpoint> {
   for (;;) {
-    const free = candidates.filter((ep) => !ep.max_concurrency || inflightCount(ep.id) < ep.max_concurrency);
-    if (free.length) {
-      const load = (ep: Endpoint) => inflightCount(ep.id) / Math.max(ep.weight, 0.0001);
-      const ep = inflightCount(free[0].id) === 0 ? free[0] : free.reduce((best, e) => (load(e) < load(best) ? e : best), free[0]);
+    const ep = candidates.find((e) => !e.max_concurrency || inflightCount(e.id) < e.max_concurrency);
+    if (ep) {
       inflight.set(ep.id, inflightCount(ep.id) + 1);
       return ep;
     }
@@ -383,7 +366,6 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   const endpoints = listEnabledEndpoints(db);
   if (!endpoints.length) throw new LlmError('尚未配置任何可用的大模型接入点，请联系管理员在「模型接入」中添加', false);
   const userKey = `rs-user-${userId}`;
-  const ranked = rankEndpointsForUser(endpoints, userKey);
   opts = { ...callTimeouts(db), ...opts };
   const ctx = opts.contextTokens ?? DEFAULT_CONTEXT_TOKENS;
   const budget = inputBudget(ctx, Math.min(opts.maxTokens ?? MIN_OUTPUT_TOKENS, 16_000));
@@ -392,10 +374,10 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   const errors: string[] = [];
   const tried = new Set<number>();
   const jobId = opts.jobId;
-  while (tried.size < ranked.length) {
+  while (tried.size < endpoints.length) {
     const queuedAt = Date.now();
     const ep = await acquireEndpoint(
-      ranked.filter((e) => !tried.has(e.id)),
+      endpoints.filter((e) => !tried.has(e.id)),
       opts.signal,
       () => {
         if (jobId && !liveCalls.get(jobId)?.queuedSince) {

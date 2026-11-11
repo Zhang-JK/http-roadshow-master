@@ -154,6 +154,14 @@ export const MIGRATIONS: string[] = [
   `
   CREATE INDEX idx_jobs_user ON jobs(user_id, finished_at);
   `,
+  // Endpoints are tried in the order the admin arranges them; start from the old weights, heaviest first.
+  `
+  ALTER TABLE llm_endpoints ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  UPDATE llm_endpoints SET priority = (
+    SELECT COUNT(*) FROM llm_endpoints e
+    WHERE e.weight > llm_endpoints.weight OR (e.weight = llm_endpoints.weight AND e.id <= llm_endpoints.id)
+  );
+  `,
 ];
 
 /** Service account the MCP endpoint acts as; it has a token instead of a password. */
