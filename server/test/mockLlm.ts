@@ -289,7 +289,22 @@ export async function startMockLlm(opts: MockOptions = {}) {
   /** Requests answering a failed delivery check (also counted in calls / reviewCalls). */
   const checkCalls: MockCall[] = [];
   const failedOnce = new Set<string>();
+  let offlineCalls = 0;
+  /**
+   * The model went away (as a local model does while it restarts): every request fails until
+   * setOnline() or POST /__mock/online. Markers take it offline, each once per request:
+   * OFFLINE_AT_PAGES at the second batch of pages, OFFLINE_IN_EDIT at the second round of a tool
+   * edit, OFFLINE_IN_CHECK when the model is asked to fix a failed delivery check,
+   * OFFLINE_AT_CONTINUE when a cut-off reply is to be continued.
+   */
+  let offline = false;
+  const tripped = new Set<string>();
   const server = http.createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/__mock/online') {
+      offline = false;
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}');
+      return;
+    }
     if (req.method !== 'POST' || !req.url?.endsWith('/chat/completions')) {
       res.writeHead(404).end();
       return;
@@ -317,6 +332,24 @@ export async function startMockLlm(opts: MockOptions = {}) {
         }
     }
     const text = texts.join('\n');
+    const lastUserMsg = [...body.messages].reverse().find((m: any) => m.role === 'user');
+    const lastUserStr = typeof lastUserMsg?.content === 'string' ? (lastUserMsg.content as string) : '';
+    // Only the request itself counts: the README lists earlier edit requests, markers included.
+    const key = text.match(/【修改要求】\n([^\n]*)/)?.[1] ?? text.match(/【其他要求】(.*)/)?.[1] ?? text.match(/^- 其他要求：(.*)$/m)?.[1] ?? '';
+    const trip = (marker: string, now: boolean) => {
+      if (!now || !key.includes(marker) || tripped.has(`${marker}|${key}`)) return;
+      tripped.add(`${marker}|${key}`);
+      offline = true;
+    };
+    trip('OFFLINE_AT_PAGES', text.includes('【本批任务】') && !text.includes('（无，本批是第一批）'));
+    trip('OFFLINE_IN_EDIT', text.includes('【修改方式】') && !text.includes('【自检阶段】') && body.messages.some((m: any) => m.role === 'tool'));
+    trip('OFFLINE_IN_CHECK', lastUserStr.includes('【交付检查】'));
+    trip('OFFLINE_AT_CONTINUE', lastUserStr.includes('请从中断处继续输出'));
+    if (offline) {
+      offlineCalls++;
+      res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model offline (MOCK)' } }));
+      return;
+    }
     // FAIL_ONCE in an edit request: the first attempt on each model fails as if it were overloaded, a retry works.
     const editRequest = text.match(/【修改要求】\n([^\n]*)/)?.[1] ?? '';
     if (editRequest.includes('FAIL_ONCE') && !failedOnce.has(`${body.model}|${editRequest}`)) {
@@ -454,6 +487,15 @@ export async function startMockLlm(opts: MockOptions = {}) {
     calls,
     reviewCalls,
     checkCalls,
+    get offline() {
+      return offline;
+    },
+    get offlineCalls() {
+      return offlineCalls;
+    },
+    setOnline: () => {
+      offline = false;
+    },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }
