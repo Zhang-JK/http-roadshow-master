@@ -10,6 +10,7 @@ import { HistoryPanel } from '../components/HistoryPanel';
 import { AssetsPanel } from '../components/AssetsPanel';
 import { FilesPanel } from '../components/FilesPanel';
 import { QuestionCard } from '../components/QuestionCard';
+import { ShareDialog } from '../components/ShareDialog';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
 import { duration, elapsed, num, speed, TYPE_LABELS } from '../lib/format';
 
@@ -54,6 +55,7 @@ export function EditorPage() {
   const [preview, setPreview] = useState<{ version: Version; doc: DeckDoc } | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportMenu, setExportMenu] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [textEditing, setTextEditing] = useState(false);
@@ -92,7 +94,7 @@ export function EditorPage() {
         setData(r);
         loadHistory();
       } else {
-        setData((d) => (d ? { ...d, assets: r.assets, project: { ...d.project, status: r.project.status, error: r.project.error, name: r.project.name } } : r));
+        setData((d) => (d ? { ...d, assets: r.assets, project: { ...d.project, status: r.project.status, error: r.project.error, name: r.project.name, share: r.project.share } } : r));
       }
     } catch (e) {
       toast((e as Error).message, 'error');
@@ -383,6 +385,9 @@ export function EditorPage() {
         <div className="spacer" />
         {jobs.some((j) => j.question) && <span className="pill pill-ask" data-testid="question-pill">AI 在等你回答</span>}
         {jobs.length > 0 && <span className="pill pill-busy"><span className="dot" /> {jobs.length} 个任务进行中</span>}
+        <button className={`btn ${project.share ? 'btn-shared' : ''}`} onClick={() => setSharing(true)} title="生成链接，无需登录即可查看" data-testid="share-btn">
+          {project.share ? '已分享' : '分享'}
+        </button>
         <div className="export">
           <button className="btn btn-primary" disabled={!hasContent || !!exporting} onClick={() => setExportMenu((m) => !m)} data-testid="export-btn">
             {exporting ? `正在导出 ${exporting.toUpperCase()}…` : `导出${preview ? `（v${preview.version.versionNo}）` : ''} ▾`}
@@ -398,6 +403,13 @@ export function EditorPage() {
           )}
         </div>
       </header>
+      {sharing && (
+        <ShareDialog
+          project={project}
+          onChanged={(share) => setData((d) => (d ? { ...d, project: { ...d.project, share } } : d))}
+          onClose={() => setSharing(false)}
+        />
+      )}
 
       {!hasContent ? (
         <div className="gen-state">

@@ -50,7 +50,15 @@ export interface Project {
   updatedBy: string | null;
   createdAt: number;
   updatedAt: number;
+  /** Set while anyone with the link may view the project without signing in. */
+  share?: ShareInfo | null;
   doc?: DeckDoc;
+}
+
+export interface ShareInfo {
+  token: string;
+  sharedAt: number | null;
+  sharedBy: string | null;
 }
 
 export interface JobReview {

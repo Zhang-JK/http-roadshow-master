@@ -1080,3 +1080,105 @@ test('"not now" on the banner asks nothing; notifications can be turned on later
   await expect(insecure.locator('[data-testid=notify-menu]')).toHaveAttribute('title', /chrome:\/\/flags/);
   await insecure.context().close();
 });
+
+async function signIn(p: Page, username: string, password: string) {
+  await p.fill('input[name=username]', username);
+  await p.fill('input[name=password]', password);
+  await p.click('button:has-text("登录")');
+}
+
+test('share a deck: anyone with the link views it without signing in; signing in from the link opens the editor', async ({ browser }) => {
+  const ownerCtx = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+  const owner = await ownerCtx.newPage();
+  owner.on('dialog', (d) => d.accept());
+  await owner.goto('/login');
+  await signIn(owner, 'admin', 'admin123');
+  await expect(owner.locator('[data-testid=user-menu]')).toBeVisible();
+  await owner.goto(deckUrl);
+  const name = (await owner.locator('.editor-title').innerText()).trim();
+  const pageCount = await owner.locator('[data-testid=page-thumb]').count();
+  expect(pageCount).toBeGreaterThan(1);
+
+  const shareBtn = owner.locator('[data-testid=share-btn]');
+  await expect(shareBtn).toHaveText('分享');
+  await shareBtn.click();
+  await expect(owner.locator('.modal-head')).toContainText('分享路演材料');
+  await owner.click('[data-testid=share-create]');
+  const urlBox = owner.locator('[data-testid=share-url]');
+  await expect(urlBox).toHaveValue(/\/s\/[A-Za-z0-9_-]{24}$/);
+  const link = await urlBox.inputValue();
+  expect(link.startsWith(new URL(owner.url()).origin)).toBe(true);
+  await expect(owner.locator('.share-dialog')).toContainText('管理员 于');
+  await owner.click('[data-testid=share-copy]');
+  await expect(owner.locator('.toast-success').last()).toContainText('链接已复制');
+  expect(await owner.evaluate(() => navigator.clipboard.readText())).toBe(link);
+  await owner.keyboard.press('Escape');
+  await expect(shareBtn).toHaveText('已分享');
+  await owner.goto('/decks');
+  await expect(owner.locator('[data-testid=shared-badge]')).toHaveCount(1);
+  await expect(owner.locator('[data-testid=project-card]', { has: owner.locator('[data-testid=shared-badge]') })).toContainText(name);
+
+  // No account: the deck opens read-only, with pages, keyboard paging and a full-screen show.
+  const anon = await (await browser.newContext()).newPage();
+  await anon.goto(link);
+  await expect(anon).toHaveURL(link);
+  await expect(anon.locator('[data-testid=share-title]')).toHaveText(name);
+  await expect(anon.locator('[data-testid=user-menu]')).toHaveCount(0);
+  await expect(anon.locator('[data-testid=share-edit]')).toHaveCount(0);
+  await expect(anon.locator('[data-testid=share-thumb]')).toHaveCount(pageCount);
+  await expect(anon.frameLocator('[data-testid=share-stage] iframe').locator('section.slide')).toBeVisible();
+  const indicator = anon.locator('[data-testid=share-indicator]');
+  await expect(indicator).toHaveText(`第 1 / ${pageCount} 页`);
+  await expect(anon.locator('[data-testid=share-prev]')).toBeDisabled();
+  await anon.click('[data-testid=share-next]');
+  await expect(indicator).toHaveText(`第 2 / ${pageCount} 页`);
+  await anon.keyboard.press('End');
+  await expect(indicator).toHaveText(`第 ${pageCount} / ${pageCount} 页`);
+  await anon.locator('[data-testid=share-thumb]').first().click();
+  await expect(indicator).toHaveText(`第 1 / ${pageCount} 页`);
+  await anon.click('[data-testid=share-present]');
+  const stageBox = anon.locator('[data-testid=share-stage]');
+  await expect(stageBox).toHaveClass(/presenting/);
+  await stageBox.click();
+  await expect(indicator).toHaveText(`第 2 / ${pageCount} 页`);
+  await anon.keyboard.press('ArrowLeft');
+  await expect(indicator).toHaveText(`第 1 / ${pageCount} 页`);
+  await anon.click('[data-testid=share-exit]');
+  await expect(stageBox).not.toHaveClass(/presenting/);
+
+  // Signing in from the link goes straight on to the editor, where the visitor can edit.
+  await anon.click('[data-testid=share-login]');
+  await expect(anon).toHaveURL(/\/login$/);
+  await signIn(anon, 'carol', 'carol123');
+  await expect(anon).toHaveURL(deckUrl);
+  await expect(anon.locator('[data-testid=prompt-input]')).toBeVisible();
+  await anon.locator('.editor-title').click();
+  await anon.fill('.name-input', `${name} · 共享`);
+  await anon.keyboard.press('Enter');
+  await expect(anon.locator('.editor-title')).toHaveText(`${name} · 共享`);
+  // Already signed in: the link shows the change and offers the editor.
+  await anon.goto(link);
+  await expect(anon.locator('[data-testid=share-title]')).toHaveText(`${name} · 共享`);
+  await anon.click('[data-testid=share-edit]');
+  await expect(anon).toHaveURL(deckUrl);
+
+  // Resetting stops the old link; closing stops sharing altogether.
+  await owner.goto(deckUrl);
+  await owner.click('[data-testid=share-btn]');
+  await owner.click('[data-testid=share-reset]');
+  await expect(urlBox).not.toHaveValue(link);
+  const link2 = await urlBox.inputValue();
+  const stranger = await (await browser.newContext()).newPage();
+  await stranger.goto(link);
+  await expect(stranger.locator('.share-empty')).toContainText('分享链接无效或已被关闭');
+  await stranger.goto(link2);
+  await expect(stranger.locator('[data-testid=share-title]')).toHaveText(`${name} · 共享`);
+  await owner.click('[data-testid=share-stop]');
+  await expect(owner.locator('[data-testid=share-create]')).toBeVisible();
+  await owner.keyboard.press('Escape');
+  await expect(owner.locator('[data-testid=share-btn]')).toHaveText('分享');
+  await stranger.reload();
+  await expect(stranger.locator('.share-empty')).toContainText('分享链接无效或已被关闭');
+
+  for (const p of [owner, anon, stranger]) await p.context().close();
+});

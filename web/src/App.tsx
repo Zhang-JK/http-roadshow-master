@@ -9,6 +9,7 @@ import { EditorPage } from './pages/Editor';
 import { UsersPage } from './pages/Users';
 import { ModelsPage } from './pages/Models';
 import { SessionsPage } from './pages/Sessions';
+import { SharePage } from './pages/Share';
 import { PasswordDialog } from './components/PasswordDialog';
 import { NotifyBanner, NotifyMenuItem } from './components/Notify';
 
@@ -84,13 +85,22 @@ export default function App() {
   const { user, loading } = useAuth();
   const loc = useLocation();
   if (loading) return <div className="center-screen"><div className="spinner" /></div>;
+  // Share links open without signing in.
+  if (/^\/s\/[^/]+\/?$/.test(loc.pathname)) {
+    return (
+      <Routes>
+        <Route path="/s/:token" element={<SharePage />} />
+      </Routes>
+    );
+  }
   if (!user) {
-    if (loc.pathname !== '/login') return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
+    if (loc.pathname !== '/login') return <Navigate to="/login" replace state={{ from: loc.pathname + loc.search }} />;
     return <LoginPage />;
   }
+  const from = (loc.state as { from?: string } | null)?.from;
   return (
     <Routes>
-      <Route path="/login" element={<Navigate to="/templates" replace />} />
+      <Route path="/login" element={<Navigate to={from?.startsWith('/') && !from.startsWith('//') ? from : '/templates'} replace />} />
       <Route path="/p/:id" element={<EditorPage />} />
       <Route path="/templates" element={<Shell><ProjectsPage type="template" /></Shell>} />
       <Route path="/decks" element={<Shell><ProjectsPage type="deck" /></Shell>} />
