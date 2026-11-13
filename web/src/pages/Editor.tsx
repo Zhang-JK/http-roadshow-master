@@ -11,6 +11,7 @@ import { AssetsPanel } from '../components/AssetsPanel';
 import { FilesPanel } from '../components/FilesPanel';
 import { QuestionCard } from '../components/QuestionCard';
 import { ShareDialog } from '../components/ShareDialog';
+import { SlideShow } from '../components/SlideShow';
 import { addFiles, RefFileList, SLIDES_ACCEPT, uploadRefFiles, type RefFile } from '../components/RefFiles';
 import { duration, elapsed, num, speed, TYPE_LABELS } from '../lib/format';
 
@@ -53,6 +54,7 @@ export function EditorPage() {
   const [sending, setSending] = useState(false);
   const [tab, setTab] = useState<'history' | 'files' | 'assets'>('history');
   const [preview, setPreview] = useState<{ version: Version; doc: DeckDoc } | null>(null);
+  const [showFrom, setShowFrom] = useState<number | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportMenu, setExportMenu] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -248,6 +250,15 @@ export function EditorPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [goPage]);
 
+  const endShow = useCallback(
+    (i: number) => {
+      setShowFrom(null);
+      const p = doc?.pages[i];
+      if (p) setPageId(p.id);
+    },
+    [doc],
+  );
+
   const postToFrame = (msg: unknown) => frameRef.current?.contentWindow?.postMessage(msg, '*');
   const clearSelection = () => postToFrame({ type: 'rs-set-selection', eids: [] });
 
@@ -385,6 +396,15 @@ export function EditorPage() {
         <div className="spacer" />
         {jobs.some((j) => j.question) && <span className="pill pill-ask" data-testid="question-pill">AI 在等你回答</span>}
         {jobs.length > 0 && <span className="pill pill-busy"><span className="dot" /> {jobs.length} 个任务进行中</span>}
+        <button
+          className="btn"
+          disabled={!doc?.pages.length}
+          onClick={() => setShowFrom(Math.max(0, pageIndex))}
+          title={`从当前页开始全屏放映${preview ? `（v${preview.version.versionNo}）` : ''}：单击或 → 下一页，← 上一页，Esc 退出`}
+          data-testid="present-btn"
+        >
+          ▶ 放映
+        </button>
         <button className={`btn ${project.share ? 'btn-shared' : ''}`} onClick={() => setSharing(true)} title="生成链接，无需登录即可查看" data-testid="share-btn">
           {project.share ? '已分享' : '分享'}
         </button>
@@ -403,6 +423,7 @@ export function EditorPage() {
           )}
         </div>
       </header>
+      {showFrom !== null && doc && <SlideShow doc={doc} startIndex={showFrom} onClose={endShow} />}
       {sharing && (
         <ShareDialog
           project={project}

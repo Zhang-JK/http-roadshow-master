@@ -526,6 +526,61 @@ test('double-click any text, even beside icons or styled words, to edit just tha
   await expect(page.locator('[data-testid=page-indicator]')).toHaveText('第 2 / 3 页');
 });
 
+test('present the deck full screen from the editor, starting at the current page', async () => {
+  const indicator = page.locator('[data-testid=page-indicator]');
+  const show = page.locator('[data-testid=slideshow]');
+  const count = page.locator('[data-testid=slideshow-count]');
+  const title = () => page.frameLocator('.slideshow-slide.on iframe').locator('h1');
+  await expect(indicator).toHaveText('第 2 / 3 页');
+
+  // Keys and clicks move through the pages; every page is rendered read-only, one shown at a time.
+  await page.click('[data-testid=present-btn]');
+  await expect(show).toBeVisible();
+  await expect(count).toHaveText('2 / 3');
+  await expect(show.locator('.slideshow-slide')).toHaveCount(3);
+  await expect(show.locator('.slideshow-slide.on')).toHaveCount(1);
+  await expect(title()).toContainText('第2页标题');
+  await expect(page.frameLocator('.slideshow-slide.on iframe').locator('[data-rs-ui]')).toHaveCount(0);
+  await page.keyboard.press('ArrowRight');
+  await expect(count).toHaveText('3 / 3');
+  await expect(title()).toHaveText('第3页标题');
+  await page.keyboard.press('ArrowLeft');
+  await expect(count).toHaveText('2 / 3');
+  await show.click({ position: { x: 1200, y: 500 } });
+  await expect(count).toHaveText('3 / 3');
+  // Past the last page the show ends, and the editor is left on the page it ended on.
+  await page.keyboard.press('Space');
+  await expect(show).toHaveCount(0);
+  await expect(indicator).toHaveText('第 3 / 3 页');
+
+  // Home, the left edge to go back, Esc to leave; the editor's own keys do not act behind the show.
+  await page.click('[data-testid=present-btn]');
+  await expect(count).toHaveText('3 / 3');
+  await page.keyboard.press('Home');
+  await expect(count).toHaveText('1 / 3');
+  await show.click({ position: { x: 1200, y: 500 } });
+  await expect(count).toHaveText('2 / 3');
+  await show.click({ position: { x: 40, y: 500 } });
+  await expect(count).toHaveText('1 / 3');
+  await expect(indicator).toHaveText('第 3 / 3 页');
+  await page.keyboard.press('Escape');
+  await expect(show).toHaveCount(0);
+  await expect(indicator).toHaveText('第 1 / 3 页');
+
+  // The exit button.
+  await page.locator('[data-testid=page-thumb]').nth(1).click();
+  await page.click('[data-testid=present-btn]');
+  await expect(count).toHaveText('2 / 3');
+  await page.mouse.move(700, 400);
+  await page.click('[data-testid=slideshow-exit]');
+  await expect(show).toHaveCount(0);
+  await expect(indicator).toHaveText('第 2 / 3 页');
+  await page.keyboard.press('ArrowRight');
+  await expect(indicator).toHaveText('第 3 / 3 页');
+  await page.locator('[data-testid=page-thumb]').nth(1).click();
+  await expect(indicator).toHaveText('第 2 / 3 页');
+});
+
 test('export HTML, PDF and PPTX downloads', async () => {
   for (const [label, ext, magic] of [
     ['下载 HTML', 'html', '<!DOCTYPE'],
