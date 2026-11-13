@@ -367,7 +367,7 @@ test('double-click a text-only element to edit it in place, without the AI; each
   await expect(li).toHaveText('新要点');
   await expect(page.locator('[data-testid=edit-text-btn]')).toBeVisible();
   await stage().locator('ul').dispatchEvent('dblclick');
-  await expect(page.locator('.toast-info', { hasText: '不能直接改字' })).toBeVisible();
+  await expect(page.locator('.toast-info', { hasText: '没有可以直接修改的文字' })).toBeVisible();
   await expect(editBar).toHaveCount(0);
   await expect(page.locator('.sel-chip')).toContainText('列表');
   await expect(page.locator('[data-testid=edit-text-btn]')).toHaveCount(0);
@@ -384,6 +384,108 @@ test('double-click a text-only element to edit it in place, without the AI; each
   await expect(page.locator('.toast-error', { hasText: '文字没有保存' })).toContainText('别人改的正文');
   await expect(body).toHaveText('别人改的正文');
   await expect(historyItems()).toHaveCount(count + 4);
+});
+
+test('double-click any text, even beside icons or styled words, to edit just that text in place', async () => {
+  const back = page.url();
+  const created = await (await page.request.post('/api/projects', { data: { type: 'template', style: '简约', name: '混排文字', notes: 'MIXED_TEXT' } })).json();
+  const job = async () => (await (await page.request.get(`/api/jobs/${created.job.id}`)).json()).job.status;
+  await expect.poll(job, { timeout: 60_000 }).toBe('done');
+  const pid = created.project.id;
+  await page.goto(`/p/${pid}`);
+  await page.locator('[data-testid=page-thumb]').nth(1).click();
+  const count = await historyItems().count();
+  const editBar = page.locator('[data-testid=text-edit-bar]');
+  const note = stage().locator('p.note');
+  const tag = stage().locator('div.tag');
+  const editingRun = stage().locator('rs-text');
+  await expect(note).toHaveText('收入 3,200 万元，同比 +180%');
+  const saved = async () => (await (await page.request.get(`/api/projects/${pid}`)).json()).project.doc.pages[1].html as string;
+  // Where a piece of an element's own text is drawn, in page coordinates (the stage is scaled).
+  const at = async (el: typeof note, text: string) => {
+    const r = await el.evaluate((e, t) => {
+      for (const n of Array.from(e.childNodes)) {
+        if (n.nodeType !== 3 || !(n as Text).data.includes(t)) continue;
+        const rg = document.createRange();
+        rg.selectNodeContents(n);
+        const b = rg.getBoundingClientRect();
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2, w: innerWidth };
+      }
+      return null;
+    }, text);
+    const box = (await page.locator('.stage iframe').boundingBox())!;
+    return { x: box.x + (r!.x * box.width) / r!.w, y: box.y + (r!.y * box.width) / r!.w };
+  };
+  const dblclickText = async (el: typeof note, text: string) => {
+    const { x, y } = await at(el, text);
+    await page.mouse.dblclick(x, y);
+  };
+
+  await note.hover();
+  await expect(stage().locator('[data-rs-ui] > div', { hasText: '段落 <p> · 双击其中文字可直接改' })).toBeVisible();
+
+  // Only the run under the pointer becomes editable; the bold number and italic growth stay as they are.
+  await dblclickText(note, '万元');
+  await expect(editBar).toBeVisible();
+  await expect(editingRun).toHaveText('万元，同比');
+  await expect(editingRun).toHaveAttribute('contenteditable', /plaintext-only|true/);
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('亿元，环比');
+  await page.keyboard.press('Enter');
+  await expect(editBar).toHaveCount(0);
+  await expect(page.locator('.toast-success', { hasText: '文字已保存（v' })).toBeVisible();
+  await expect(historyItems()).toHaveCount(count + 1);
+  const top = historyItems().first();
+  await expect(top).toContainText('直接改字');
+  await expect(top.locator('[data-testid=hist-text] del')).toHaveText('万元，同比');
+  await expect(top.locator('[data-testid=hist-text] ins')).toHaveText('亿元，环比');
+  await expect(editingRun).toHaveCount(0);
+  await expect(note).toHaveText('收入 3,200 亿元，环比 +180%');
+  expect(await saved()).toMatch(/<p class="note" data-eid="[^"]+">收入 <b class="num" data-eid="[^"]+">3,200<\/b> 亿元，环比 <i data-eid="[^"]+">\+180%<\/i><\/p>/);
+
+  // Esc puts the run back exactly as it was.
+  await dblclickText(note, '收入');
+  await expect(editingRun).toHaveText('收入');
+  await page.keyboard.type('XX');
+  await page.keyboard.press('Escape');
+  await expect(editBar).toHaveCount(0);
+  await expect(editingRun).toHaveCount(0);
+  await expect(note).toHaveText('收入 3,200 亿元，环比 +180%');
+  await expect(note.locator('b.num')).toHaveText('3,200');
+
+  // The text beside an icon; clicking elsewhere saves, and its line break and small print stay.
+  await dblclickText(tag, '重点客户');
+  await expect(editingRun).toHaveText('重点客户');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('核心客户');
+  await stage().locator('h1').click();
+  await expect(historyItems()).toHaveCount(count + 2);
+  await expect(tag).toHaveText('核心客户12 家');
+  expect(await saved()).toMatch(/<span class="dot" data-eid="[^"]+"><\/span>核心客户<br><small data-eid="[^"]+">12 家<\/small><\/div>/);
+
+  // The 直接改字 button works when the element has a single run of text, which needs no pointer.
+  await tag.click({ position: { x: 5, y: 5 } });
+  await expect(page.locator('.sel-chip')).toContainText('区块');
+  await page.click('[data-testid=edit-text-btn]');
+  await expect(editingRun).toHaveText('核心客户');
+  await page.keyboard.type(' · 按钮');
+  await page.click('[data-testid=text-edit-save]');
+  await expect(historyItems()).toHaveCount(count + 3);
+  await expect(tag).toHaveText('核心客户 · 按钮12 家');
+  await note.click({ position: { x: 2, y: 2 } });
+  await expect(page.locator('.sel-chip')).toContainText('段落');
+  await expect(page.locator('[data-testid=edit-text-btn]')).toHaveCount(0);
+
+  // Away from any text there is nothing to type over.
+  await note.dispatchEvent('dblclick', { clientX: 1, clientY: 1 });
+  await expect(page.locator('.toast-info', { hasText: '没有可以直接修改的文字' })).toBeVisible();
+  await expect(editBar).toHaveCount(0);
+  await expect(historyItems()).toHaveCount(count + 3);
+
+  await page.request.delete(`/api/projects/${pid}`);
+  await page.goto(back);
+  await page.locator('[data-testid=page-thumb]').nth(1).click();
+  await expect(page.locator('[data-testid=page-indicator]')).toHaveText('第 2 / 3 页');
 });
 
 test('export HTML, PDF and PPTX downloads', async () => {

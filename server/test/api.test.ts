@@ -457,6 +457,45 @@ describe('templates, decks, edits, history and export', () => {
     expect((await req('GET', `/api/projects/${deckId}`, adminCookie)).json.project.doc.pages[0].html).toMatch(new RegExp(`data-eid="${eid}"[^>]*>标题 v2</h1>`));
   });
 
+  it('any run of text can be typed over directly, even inside an element holding other elements', async () => {
+    const created = await req('POST', '/api/projects', adminCookie, { type: 'template', style: '简约', name: '混排文字', notes: 'MIXED_TEXT' });
+    expect((await waitJob(created.json.job.id)).status).toBe('done');
+    const pid = created.json.project.id;
+    const project = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project;
+    const page = project.doc.pages[1];
+    const [, p] = page.html.match(/<p class="note" data-eid="([^"]+)"/);
+    const [, tag] = page.html.match(/<div class="tag" data-eid="([^"]+)"/);
+    const url = (e: string) => `/api/projects/${pid}/pages/${page.id}/elements/${e}/text`;
+    const calls = mock.calls.length;
+
+    const r = await req('PUT', url(p), aliceCookie, { text: '营收', oldText: '收入', run: 0 });
+    expect(r.status).toBe(200);
+    expect(r.json.versionNo).toBe(project.versionNo + 1);
+    let html = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project.doc.pages[1].html;
+    expect(html).toMatch(/<p class="note" data-eid="[^"]+">营收 <b class="num" data-eid="[^"]+">3,200<\/b> 万元，同比 <i data-eid="[^"]+">\+180%<\/i><\/p>/);
+    const [v] = (await req('GET', `/api/projects/${pid}/versions`, adminCookie)).json.versions;
+    expect(v).toMatchObject({ action: 'text_edit', userName: '爱丽丝', elementIds: [p], prompt: '直接修改文字：「收入」→「营收」' });
+    expect(v.summary.textEdit).toEqual({ eid: p, page: 2, before: '收入', after: '营收', run: 0 });
+
+    // The second run of the sentence, and the text beside an icon (its line break and small print stay).
+    expect((await req('PUT', url(p), adminCookie, { text: '亿元，环比', oldText: '万元，同比', run: 1 })).status).toBe(200);
+    expect((await req('PUT', url(tag), adminCookie, { text: '核心客户', oldText: '重点客户', run: 0 })).status).toBe(200);
+    html = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project.doc.pages[1].html;
+    expect(html).toMatch(/3,200<\/b> 亿元，环比 <i/);
+    expect(html).toMatch(/<span class="dot" data-eid="[^"]+"><\/span>核心客户<br><small data-eid="[^"]+">12 家<\/small><\/div>/);
+    expect(mock.calls.length).toBe(calls);
+
+    // What the editor saw is no longer there; a run that does not exist; a bad run number.
+    expect((await req('PUT', url(p), adminCookie, { text: 'x', oldText: '收入', run: 0 })).status).toBe(409);
+    expect((await req('PUT', url(p), adminCookie, { text: 'x', run: 2 })).status).toBe(409);
+    for (const run of [-1, 1.5, 'a']) expect((await req('PUT', url(p), adminCookie, { text: 'x', run })).status).toBe(400);
+    // Without a run, only elements holding nothing but text can be typed over, as before.
+    const whole = await req('PUT', url(p), adminCookie, { text: 'x' });
+    expect(whole.status).toBe(400);
+    expect(whole.json.error).toContain('只有纯文字元素可以直接编辑');
+    await req('DELETE', `/api/projects/${pid}`, adminCookie);
+  });
+
   it('can preview and revert to an older version', async () => {
     const v = (await req('GET', `/api/projects/${deckId}/versions`, adminCookie)).json.versions;
     const v1 = v.find((x: any) => x.versionNo === 1);

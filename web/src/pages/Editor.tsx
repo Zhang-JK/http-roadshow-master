@@ -190,11 +190,11 @@ export function EditorPage() {
   }, [pageId, preview]);
 
   const saveText = useCallback(
-    async (m: { eid: string; pageId: string; text: string; oldText: string }) => {
+    async (m: { eid: string; pageId: string; text: string; oldText: string; run?: number }) => {
       try {
         const r = await api.put<{ versionNo?: number; unchanged?: boolean }>(
           `/api/projects/${id}/pages/${encodeURIComponent(m.pageId)}/elements/${encodeURIComponent(m.eid)}/text`,
-          { text: m.text, oldText: m.oldText },
+          { text: m.text, oldText: m.oldText, ...(typeof m.run === 'number' ? { run: m.run } : {}) },
         );
         if (!r.unchanged) toast(`文字已保存（v${r.versionNo}）`, 'success');
       } catch (e) {
@@ -220,7 +220,7 @@ export function EditorPage() {
         if (m.type === 'text-edit-commit') saveText(m);
         else if (m.empty) toast('文字不能为空，已恢复原来的文字；如需删除这个元素，请用 AI 修改', 'info');
       } else if (m.type === 'text-edit-denied') {
-        toast(`「${m.label}」里除了文字还有其他元素（图片、图标或单独设置样式的文字），不能直接改字：可以双击其中的单段文字，或在下方描述修改交给 AI`, 'info');
+        toast(`「${m.label}」这里没有可以直接修改的文字（图片、图标或空白处）：请双击文字本身，或在下方描述修改交给 AI`, 'info');
       }
     };
     window.addEventListener('message', onMsg);
@@ -570,7 +570,7 @@ export function EditorPage() {
                           {s.text && <em>“{s.text.slice(0, 14)}{s.text.length > 14 ? '…' : ''}”</em>}
                         </span>
                       ))}
-                      {selection.length === 1 && selection[0].textOnly && (
+                      {selection.length === 1 && (selection[0].textOnly || selection[0].runs === 1) && (
                         <button className="btn btn-xs" data-testid="edit-text-btn" title="不经过 AI，直接在页面上修改这段文字（也可以双击文字）" onClick={() => postToFrame({ type: 'rs-edit-text', eid: selection[0].eid })}>
                           ✎ 直接改字
                         </button>

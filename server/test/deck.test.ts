@@ -16,6 +16,7 @@ import {
   plainText,
   replacePage,
   setElementText,
+  textRuns,
 } from '../src/deck.js';
 
 const SAMPLE = `好的，下面是模板：
@@ -186,3 +187,61 @@ describe('direct text edits', () => {
     expect(() => setElementText(doc, 'pmissing', ul, 'x')).toThrow(expect.objectContaining({ statusCode: 409 }));
   });
 });
+
+describe('typing over a text run of any element', () => {
+  const el = (html: string) => cheerio.load(html, null, false).root().children().get(0) as Element;
+  const runs = (html: string) => textRuns(el(html)).map((nodes) => cheerio.load('').html(nodes as any));
+  const MIXED = `<!DOCTYPE html><html><head><style>.k{}</style></head><body><section class="slide">
+<p class="kpi">收入 <b>3,200</b> 万元，<!-- n -->同比 <i>+180%</i></p>
+<h1>第一行<br><span>第二行</span></h1>
+<ul><li><span class="dot"></span>  要点文字  </li></ul>
+<h2>标题</h2>
+</section></body></html>`;
+  const doc = () => parseFullHtml(MIXED, base);
+  const eidOf = (html: string, re: RegExp) => html.match(re)![1];
+
+  it('splits an element\'s own text at its child elements, trimming line breaks and blanks at the edges', () => {
+    expect(runs('<p>收入 <b>3,200</b> 万元，<!-- n -->同比 <i>+180%</i></p>')).toEqual(['收入 ', ' 万元，<!-- n -->同比 ']);
+    expect(runs('<li><span class="dot"></span>  要点文字  </li>')).toEqual(['  要点文字  ']);
+    expect(runs('<h1>第一行<br><span>第二行</span></h1>')).toEqual(['第一行']);
+    expect(runs('<p><br>A<br>B<br><b>c</b></p>')).toEqual(['A<br>B']);
+    expect(runs('<div>\n  <h2>x</h2>\n  <p>y</p>\n</div>')).toEqual([]);
+    expect(runs('<p>纯文字</p>')).toEqual(['纯文字']);
+    expect(runs('<svg><text>x</text></svg>')).toEqual([]);
+    expect(runs('<section class="slide" data-page-id="p1">页面上的文字<div>块</div></section>')).toEqual(['页面上的文字']);
+  });
+
+  it('replaces one run and keeps the elements and spacing around it', () => {
+    const d = doc();
+    const p = eidOf(d.pages[0].html, /<p class="kpi" data-eid="([^"]+)"/);
+    const r0 = setElementText(d, d.pages[0].id, p, '营收 <x>', 0);
+    expect(r0.before).toBe('收入');
+    expect(r0.doc.pages[0].html).toMatch(/>营收 &lt;x&gt; <b data-eid="[^"]+">3,200<\/b> 万元，<!-- n -->同比 <i/);
+    const r1 = setElementText(r0.doc, d.pages[0].id, p, '亿元\n同比增长', 1);
+    expect(r1.before).toBe('万元，同比');
+    expect(r1.doc.pages[0].html).toMatch(/3,200<\/b> 亿元<br>同比增长 <i data-eid="[^"]+">\+180%<\/i><\/p>/);
+    expect(diffDocs(d, r1.doc).elementsChanged.map((e) => e.eid)).toEqual([p]);
+  });
+
+  it('keeps a line break at the edge of a run, and text beside an icon', () => {
+    const d = doc();
+    const h1 = eidOf(d.pages[0].html, /<h1 data-eid="([^"]+)"/);
+    expect(setElementText(d, d.pages[0].id, h1, '首行', 0).doc.pages[0].html).toMatch(/<h1 data-eid="[^"]+">首行<br><span data-eid="[^"]+">第二行<\/span><\/h1>/);
+    const li = eidOf(d.pages[0].html, /<li data-eid="([^"]+)"/);
+    const r = setElementText(d, d.pages[0].id, li, '新要点', 0);
+    expect(r.before).toBe('要点文字');
+    expect(r.doc.pages[0].html).toMatch(/<span class="dot" data-eid="[^"]+"><\/span>  新要点  <\/li>/);
+  });
+
+  it('a run that is gone is a conflict; without a run the old text-only rule still applies', () => {
+    const d = doc();
+    const p = eidOf(d.pages[0].html, /<p class="kpi" data-eid="([^"]+)"/);
+    const h2 = eidOf(d.pages[0].html, /<h2 data-eid="([^"]+)"/);
+    expect(() => setElementText(d, d.pages[0].id, p, 'x', 2)).toThrow(expect.objectContaining({ statusCode: 409 }));
+    expect(() => setElementText(d, d.pages[0].id, p, 'x')).toThrow(expect.objectContaining({ statusCode: 400 }));
+    // A text-only element edited whole (no run) or as its single run ends up the same.
+    expect(setElementText(d, d.pages[0].id, h2, '新标题').doc.pages[0].html).toContain('>新标题</h2>');
+    expect(setElementText(d, d.pages[0].id, h2, '新标题', 0).doc.pages[0].html).toContain('>新标题</h2>');
+  });
+});
+
