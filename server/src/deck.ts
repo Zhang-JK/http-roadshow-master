@@ -477,28 +477,50 @@ export function plainText(el: Element): string | null {
 const isBr = (n: AnyNode) => n.type === 'tag' && (n as Element).tagName.toLowerCase() === 'br';
 const visibleText = (n: AnyNode) => n.type === 'text' && /\S/.test((n as Text).data);
 
+const SVG_TEXT_TAGS = new Set(['text', 'tspan', 'textpath']);
+const SVG_HIDDEN_TAGS = new Set(['defs', 'symbol', 'marker', 'pattern', 'clippath', 'mask', 'title', 'desc', 'metadata', 'style', 'script']);
+
+/** Whether a run's text sits in an SVG <text>/<tspan>, where a line break cannot be written as <br>. */
+const inSvgText = (n: AnyNode) => !!n.parent && n.parent.type === 'tag' && SVG_TEXT_TAGS.has((n.parent as Element).tagName.toLowerCase());
+
 /**
  * The pieces of an element's own text that can be typed over in place, in document order: each run
  * is the text, <br> and comments between two child elements, trimmed to its first and last visible
- * text so line breaks at its edges stay. Runs without visible text are left out. The editor's
- * selection script (runsOf in web/src/lib/slideHtml.ts) must split runs the same way.
+ * text so line breaks at its edges stay. Runs without visible text are left out. An <svg> (whose
+ * children carry no data-eid) gets the runs of every <text>/<tspan>/<textPath> and of the HTML in
+ * its <foreignObject>s, skipping what is never drawn (defs, title, ...). The editor's selection
+ * script (runsOf in web/src/lib/slideHtml.ts) must split runs the same way.
  */
 export function textRuns(el: Element): AnyNode[][] {
-  if (NOT_TEXT_TAGS.has(el.tagName.toLowerCase())) return [];
+  const tag = el.tagName.toLowerCase();
+  if (tag !== 'svg' && NOT_TEXT_TAGS.has(tag)) return [];
   const runs: AnyNode[][] = [];
-  let group: AnyNode[] = [];
-  const flush = () => {
+  const flush = (group: AnyNode[]) => {
     const first = group.findIndex(visibleText);
     let last = group.length - 1;
     while (last > first && !visibleText(group[last])) last--;
     if (first >= 0) runs.push(group.slice(first, last + 1));
-    group = [];
   };
-  for (const c of el.children ?? []) {
-    if (c.type === 'text' || c.type === 'comment' || isBr(c)) group.push(c);
-    else flush();
-  }
-  flush();
+  // In document order: an element's own runs interleave with those of the children splitting them.
+  const walk = (e: Element, inSvg: boolean, inForeign: boolean) => {
+    const t = e.tagName.toLowerCase();
+    const own = !inSvg || inForeign || SVG_TEXT_TAGS.has(t) || t === 'foreignobject';
+    let group: AnyNode[] = [];
+    for (const c of e.children ?? []) {
+      if (own && (c.type === 'text' || c.type === 'comment' || isBr(c))) {
+        group.push(c);
+        continue;
+      }
+      if (own) flush(group);
+      group = [];
+      if (!inSvg || c.type !== 'tag') continue;
+      const ct = (c as Element).tagName.toLowerCase();
+      if (SVG_HIDDEN_TAGS.has(ct) || (inForeign && ct !== 'svg' && NOT_TEXT_TAGS.has(ct))) continue;
+      walk(c as Element, true, inForeign || t === 'foreignobject');
+    }
+    if (own) flush(group);
+  };
+  walk(el, tag === 'svg', false);
   return runs;
 }
 
@@ -506,7 +528,7 @@ const failWith = (statusCode: number, message: string) => Object.assign(new Erro
 
 /**
  * Replace the text of a text-only element, or with `run` one text run of any element (textRuns);
- * line breaks become <br>. Whitespace around a run is kept so it stays apart from its neighbours.
+ * line breaks become <br> (a space inside SVG text). Whitespace around a run is kept so it stays apart from its neighbours.
  * Errors carry an HTTP statusCode.
  */
 export function setElementText(
@@ -521,12 +543,12 @@ export function setElementText(
   const $ = cheerio.load(doc.pages[idx].html, null, false);
   const node = $(`[data-eid="${eid.replace(/"/g, '')}"]`).first();
   if (!node.length) throw failWith(409, '元素不存在（可能已被其他用户修改或删除）');
-  const html = text.split('\n').map(escapeHtml).join('<br>');
+  const lines = (t: string) => t.split('\n').map(escapeHtml).join('<br>');
   let before: string | null;
   if (run === undefined) {
     before = plainText(node.get(0) as Element);
     if (before === null) throw failWith(400, '只有纯文字元素可以直接编辑；包含图片、图标或其他子元素的内容请用 AI 修改');
-    node.html(html);
+    node.html(lines(text));
   } else {
     const nodes = textRuns(node.get(0) as Element)[run];
     before = nodes ? linesText(nodes) : null;
@@ -535,6 +557,7 @@ export function setElementText(
     const trail = (nodes[nodes.length - 1] as Text).data.match(/\s*$/)![0];
     for (const n of nodes.slice(1)) $(n).remove();
     // .before() does nothing next to a text node; .replaceWith() works.
+    const html = inSvgText(nodes[0]) ? escapeHtml(text.replace(/\s*\n\s*/g, ' ')) : lines(text);
     $(nodes[0]).replaceWith(`${lead}${html}${trail}`);
   }
   const pages = doc.pages.map((p, i) => (i === idx ? { ...p, html: $.html() } : p));

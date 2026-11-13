@@ -482,6 +482,29 @@ test('double-click any text, even beside icons or styled words, to edit just tha
   await expect(editBar).toHaveCount(0);
   await expect(historyItems()).toHaveCount(count + 3);
 
+  // A label in an SVG chart is typed over in a box laid over it; a line break cannot go there.
+  const label = stage().locator('svg.mini text').nth(1);
+  const overlay = stage().locator('[data-rs-ui] [contenteditable]');
+  await label.hover();
+  await expect(stage().locator('[data-rs-ui] > div', { hasText: '图表/图形 <svg> · 双击其中文字可直接改' })).toBeVisible();
+  await dblclickText(label, '3,200');
+  await expect(editBar).toBeVisible();
+  await expect(overlay).toHaveText('3,200');
+  await page.keyboard.type('XX');
+  await page.keyboard.press('Escape');
+  await expect(overlay).toHaveCount(0);
+  await expect(label).toHaveText('3,200');
+  await dblclickText(label, '3,200');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('4,500');
+  await page.keyboard.press('Shift+Enter');
+  await expect(overlay).toHaveCount(0);
+  await expect(historyItems()).toHaveCount(count + 4);
+  await expect(historyItems().first().locator('[data-testid=hist-text] ins')).toHaveText('4,500');
+  await expect(label).toHaveText('4,500');
+  await expect(stage().locator('svg.mini text').first()).toHaveText('营收');
+  expect(await saved()).toContain('text-anchor="middle">4,500</text></svg>');
+
   await page.request.delete(`/api/projects/${pid}`);
   await page.goto(back);
   await page.locator('[data-testid=page-thumb]').nth(1).click();

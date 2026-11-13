@@ -11,7 +11,7 @@ html,body{margin:0;padding:0;background:transparent;overflow:hidden}
  * Double-clicking an element that holds only text (and <br>) makes it editable in place; the typed
  * text goes to the parent (text-edit-commit), which saves it. In an element that also holds other
  * elements, double-clicking one run of its own text edits just that run (text-edit-commit with
- * `run`). textOnly() must stay in sync with plainText() and runsOf() with textRuns() in
+ * `run`); text in an SVG chart is edited in a box laid over it. textOnly() must stay in sync with plainText() and runsOf() with textRuns() in
  * server/src/deck.ts.
  */
 const SELECTION_SCRIPT = `
@@ -46,23 +46,36 @@ const SELECTION_SCRIPT = `
     return has;
   }
   function visible(n){return n.nodeType===3&&/\\S/.test(n.data);}
+  var SVG_NS='http://www.w3.org/2000/svg',SVG_TEXT=/^(text|tspan|textpath)$/,SVG_HIDDEN=/^(defs|symbol|marker|pattern|clippath|mask|title|desc|metadata|style|script)$/;
+  function tagOf(n){return n.localName.toLowerCase();}
+  function isBr(n){return n.nodeType===1&&tagOf(n)==='br';}
   function runsOf(el){
-    var runs=[],group=[];
-    if(!el||NOT_TEXT.test(el.tagName))return runs;
-    function flush(){
+    var runs=[];
+    if(!el)return runs;
+    var tag=tagOf(el);
+    if(tag!=='svg'&&NOT_TEXT.test(tag))return runs;
+    function flush(group){
       var first=-1,last=group.length-1;
       for(var i=0;i<group.length;i++)if(visible(group[i])){first=i;break;}
       while(last>first&&!visible(group[last]))last--;
       if(first>=0)runs.push(group.slice(first,last+1));
-      group=[];
     }
-    for(var n=el.firstChild;n;n=n.nextSibling){
-      if(n.nodeType===3||n.nodeType===8||(n.nodeType===1&&n.tagName==='BR'))group.push(n);
-      else flush();
-    }
-    flush();
+    (function walk(e,inSvg,inForeign){
+      var t=tagOf(e),own=!inSvg||inForeign||SVG_TEXT.test(t)||t==='foreignobject',group=[];
+      for(var c=e.firstChild;c;c=c.nextSibling){
+        if(own&&(c.nodeType===3||c.nodeType===8||isBr(c))){group.push(c);continue;}
+        if(own)flush(group);
+        group=[];
+        if(!inSvg||c.nodeType!==1)continue;
+        var ct=tagOf(c);
+        if(SVG_HIDDEN.test(ct)||(inForeign&&ct!=='svg'&&NOT_TEXT.test(ct)))continue;
+        walk(c,true,inForeign||t==='foreignobject');
+      }
+      if(own)flush(group);
+    })(el,tag==='svg',false);
     return runs;
   }
+  function inSvgText(n){var p=n.parentNode;return !!p&&p.namespaceURI===SVG_NS&&SVG_TEXT.test(tagOf(p));}
   function runAt(runs,x,y){
     for(var i=0;i<runs.length;i++)for(var j=0;j<runs[i].length;j++){
       var n=runs[i][j];if(n.nodeType!==3)continue;
@@ -70,6 +83,8 @@ const SELECTION_SCRIPT = `
       var rs=rg.getClientRects();
       for(var k=0;k<rs.length;k++){var r=rs[k];if(x>=r.left-3&&x<=r.right+3&&y>=r.top-3&&y<=r.bottom+3)return i;}
     }
+    var hit=document.elementFromPoint(x,y);
+    if(hit&&hit.namespaceURI===SVG_NS&&SVG_TEXT.test(tagOf(hit)))for(i=0;i<runs.length;i++)if(runs[i][0].parentNode===hit)return i;
     return -1;
   }
   function info(el){
@@ -128,7 +143,7 @@ const SELECTION_SCRIPT = `
     selected=[el];
     if(!textOnly(el)){
       var runs=runsOf(el),run=x!==undefined?runAt(runs,x,y):runs.length===1?0:-1;
-      if(run>=0){startRunEdit(el,run,x,y);return;}
+      if(run>=0){(inSvgText(runs[run][0])?startSvgEdit:startRunEdit)(el,run,x,y);return;}
       emit();
       if(el!==slide)post({type:'text-edit-denied',eid:el.getAttribute('data-eid'),label:label(el)});
       return;
@@ -164,6 +179,35 @@ const SELECTION_SCRIPT = `
     w.addEventListener('blur',onBlur);
     post({type:'text-edit-start',eid:host.getAttribute('data-eid'),run:run});
   }
+  // SVG text cannot be made editable in place, so an editable box is laid over it, in its font.
+  function startSvgEdit(host,run,x,y){
+    var nodes=runsOf(host)[run],textEl=nodes[0].parentNode,rg=document.createRange();
+    rg.setStartBefore(nodes[0]);rg.setEndAfter(nodes[nodes.length-1]);
+    var b=rg.getBoundingClientRect();
+    if(!b.width&&!b.height)b=textEl.getBoundingClientRect();
+    var cs=getComputedStyle(textEl),m=textEl.getScreenCTM(),k=m?Math.hypot(m.a,m.b):1;
+    var color=/^rgb/.test(cs.fill)?cs.fill:'#111',c=(color.match(/[\\d.]+/g)||[0,0,0]).map(Number);
+    var light=(0.299*c[0]+0.587*c[1]+0.114*c[2])/255>0.6;
+    var anchor=cs.textAnchor,box=document.createElement('div'),s=box.style;
+    s.cssText='position:absolute;pointer-events:auto;box-sizing:border-box;white-space:pre;outline:3px solid #10b981;outline-offset:2px;border-radius:4px;padding:0 4px;cursor:text;user-select:text;-webkit-user-select:text';
+    s.font=cs.fontStyle+' '+cs.fontWeight+' '+(parseFloat(cs.fontSize)*k)+'px/'+Math.max(b.height,1)+'px '+cs.fontFamily;
+    s.letterSpacing=cs.letterSpacing;s.color=color;s.background=light?'rgba(15,23,42,.95)':'rgba(255,255,255,.96)';
+    s.top=(b.top+scrollY)+'px';s.minWidth=(b.width+8)+'px';s.height=Math.max(b.height,1)+'px';
+    var cx=anchor==='middle'?b.left+b.width/2:anchor==='end'?b.right+4:b.left-4;
+    s.left=(cx+scrollX)+'px';s.transform=anchor==='middle'?'translateX(-50%)':anchor==='end'?'translateX(-100%)':'';
+    var before=nodes.map(function(n){return n.nodeType===3?n.data:'';}).join('').replace(/\\s+/g,' ').trim();
+    box.textContent=before;
+    layer.appendChild(box);
+    editing={el:box,host:host,run:run,svg:nodes,before:before};
+    try{box.contentEditable='plaintext-only';}catch(_){}
+    if(box.contentEditable!=='plaintext-only')box.contentEditable='true';
+    hoverBox.style.display='none';hoverTag.style.display='none';
+    emit();
+    box.focus();
+    caretAt(box,x,y);
+    box.addEventListener('blur',onBlur);
+    post({type:'text-edit-start',eid:host.getAttribute('data-eid'),run:run});
+  }
   function finishEdit(save){
     var ed=editing;
     if(!ed)return;
@@ -171,7 +215,15 @@ const SELECTION_SCRIPT = `
     var el=ed.el,text=readText(el),commit=save&&!!text&&text!==ed.before;
     el.removeEventListener('blur',onBlur);
     el.removeAttribute('contenteditable');
-    if(ed.host){
+    if(ed.svg){
+      if(commit){
+        var ts=ed.svg.filter(function(n){return n.nodeType===3;}),last=ts[ts.length-1];
+        var lead=ts[0].data.match(/^\\s*/)[0],trail=last.data.match(/\\s*$/)[0];
+        ts.forEach(function(n){n.data='';});
+        ts[0].data=lead+text.replace(/\\s*\\n\\s*/g,' ')+trail;
+      }
+      el.remove();
+    } else if(ed.host){
       var keep=commit?[].slice.call(el.childNodes):ed.orig;
       keep.forEach(function(n){ed.host.insertBefore(n,el);});
       el.remove();
@@ -237,7 +289,7 @@ const SELECTION_SCRIPT = `
   document.addEventListener('keydown',function(e){
     if(editing){
       if(e.key==='Escape'){e.preventDefault();finishEdit(false);}
-      else if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();finishEdit(true);}
+      else if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229&&(!e.shiftKey||editing.svg)){e.preventDefault();finishEdit(true);}
       return;
     }
     if(e.key==='Escape'){selected=[];emit();}
