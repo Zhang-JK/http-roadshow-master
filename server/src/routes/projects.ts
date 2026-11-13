@@ -30,6 +30,7 @@ import { cssFiles, fileTree, nameFiles } from '../files.js';
 import { jobDuration, jobStats, type JobStats } from '../calls.js';
 import { resumableJobs, type CheckpointInfo } from '../checkpoint.js';
 import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from '../create.js';
+import { shareInfo } from './share.js';
 
 const MAX_README = 50_000;
 
@@ -69,6 +70,7 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
     updatedBy: p.updated_by ? names.get(p.updated_by) ?? null : null,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
+    share: shareInfo(p, names),
     ...(withDoc ? { doc } : {}),
   };
 }

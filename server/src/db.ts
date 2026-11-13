@@ -175,6 +175,13 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE jobs ADD COLUMN resumed_at INTEGER;
   ALTER TABLE jobs ADD COLUMN prior_ms INTEGER NOT NULL DEFAULT 0;
   `,
+  // A link that shows the project to anyone who has it, without signing in (routes/share.ts).
+  `
+  ALTER TABLE projects ADD COLUMN share_token TEXT;
+  ALTER TABLE projects ADD COLUMN shared_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+  ALTER TABLE projects ADD COLUMN shared_at INTEGER;
+  CREATE UNIQUE INDEX idx_projects_share ON projects(share_token) WHERE share_token IS NOT NULL;
+  `,
 ];
 
 /** Service account the MCP endpoint acts as; it has a token instead of a password. */
