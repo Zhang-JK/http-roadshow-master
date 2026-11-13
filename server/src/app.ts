@@ -11,6 +11,7 @@ import { authRoutes } from './routes/auth.js';
 import { llmRoutes } from './routes/llm.js';
 import { projectRoutes } from './routes/projects.js';
 import { sessionRoutes } from './routes/sessions.js';
+import { shareRoutes } from './routes/share.js';
 import { systemRoutes } from './routes/system.js';
 import { mcpRoutes } from './mcp.js';
 import { versionInfo } from './system.js';
@@ -35,6 +36,7 @@ export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: bool
   llmRoutes(app, db);
   projectRoutes(app, db);
   sessionRoutes(app, db);
+  shareRoutes(app, db);
   systemRoutes(app);
   await mcpRoutes(app, db);
 

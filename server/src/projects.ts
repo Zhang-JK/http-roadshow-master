@@ -58,6 +58,9 @@ export interface ProjectRow {
   updated_by: number | null;
   created_at: number;
   updated_at: number;
+  share_token: string | null;
+  shared_by: number | null;
+  shared_at: number | null;
 }
 
 export interface JobRow {
