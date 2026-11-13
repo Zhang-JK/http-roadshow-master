@@ -483,6 +483,13 @@ describe('templates, decks, edits, history and export', () => {
     html = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project.doc.pages[1].html;
     expect(html).toMatch(/3,200<\/b> 亿元，环比 <i/);
     expect(html).toMatch(/<span class="dot" data-eid="[^"]+"><\/span>核心客户<br><small data-eid="[^"]+">12 家<\/small><\/div>/);
+    // A label in an SVG chart; a line break cannot go there, so it becomes a space.
+    const [, svg] = html.match(/<svg class="mini"[^>]*data-eid="([^"]+)"/);
+    const sv = await req('PUT', url(svg), adminCookie, { text: '4,500\n万元', oldText: '3,200', run: 1 });
+    expect(sv.status).toBe(200);
+    html = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project.doc.pages[1].html;
+    expect(html).toContain('text-anchor="middle">4,500 万元</text></svg>');
+    expect((await req('PUT', url(svg), adminCookie, { text: 'x' })).status).toBe(400);
     expect(mock.calls.length).toBe(calls);
 
     // What the editor saw is no longer there; a run that does not exist; a bad run number.

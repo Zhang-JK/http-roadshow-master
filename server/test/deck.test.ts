@@ -207,7 +207,7 @@ describe('typing over a text run of any element', () => {
     expect(runs('<p><br>A<br>B<br><b>c</b></p>')).toEqual(['A<br>B']);
     expect(runs('<div>\n  <h2>x</h2>\n  <p>y</p>\n</div>')).toEqual([]);
     expect(runs('<p>纯文字</p>')).toEqual(['纯文字']);
-    expect(runs('<svg><text>x</text></svg>')).toEqual([]);
+    expect(runs('<canvas>x</canvas>')).toEqual([]);
     expect(runs('<section class="slide" data-page-id="p1">页面上的文字<div>块</div></section>')).toEqual(['页面上的文字']);
   });
 
@@ -242,6 +242,36 @@ describe('typing over a text run of any element', () => {
     // A text-only element edited whole (no run) or as its single run ends up the same.
     expect(setElementText(d, d.pages[0].id, h2, '新标题').doc.pages[0].html).toContain('>新标题</h2>');
     expect(setElementText(d, d.pages[0].id, h2, '新标题', 0).doc.pages[0].html).toContain('>新标题</h2>');
+  });
+
+  const CHART = `<svg viewBox="0 0 400 200"><defs><marker id="m"><text>隐</text></marker></defs><title>提示</title>
+<g class="bars"><rect x="10" y="20" width="40" height="160"/><text class="v" x="30" y="15" text-anchor="middle">3,200</text></g>
+<text x="10" y="195">营收 <tspan font-weight="700">+180%</tspan> 同比</text>
+<foreignObject x="200" y="10" width="180" height="60"><div class="note">图注 <b>A</b></div></foreignObject>
+<text x="300" y="195"> </text></svg>`;
+
+  it('an svg chart\'s runs are the text of its <text>, <tspan> and <foreignObject> HTML, skipping what is never drawn', () => {
+    expect(runs(CHART)).toEqual(['3,200', '营收 ', '+180%', ' 同比', '图注 ', 'A']);
+    expect(runs('<svg><svg><text>内层</text></svg><text>外层</text></svg>')).toEqual(['内层', '外层']);
+    expect(runs('<svg><rect/><path d="M0 0"/></svg>')).toEqual([]);
+  });
+
+  it('types over svg text; a line break becomes a space there, since <br> cannot go inside svg', () => {
+    const d = parseFullHtml(`<html><body><section class="slide"><div class="chart">${CHART}</div></section></body></html>`, base);
+    const svg = eidOf(d.pages[0].html, /<svg[^>]*data-eid="([^"]+)"/);
+    const r0 = setElementText(d, d.pages[0].id, svg, '4,500', 0);
+    expect(r0.before).toBe('3,200');
+    expect(r0.doc.pages[0].html).toContain('<text class="v" x="30" y="15" text-anchor="middle">4,500</text>');
+    const r2 = setElementText(r0.doc, d.pages[0].id, svg, '+200%\n环比', 2);
+    expect(r2.before).toBe('+180%');
+    expect(r2.doc.pages[0].html).toContain('营收 <tspan font-weight="700">+200% 环比</tspan> 同比</text>');
+    expect(r2.doc.pages[0].html).not.toContain('<br>');
+    // HTML inside a foreignObject keeps its line breaks.
+    const r4 = setElementText(r2.doc, d.pages[0].id, svg, '新图注\n第二行', 4);
+    expect(r4.doc.pages[0].html).toContain('<div class="note">新图注<br>第二行 <b>A</b></div>');
+    expect(diffDocs(d, r4.doc).elementsChanged.map((e) => e.eid)).toEqual([svg]);
+    expect(() => setElementText(d, d.pages[0].id, svg, 'x', 6)).toThrow(expect.objectContaining({ statusCode: 409 }));
+    expect(() => setElementText(d, d.pages[0].id, svg, 'x')).toThrow(expect.objectContaining({ statusCode: 400 }));
   });
 });
 

@@ -60,8 +60,9 @@ ${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i =
 const PAGE = (n: number, layout: string, broken: boolean, extra = '', tpl = false) =>
   `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}${n === 2 ? extra : ''}${tpl && n === 1 ? TPL_PARTS : ''}</section>`;
 
-/** Text mixed with child elements, for typing over a run of text in place (MIXED_TEXT). */
-export const MIXED = '<p class="note">收入 <b class="num">3,200</b> 万元，同比 <i>+180%</i></p><div class="tag"><span class="dot"></span>重点客户<br><small>12 家</small></div>';
+/** Text mixed with child elements, and an SVG chart's labels, for typing over a run of text in place (MIXED_TEXT). */
+export const MIXED = '<p class="note">收入 <b class="num">3,200</b> 万元，同比 <i>+180%</i></p><div class="tag"><span class="dot"></span>重点客户<br><small>12 家</small></div>' +
+  '<svg class="mini" viewBox="0 0 200 60" width="600" height="180"><rect x="0" y="0" width="200" height="60" fill="#eef2ff"/><text x="10" y="38" font-size="20" fill="#1e3a8a">营收</text><text x="140" y="38" font-size="20" fill="#1e3a8a" text-anchor="middle">3,200</text></svg>';
 
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
 const pageExtra = (text: string) =>
