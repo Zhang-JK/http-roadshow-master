@@ -76,15 +76,23 @@ const SELECTION_SCRIPT = `
     return runs;
   }
   function inSvgText(n){var p=n.parentNode;return !!p&&p.namespaceURI===SVG_NS&&SVG_TEXT.test(tagOf(p));}
-  function runAt(runs,x,y){
-    for(var i=0;i<runs.length;i++)for(var j=0;j<runs[i].length;j++){
-      var n=runs[i][j];if(n.nodeType!==3)continue;
-      var rg=document.createRange();rg.selectNodeContents(n);
+  function over(run,x,y){
+    for(var j=0;j<run.length;j++){
+      if(run[j].nodeType!==3)continue;
+      var rg=document.createRange();rg.selectNodeContents(run[j]);
       var rs=rg.getClientRects();
-      for(var k=0;k<rs.length;k++){var r=rs[k];if(x>=r.left-3&&x<=r.right+3&&y>=r.top-3&&y<=r.bottom+3)return i;}
+      for(var k=0;k<rs.length;k++){var r=rs[k];if(x>=r.left-3&&x<=r.right+3&&y>=r.top-3&&y<=r.bottom+3)return true;}
     }
-    var hit=document.elementFromPoint(x,y);
-    if(hit&&hit.namespaceURI===SVG_NS&&SVG_TEXT.test(tagOf(hit)))for(i=0;i<runs.length;i++)if(runs[i][0].parentNode===hit)return i;
+    return false;
+  }
+  // Generated charts can draw labels over each other: the SVG text under the pointer wins, then
+  // the run painted last.
+  function runAt(runs,x,y){
+    var i,hit=document.elementFromPoint(x,y),mine=[];
+    if(hit&&hit.namespaceURI===SVG_NS&&SVG_TEXT.test(tagOf(hit)))for(i=0;i<runs.length;i++)if(runs[i][0].parentNode===hit)mine.push(i);
+    for(i=0;i<mine.length;i++)if(over(runs[mine[i]],x,y))return mine[i];
+    if(mine.length)return mine[0];
+    for(i=runs.length-1;i>=0;i--)if(over(runs[i],x,y))return i;
     return -1;
   }
   function info(el){
@@ -138,6 +146,8 @@ const SELECTION_SCRIPT = `
     sel.removeAllRanges();sel.addRange(r);
   }
   function onBlur(){finishEdit(true);}
+  // Above any layer laid over it, so clicks inside it move the caret instead of ending the edit.
+  function lift(el){if(getComputedStyle(el).position==='static')el.style.position='relative';el.style.zIndex='2147483000';}
   function startEdit(el,x,y){
     if(editing){if(editing.el===el)return;finishEdit(true);}
     selected=[el];
@@ -151,6 +161,7 @@ const SELECTION_SCRIPT = `
     editing={el:el,html:el.innerHTML,style:el.getAttribute('style'),before:readText(el)};
     var s=el.style;
     s.outline='3px solid #10b981';s.outlineOffset='4px';s.cursor='text';s.userSelect='text';s.webkitUserSelect='text';
+    lift(el);
     try{el.contentEditable='plaintext-only';}catch(_){}
     if(el.contentEditable!=='plaintext-only')el.contentEditable='true';
     hoverBox.style.display='none';hoverTag.style.display='none';
@@ -170,6 +181,7 @@ const SELECTION_SCRIPT = `
     editing={el:w,host:host,run:run,orig:nodes.map(function(n){return n.cloneNode(true);}),before:readText(w)};
     var s=w.style;
     s.outline='3px solid #10b981';s.outlineOffset='3px';s.cursor='text';s.userSelect='text';s.webkitUserSelect='text';
+    lift(w);
     try{w.contentEditable='plaintext-only';}catch(_){}
     if(w.contentEditable!=='plaintext-only')w.contentEditable='true';
     hoverBox.style.display='none';hoverTag.style.display='none';
@@ -283,9 +295,21 @@ const SELECTION_SCRIPT = `
   document.addEventListener('dblclick',function(e){
     if(editing&&editing.el.contains(e.target))return;
     if(e.shiftKey||e.ctrlKey||e.metaKey)return;
-    var el=pick(e);
-    if(el)startEdit(el,e.clientX,e.clientY);
+    var el=pick(e),x=e.clientX,y=e.clientY;
+    if(el&&!textOnly(el)&&runAt(runsOf(el),x,y)<0)el=textBelow(x,y,el)||el;
+    if(el)startEdit(el,x,y);
   });
+  // Text drawn under a transparent layer (a footer or decoration laid over the page) is still text
+  // the user sees: look through the layers at the pointer for an element with text right there.
+  function textBelow(x,y,top){
+    var list=document.elementsFromPoint(x,y);
+    for(var i=0;i<list.length;i++){
+      if(list[i].closest('[data-rs-ui]'))continue;
+      var h=list[i].closest('[data-eid]');
+      if(h&&h!==top&&slide.contains(h)&&runAt(runsOf(h),x,y)>=0)return h;
+    }
+    return null;
+  }
   document.addEventListener('keydown',function(e){
     if(editing){
       if(e.key==='Escape'){e.preventDefault();finishEdit(false);}
