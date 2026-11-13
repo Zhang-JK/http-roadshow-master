@@ -101,6 +101,7 @@ export function ProjectsPage({ type }: { type: ProjectType }) {
                   ) : null}
                   {p.name}
                   {p.asking && <span className="pill pill-ask q-flag" data-testid="asking-badge">待回答</span>}
+                  {p.share && <span className="badge badge-shared" title="有分享链接，无需登录即可查看" data-testid="shared-badge">已分享</span>}
                 </div>
                 <div className="card-meta">
                   <span>{p.pageCount} 页</span>
