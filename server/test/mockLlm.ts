@@ -60,9 +60,12 @@ ${Array.from({ length: n }, (_, i) => `<section class="slide" data-layout="${i =
 const PAGE = (n: number, layout: string, broken: boolean, extra = '', tpl = false) =>
   `<section class="slide" data-layout="${layout}"><h1 class="title">第${n}页标题</h1><p class="body">第${n}页正文内容</p><ul><li>要点A${n}</li><li>要点B${n}</li></ul>${broken && n === 2 ? OVERFLOW : ''}${n === 2 ? extra : ''}${tpl && n === 1 ? TPL_PARTS : ''}</section>`;
 
+/** Text mixed with child elements, for typing over a run of text in place (MIXED_TEXT). */
+export const MIXED = '<p class="note">收入 <b class="num">3,200</b> 万元，同比 <i>+180%</i></p><div class="tag"><span class="dot"></span>重点客户<br><small>12 家</small></div>';
+
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
 const pageExtra = (text: string) =>
-  `${text.includes('BAD_IMG') ? '<img src="/api/assets/no-such-image" alt="缺失">' : ''}${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
+  `${text.includes('MIXED_TEXT') ? MIXED : ''}${text.includes('BAD_IMG') ? '<img src="/api/assets/no-such-image" alt="缺失">' : ''}${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
 
 const README_DOC = (title: string, n: number, notes: string) => `# ${title}
 

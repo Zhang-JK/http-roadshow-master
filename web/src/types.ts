@@ -166,8 +166,11 @@ export interface DiffSummary {
   elementsChanged: ElementRef[];
   elementsAdded: ElementRef[];
   elementsRemoved: ElementRef[];
-  /** Text typed straight into one element in the editor, without the model. */
-  textEdit?: { eid: string; page: number; before: string; after: string };
+  /**
+   * Text typed straight into one element in the editor, without the model. `run`: which text run of
+   * the element was typed over; absent when the whole element held only text.
+   */
+  textEdit?: { eid: string; page: number; before: string; after: string; run?: number };
 }
 
 export interface Version {
@@ -224,6 +227,8 @@ export interface SelectedElement {
   isPage: boolean;
   /** Holds only text (and line breaks), so it can be edited in place without the model. */
   textOnly?: boolean;
+  /** How many runs of its own text sit between its child elements, each editable in place. */
+  runs?: number;
   rect: { x: number; y: number; w: number; h: number };
 }
 

@@ -9,8 +9,10 @@ html,body{margin:0;padding:0;background:transparent;overflow:hidden}
  * Runs inside the preview iframe. Lets the user click (shift/ctrl/cmd for multi-select) or drag a
  * marquee to pick elements carrying data-eid, and reports the selection to the parent window.
  * Double-clicking an element that holds only text (and <br>) makes it editable in place; the typed
- * text goes to the parent (text-edit-commit), which saves it. Elements outside that rule must stay
- * in sync with plainText() in server/src/deck.ts.
+ * text goes to the parent (text-edit-commit), which saves it. In an element that also holds other
+ * elements, double-clicking one run of its own text edits just that run (text-edit-commit with
+ * `run`). textOnly() must stay in sync with plainText() and runsOf() with textRuns() in
+ * server/src/deck.ts.
  */
 const SELECTION_SCRIPT = `
 (function(){
@@ -43,10 +45,37 @@ const SELECTION_SCRIPT = `
     }
     return has;
   }
+  function visible(n){return n.nodeType===3&&/\\S/.test(n.data);}
+  function runsOf(el){
+    var runs=[],group=[];
+    if(!el||NOT_TEXT.test(el.tagName))return runs;
+    function flush(){
+      var first=-1,last=group.length-1;
+      for(var i=0;i<group.length;i++)if(visible(group[i])){first=i;break;}
+      while(last>first&&!visible(group[last]))last--;
+      if(first>=0)runs.push(group.slice(first,last+1));
+      group=[];
+    }
+    for(var n=el.firstChild;n;n=n.nextSibling){
+      if(n.nodeType===3||n.nodeType===8||(n.nodeType===1&&n.tagName==='BR'))group.push(n);
+      else flush();
+    }
+    flush();
+    return runs;
+  }
+  function runAt(runs,x,y){
+    for(var i=0;i<runs.length;i++)for(var j=0;j<runs[i].length;j++){
+      var n=runs[i][j];if(n.nodeType!==3)continue;
+      var rg=document.createRange();rg.selectNodeContents(n);
+      var rs=rg.getClientRects();
+      for(var k=0;k<rs.length;k++){var r=rs[k];if(x>=r.left-3&&x<=r.right+3&&y>=r.top-3&&y<=r.bottom+3)return i;}
+    }
+    return -1;
+  }
   function info(el){
     var r=el.getBoundingClientRect(), s=slide.getBoundingClientRect();
     var text=(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim().slice(0,80);
-    return {eid:el.getAttribute('data-eid'),tag:el.tagName.toLowerCase(),cls:(el.getAttribute('class')||'').slice(0,80),text:text,label:label(el),isPage:el===slide,textOnly:textOnly(el),
+    return {eid:el.getAttribute('data-eid'),tag:el.tagName.toLowerCase(),cls:(el.getAttribute('class')||'').slice(0,80),text:text,label:label(el),isPage:el===slide,textOnly:textOnly(el),runs:runsOf(el).length,
       rect:{x:Math.round(r.left-s.left),y:Math.round(r.top-s.top),w:Math.round(r.width),h:Math.round(r.height)}};
   }
   var editing=null;
@@ -54,7 +83,7 @@ const SELECTION_SCRIPT = `
     boxes.forEach(function(b){b.remove();});
     boxes=[];
     selected.forEach(function(el,i){
-      if(editing&&editing.el===el)return;
+      if(editing&&(editing.host||editing.el)===el)return;
       var r=rectOf(el);
       var b=mk('outline:4px solid #2563eb;background:rgba(37,99,235,.10)');place(b,r);
       var n=mk('background:#2563eb;color:#fff;font:700 20px/1.5 system-ui,sans-serif;padding:0 9px;border-radius:6px');
@@ -97,7 +126,13 @@ const SELECTION_SCRIPT = `
   function startEdit(el,x,y){
     if(editing){if(editing.el===el)return;finishEdit(true);}
     selected=[el];
-    if(!textOnly(el)){emit();if(el!==slide)post({type:'text-edit-denied',eid:el.getAttribute('data-eid'),label:label(el)});return;}
+    if(!textOnly(el)){
+      var runs=runsOf(el),run=x!==undefined?runAt(runs,x,y):runs.length===1?0:-1;
+      if(run>=0){startRunEdit(el,run,x,y);return;}
+      emit();
+      if(el!==slide)post({type:'text-edit-denied',eid:el.getAttribute('data-eid'),label:label(el)});
+      return;
+    }
     editing={el:el,html:el.innerHTML,style:el.getAttribute('style'),before:readText(el)};
     var s=el.style;
     s.outline='3px solid #10b981';s.outlineOffset='4px';s.cursor='text';s.userSelect='text';s.webkitUserSelect='text';
@@ -110,6 +145,25 @@ const SELECTION_SCRIPT = `
     el.addEventListener('blur',onBlur);
     post({type:'text-edit-start',eid:el.getAttribute('data-eid')});
   }
+  // Wraps the run in a temporary inline element while it is typed over, so the rest of the host
+  // (icons, styled words) cannot be touched; unwrapped again when the edit ends.
+  function startRunEdit(host,run,x,y){
+    var nodes=runsOf(host)[run];
+    var w=document.createElement('rs-text');
+    host.insertBefore(w,nodes[0]);
+    nodes.forEach(function(n){w.appendChild(n);});
+    editing={el:w,host:host,run:run,orig:nodes.map(function(n){return n.cloneNode(true);}),before:readText(w)};
+    var s=w.style;
+    s.outline='3px solid #10b981';s.outlineOffset='3px';s.cursor='text';s.userSelect='text';s.webkitUserSelect='text';
+    try{w.contentEditable='plaintext-only';}catch(_){}
+    if(w.contentEditable!=='plaintext-only')w.contentEditable='true';
+    hoverBox.style.display='none';hoverTag.style.display='none';
+    emit();
+    w.focus();
+    caretAt(w,x,y);
+    w.addEventListener('blur',onBlur);
+    post({type:'text-edit-start',eid:host.getAttribute('data-eid'),run:run});
+  }
   function finishEdit(save){
     var ed=editing;
     if(!ed)return;
@@ -117,11 +171,19 @@ const SELECTION_SCRIPT = `
     var el=ed.el,text=readText(el),commit=save&&!!text&&text!==ed.before;
     el.removeEventListener('blur',onBlur);
     el.removeAttribute('contenteditable');
-    if(ed.style===null)el.removeAttribute('style');else el.setAttribute('style',ed.style);
-    if(!commit)el.innerHTML=ed.html;
+    if(ed.host){
+      var keep=commit?[].slice.call(el.childNodes):ed.orig;
+      keep.forEach(function(n){ed.host.insertBefore(n,el);});
+      el.remove();
+    } else {
+      if(ed.style===null)el.removeAttribute('style');else el.setAttribute('style',ed.style);
+      if(!commit)el.innerHTML=ed.html;
+    }
     var gs=getSelection();if(gs)gs.removeAllRanges();
     emit();
-    post({type:commit?'text-edit-commit':'text-edit-cancel',eid:el.getAttribute('data-eid'),pageId:slide.getAttribute('data-page-id'),text:text,oldText:ed.before,empty:save&&!text});
+    var msg={type:commit?'text-edit-commit':'text-edit-cancel',eid:(ed.host||el).getAttribute('data-eid'),pageId:slide.getAttribute('data-page-id'),text:text,oldText:ed.before,empty:save&&!text};
+    if(ed.host)msg.run=ed.run;
+    post(msg);
   }
   var down=null, dragging=false;
   document.addEventListener('dragstart',function(e){e.preventDefault();},true);
@@ -139,9 +201,9 @@ const SELECTION_SCRIPT = `
       return;
     }
     var el=pick(e);
-    if(!el||(editing&&editing.el===el)){hoverBox.style.display='none';hoverTag.style.display='none';return;}
+    if(!el||(editing&&(editing.host||editing.el)===el)){hoverBox.style.display='none';hoverTag.style.display='none';return;}
     var r=rectOf(el);place(hoverBox,r);
-    hoverTag.textContent=label(el)+' <'+el.tagName.toLowerCase()+'>'+(textOnly(el)?' · 双击改字':'');
+    hoverTag.textContent=label(el)+' <'+el.tagName.toLowerCase()+'>'+(textOnly(el)?' · 双击改字':el!==slide&&runsOf(el).length?' · 双击其中文字可直接改':'');
     place(hoverTag,{x:r.x,y:Math.max(0,r.y-34),w:NaN,h:NaN});hoverTag.style.width='';hoverTag.style.height='';
   });
   document.addEventListener('mouseup',function(e){

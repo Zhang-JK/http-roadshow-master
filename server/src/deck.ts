@@ -42,7 +42,8 @@ export interface DiffSummary {
   elementsAdded: { eid: string; page: number; tag: string; text: string }[];
   elementsRemoved: { eid: string; tag: string; text: string }[];
   /** Text typed straight into one element in the editor, without the model. */
-  textEdit?: { eid: string; page: number; before: string; after: string };
+  /** `run`: which text run of the element was typed over; absent when the whole element held only text. */
+  textEdit?: { eid: string; page: number; before: string; after: string; run?: number };
 }
 
 const shortId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 8);
@@ -446,17 +447,12 @@ export function movePage(doc: DeckDoc, pageId: string, toIndex: number): DeckDoc
 /** Keep in sync with NOT_TEXT in the editor's selection script (web/src/lib/slideHtml.ts). */
 const NOT_TEXT_TAGS = new Set(['svg', 'math', 'textarea', 'select', 'option', 'script', 'style', 'noscript', 'template', 'iframe', 'object', 'canvas', 'video', 'audio']);
 
-/**
- * The text of an element that holds nothing but text and <br> line breaks (lines joined with \n,
- * whitespace collapsed), or null when it is the page itself, empty, or contains other elements.
- */
-export function plainText(el: Element): string | null {
-  if (NOT_TEXT_TAGS.has(el.tagName.toLowerCase()) || el.attribs['data-page-id'] !== undefined) return null;
+/** Text nodes and <br> joined into lines (\n), whitespace collapsed; null when nothing visible is left. */
+function linesText(nodes: AnyNode[]): string | null {
   const lines = [''];
-  for (const c of el.children ?? []) {
+  for (const c of nodes) {
     if (c.type === 'text') lines[lines.length - 1] += (c as Text).data;
     else if (c.type === 'tag' && (c as Element).tagName.toLowerCase() === 'br') lines.push('');
-    else if (c.type !== 'comment') return null;
   }
   const text = lines
     .map((l) => l.replace(/\s+/g, ' ').trim())
@@ -465,18 +461,82 @@ export function plainText(el: Element): string | null {
   return text || null;
 }
 
+/**
+ * The text of an element that holds nothing but text and <br> line breaks (lines joined with \n,
+ * whitespace collapsed), or null when it is the page itself, empty, or contains other elements.
+ */
+export function plainText(el: Element): string | null {
+  if (NOT_TEXT_TAGS.has(el.tagName.toLowerCase()) || el.attribs['data-page-id'] !== undefined) return null;
+  for (const c of el.children ?? []) {
+    if (c.type === 'tag' && (c as Element).tagName.toLowerCase() !== 'br') return null;
+    if (c.type !== 'tag' && c.type !== 'text' && c.type !== 'comment') return null;
+  }
+  return linesText(el.children ?? []);
+}
+
+const isBr = (n: AnyNode) => n.type === 'tag' && (n as Element).tagName.toLowerCase() === 'br';
+const visibleText = (n: AnyNode) => n.type === 'text' && /\S/.test((n as Text).data);
+
+/**
+ * The pieces of an element's own text that can be typed over in place, in document order: each run
+ * is the text, <br> and comments between two child elements, trimmed to its first and last visible
+ * text so line breaks at its edges stay. Runs without visible text are left out. The editor's
+ * selection script (runsOf in web/src/lib/slideHtml.ts) must split runs the same way.
+ */
+export function textRuns(el: Element): AnyNode[][] {
+  if (NOT_TEXT_TAGS.has(el.tagName.toLowerCase())) return [];
+  const runs: AnyNode[][] = [];
+  let group: AnyNode[] = [];
+  const flush = () => {
+    const first = group.findIndex(visibleText);
+    let last = group.length - 1;
+    while (last > first && !visibleText(group[last])) last--;
+    if (first >= 0) runs.push(group.slice(first, last + 1));
+    group = [];
+  };
+  for (const c of el.children ?? []) {
+    if (c.type === 'text' || c.type === 'comment' || isBr(c)) group.push(c);
+    else flush();
+  }
+  flush();
+  return runs;
+}
+
 const failWith = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
 
-/** Replace the text of a text-only element; line breaks become <br>. Errors carry an HTTP statusCode. */
-export function setElementText(doc: DeckDoc, pageId: string, eid: string, text: string): { doc: DeckDoc; before: string; page: number } {
+/**
+ * Replace the text of a text-only element, or with `run` one text run of any element (textRuns);
+ * line breaks become <br>. Whitespace around a run is kept so it stays apart from its neighbours.
+ * Errors carry an HTTP statusCode.
+ */
+export function setElementText(
+  doc: DeckDoc,
+  pageId: string,
+  eid: string,
+  text: string,
+  run?: number,
+): { doc: DeckDoc; before: string; page: number } {
   const idx = doc.pages.findIndex((p) => p.id === pageId);
   if (idx < 0) throw failWith(409, '页面不存在（可能已被其他用户删除）');
   const $ = cheerio.load(doc.pages[idx].html, null, false);
   const node = $(`[data-eid="${eid.replace(/"/g, '')}"]`).first();
   if (!node.length) throw failWith(409, '元素不存在（可能已被其他用户修改或删除）');
-  const before = plainText(node.get(0) as Element);
-  if (before === null) throw failWith(400, '只有纯文字元素可以直接编辑；包含图片、图标或其他子元素的内容请用 AI 修改');
-  node.html(text.split('\n').map(escapeHtml).join('<br>'));
+  const html = text.split('\n').map(escapeHtml).join('<br>');
+  let before: string | null;
+  if (run === undefined) {
+    before = plainText(node.get(0) as Element);
+    if (before === null) throw failWith(400, '只有纯文字元素可以直接编辑；包含图片、图标或其他子元素的内容请用 AI 修改');
+    node.html(html);
+  } else {
+    const nodes = textRuns(node.get(0) as Element)[run];
+    before = nodes ? linesText(nodes) : null;
+    if (!nodes || before === null) throw failWith(409, '这段文字已不存在（可能已被其他用户修改）');
+    const lead = (nodes[0] as Text).data.match(/^\s*/)![0];
+    const trail = (nodes[nodes.length - 1] as Text).data.match(/\s*$/)![0];
+    for (const n of nodes.slice(1)) $(n).remove();
+    // .before() does nothing next to a text node; .replaceWith() works.
+    $(nodes[0]).replaceWith(`${lead}${html}${trail}`);
+  }
   const pages = doc.pages.map((p, i) => (i === idx ? { ...p, html: $.html() } : p));
   return { doc: { ...doc, pages }, before, page: idx + 1 };
 }

@@ -929,22 +929,22 @@ const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /**
- * Replace the text of one text-only element, typed by the user in the editor (no model involved),
- * as a new version. `oldText` is what the user saw when they started typing: when the saved text
+ * Replace the text of one text-only element, or one text run of any element (`run`, see textRuns),
+ * typed by the user in the editor (no model involved), as a new version. `oldText` is what the user saw when they started typing: when the saved text
  * differs from it, someone else changed the element meanwhile and nothing is written (409).
  */
 export function editElementText(
   db: DB,
   projectId: string,
   userId: number,
-  input: { pageId: string; eid: string; text: string; oldText?: string },
+  input: { pageId: string; eid: string; text: string; oldText?: string; run?: number },
 ): Promise<{ versionId: number; versionNo: number } | { unchanged: true }> {
   return withProjectLock(projectId, () => {
     const project = getProject(db, projectId);
     if (!project) throw new Error('项目不存在');
     const doc = projectDoc(project);
     if (!doc || !doc.pages.length) throw new Error('项目尚未生成完成');
-    const { doc: changed, before, page } = setElementText(doc, input.pageId, input.eid, input.text);
+    const { doc: changed, before, page } = setElementText(doc, input.pageId, input.eid, input.text, input.run);
     if (input.oldText !== undefined && squash(input.oldText) !== squash(before)) {
       throw Object.assign(new Error(`这段文字刚被其他人改成了「${clip(before, 60)}」，你的修改没有保存`), { statusCode: 409 });
     }
@@ -960,7 +960,7 @@ export function editElementText(
       pageId: input.pageId,
       elementIds: [input.eid],
       prompt: `直接修改文字：「${clip(before, 200)}」→「${clip(input.text, 200)}」`,
-      textEdit: { eid: input.eid, page, before: clip(before, 1000), after: clip(input.text, 1000) },
+      textEdit: { eid: input.eid, page, before: clip(before, 1000), after: clip(input.text, 1000), ...(input.run !== undefined ? { run: input.run } : {}) },
     });
     return { versionId, versionNo };
   });

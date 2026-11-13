@@ -410,13 +410,16 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     const user = requireUser(req);
     const { id, pageId, eid } = req.params as Record<string, string>;
     mustProject(db, id);
-    const body = (req.body ?? {}) as { text?: unknown; oldText?: unknown };
+    const body = (req.body ?? {}) as { text?: unknown; oldText?: unknown; run?: unknown };
+    // Without `run` the element must hold only text, as before runs existed.
+    const run = body.run === undefined || body.run === null ? undefined : Number(body.run);
+    if (run !== undefined && !(Number.isInteger(run) && run >= 0 && run < 10_000)) throw new HttpError(400, '文字段落编号无效');
     const text = cleanTypedText(body.text);
     if (!text) throw new HttpError(400, '文字不能为空；如需删除这个元素，请用 AI 修改');
     if (text.length > MAX_ELEMENT_TEXT) throw new HttpError(400, `文字过长（最多 ${MAX_ELEMENT_TEXT} 字）`);
     const oldText = typeof body.oldText === 'string' ? body.oldText : undefined;
     try {
-      return await editElementText(db, id, user.id, { pageId, eid, text, oldText });
+      return await editElementText(db, id, user.id, { pageId, eid, text, oldText, run });
     } catch (e) {
       const err = e as Error & { statusCode?: number };
       throw err.statusCode ? err : new HttpError(400, err.message);
