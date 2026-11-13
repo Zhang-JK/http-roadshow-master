@@ -503,7 +503,22 @@ test('double-click any text, even beside icons or styled words, to edit just tha
   await expect(historyItems().first().locator('[data-testid=hist-text] ins')).toHaveText('4,500');
   await expect(label).toHaveText('4,500');
   await expect(stage().locator('svg.mini text').first()).toHaveText('营收');
-  expect(await saved()).toContain('text-anchor="middle">4,500</text></svg>');
+  expect(await saved()).toContain('text-anchor="middle">4,500</text>');
+
+  // Where generated labels overlap, the one drawn on top is edited; text under a transparent layer
+  // laid over it can still be double-clicked.
+  await dblclickText(stage().locator('svg.mini text').nth(3), '顶层');
+  await expect(overlay).toHaveText('顶层');
+  await page.keyboard.press('Escape');
+  const veiled = stage().locator('.legend span');
+  await dblclickText(veiled, '图例说明');
+  await expect(veiled).toHaveAttribute('contenteditable', /plaintext-only|true/);
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('新图例');
+  await page.keyboard.press('Enter');
+  await expect(historyItems()).toHaveCount(count + 5);
+  await expect(veiled).toHaveText('新图例');
+  expect(await veiled.getAttribute('style')).toBeNull();
 
   await page.request.delete(`/api/projects/${pid}`);
   await page.goto(back);

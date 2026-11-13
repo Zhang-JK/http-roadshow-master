@@ -488,7 +488,7 @@ describe('templates, decks, edits, history and export', () => {
     const sv = await req('PUT', url(svg), adminCookie, { text: '4,500\n万元', oldText: '3,200', run: 1 });
     expect(sv.status).toBe(200);
     html = (await req('GET', `/api/projects/${pid}`, adminCookie)).json.project.doc.pages[1].html;
-    expect(html).toContain('text-anchor="middle">4,500 万元</text></svg>');
+    expect(html).toContain('text-anchor="middle">4,500 万元</text>');
     expect((await req('PUT', url(svg), adminCookie, { text: 'x' })).status).toBe(400);
     expect(mock.calls.length).toBe(calls);
 

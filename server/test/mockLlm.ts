@@ -62,7 +62,8 @@ const PAGE = (n: number, layout: string, broken: boolean, extra = '', tpl = fals
 
 /** Text mixed with child elements, and an SVG chart's labels, for typing over a run of text in place (MIXED_TEXT). */
 export const MIXED = '<p class="note">收入 <b class="num">3,200</b> 万元，同比 <i>+180%</i></p><div class="tag"><span class="dot"></span>重点客户<br><small>12 家</small></div>' +
-  '<svg class="mini" viewBox="0 0 200 60" width="600" height="180"><rect x="0" y="0" width="200" height="60" fill="#eef2ff"/><text x="10" y="38" font-size="20" fill="#1e3a8a">营收</text><text x="140" y="38" font-size="20" fill="#1e3a8a" text-anchor="middle">3,200</text></svg>';
+  '<svg class="mini" viewBox="0 0 200 60" width="600" height="180"><rect x="0" y="0" width="200" height="60" fill="#eef2ff"/><text x="10" y="38" font-size="20" fill="#1e3a8a">营收</text><text x="140" y="38" font-size="20" fill="#1e3a8a" text-anchor="middle">3,200</text><text x="60" y="38" font-size="20">底层</text><text x="60" y="38" font-size="20">顶层</text></svg>' +
+  '<div class="legend" style="position:relative;width:400px"><span>图例说明</span><div class="veil" style="position:absolute;left:0;top:0;width:100%;height:100%"></div></div>';
 
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
 const pageExtra = (text: string) =>
