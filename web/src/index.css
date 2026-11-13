@@ -442,6 +442,16 @@ textarea { resize: vertical; min-height: 40px; }
 .share-stage.presenting .stage-frame { box-shadow: none; border-radius: 0; }
 .present-exit { position: absolute; top: 14px; right: 14px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: rgba(255,255,255,.14); color: #fff; font-size: 16px; cursor: pointer; opacity: 0; transition: opacity .2s; }
 .share-stage.presenting:hover .present-exit { opacity: 1; }
+/* Slide show from the editor */
+.slideshow { position: fixed; inset: 0; z-index: 1000; background: #000; cursor: pointer; outline: none; }
+.slideshow.idle { cursor: none; }
+.slideshow-slide { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: opacity .3s ease, visibility 0s linear .3s; }
+.slideshow-slide.on { opacity: 1; visibility: visible; transition: opacity .3s ease; }
+.slideshow .slide-frame { pointer-events: none; background: #fff; }
+.slideshow-count, .slideshow-exit { position: absolute; color: #fff; background: rgba(255,255,255,.14); transition: opacity .25s; }
+.slideshow-count { right: 18px; bottom: 16px; padding: 2px 12px; border-radius: 999px; font: 600 14px/1.8 system-ui, sans-serif; letter-spacing: .04em; pointer-events: none; }
+.slideshow-exit { top: 14px; right: 14px; width: 36px; height: 36px; border: 0; border-radius: 50%; font-size: 16px; cursor: pointer; }
+.slideshow.idle .slideshow-count, .slideshow.idle .slideshow-exit { opacity: 0; }
 .share-empty { height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 24px; }
 .share-empty p { margin: 0; }
 @media (max-width: 760px) {
