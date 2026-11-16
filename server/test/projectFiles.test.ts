@@ -124,7 +124,9 @@ describe('staged multi-file generation', () => {
     expect(job.status).toBe('done');
     expect(calls.filter(isPages)).toHaveLength(4);
     expect(savedDoc(id).pages.map((p) => p.html.match(/第(\d)页标题/)![1])).toEqual(['1', '2', '3', '4', '5', '6', '7']);
-    const rows = db.prepare(`SELECT stage, status FROM llm_calls WHERE job_id = ? AND stage LIKE '生成页面%' ORDER BY id`).all(job.id) as { stage: string; status: string }[];
+    const rows = db
+      .prepare(`SELECT stage, status FROM llm_calls WHERE job_id = ? AND stage LIKE '生成页面%' AND stage NOT LIKE '%检查渲染效果%' ORDER BY id`)
+      .all(job.id) as { stage: string; status: string }[];
     expect(rows.filter((r) => r.status === 'error')).toEqual([{ stage: '生成页面：第 3–4 页（共 7 页）', status: 'error' }]);
     expect(rows).toContainEqual({ stage: '生成页面：第 3–4 页（共 7 页）（第 2 次尝试）', status: 'ok' });
     expect(rows.filter((r) => r.status === 'ok')).toHaveLength(4);
@@ -302,5 +304,77 @@ describe('staged multi-file generation', () => {
     expect(saved.readme).toContain('老板汇报 OLD-BRIEF');
     expect(saved.readme).toContain('## 修改记录');
     expect(saved.pages.map((p) => p.file)).toEqual(['pages/cover.html', 'pages/content.html', 'pages/content-2.html']);
+  });
+});
+
+describe('each page batch reviews its rendered pages', () => {
+  const reviews = async (notes: string, settings: Record<string, unknown> = {}) => {
+    await req('PUT', '/api/settings', settings);
+    const before = mock.pageReviewCalls.length;
+    const r = await create({ name: '渲染自检', notes });
+    await req('PUT', '/api/settings', { genParallel: 4, pageReview: true });
+    return { ...r, reviews: mock.pageReviewCalls.slice(before) };
+  };
+  const lastUser = (c: { body: any }) => c.body.messages.at(-1);
+  const lastUserText = (c: { body: any }) => lastUser(c).content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('\n');
+
+  it('is on by default and can be turned off', async () => {
+    expect((await req('GET', '/api/settings')).json.settings.pageReview).toBe(true);
+    const { job, reviews: none } = await reviews('PAGE_REVIEW', { pageReview: false });
+    expect(job.status).toBe('done');
+    expect(none).toHaveLength(0);
+  });
+
+  it('the model that wrote a batch sees screenshots and the layout check of its pages, and its corrections replace them', async () => {
+    const { id, job, calls, reviews: seen } = await reviews('PAGE_REVIEW', { genParallel: 1 });
+    expect(job.status).toBe('done');
+    expect(calls.filter(isPages)).toHaveLength(1);
+    // One look: after the correction the pages render cleanly, so there is no second round.
+    expect(seen).toHaveLength(1);
+    const msgs = seen[0].body.messages;
+    expect(msgs.at(-2)).toMatchObject({ role: 'assistant', content: expect.stringContaining('<file path="pages/cover.html">') });
+    expect(msgs.slice(0, -2).map((m: any) => m.role)).toEqual(calls.find(isPages)!.body.messages.map((m: any) => m.role));
+    const text = lastUserText(seen[0]);
+    expect(text).toContain('【页面自检】下面是你刚写的页面在浏览器中的实际渲染效果（pages/cover.html、pages/content-1.html、pages/content-2.html');
+    expect(text).toMatch(/pages\/content-1\.html：\n\s+✗/);
+    expect(text).not.toMatch(/pages\/cover\.html：\n/);
+    const images = lastUser(seen[0]).content.filter((p: any) => p.type === 'image_url');
+    expect(images).toHaveLength(3);
+    expect(images.every((p: any) => p.image_url.url.startsWith('data:image/jpeg;base64,'))).toBe(true);
+    const pages = savedDoc(id).pages;
+    expect(pages.map((p) => p.file)).toEqual(['pages/cover.html', 'pages/content-1.html', 'pages/content-2.html']);
+    expect(pages[1].html).toContain('REVIEWED');
+    expect(pages[1].html).not.toContain('OVERFLOW-TEXT');
+    const stages = (db.prepare('SELECT stage FROM llm_calls WHERE job_id = ? ORDER BY id').all(job.id) as { stage: string }[]).map((r) => r.stage);
+    expect(stages).toContain('生成页面：第 1–3 页（共 3 页）：检查渲染效果');
+  });
+
+  it('batches written side by side each review only their own pages', async () => {
+    const { id, job, reviews: seen } = await reviews('PAGE_REVIEW');
+    expect(job.status).toBe('done');
+    expect(seen).toHaveLength(3);
+    for (const c of seen) expect(lastUser(c).content.filter((p: any) => p.type === 'image_url')).toHaveLength(1);
+    const flagged = seen.filter((c) => /✗/.test(lastUserText(c)));
+    expect(flagged).toHaveLength(1);
+    expect(lastUserText(flagged[0])).toContain('（pages/content-1.html，');
+    expect(savedDoc(id).pages.map((p) => p.html.includes('REVIEWED'))).toEqual([false, true, false]);
+  });
+
+  it('a second look only while layout errors remain, then the pages are kept as they are', async () => {
+    const { id, job, reviews: seen } = await reviews('PAGE_REVIEW_STUBBORN', { genParallel: 1 });
+    expect(job.status).toBe('done');
+    expect(seen).toHaveLength(2);
+    expect(lastUserText(seen[1])).toContain('按你的修改重新渲染了这几页');
+    // The second look continues the same conversation, with the first correction in it.
+    expect(seen[1].body.messages.at(-2)).toMatchObject({ role: 'assistant', content: expect.stringContaining('REVIEWED') });
+    expect(savedDoc(id).pages[1].html).toContain('REVIEWED');
+  });
+
+  it('a review that fails leaves the pages as written', async () => {
+    const { id, job, reviews: seen } = await reviews('PAGE_REVIEW_DOWN', { genParallel: 1 });
+    expect(job.status).toBe('done');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(savedDoc(id).pages).toHaveLength(3);
+    expect(savedDoc(id).pages[1].html).toContain('OVERFLOW-TEXT');
   });
 });

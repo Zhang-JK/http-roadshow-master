@@ -29,11 +29,11 @@ import {
 } from './prompts.js';
 import { logEdit, plannedPages, readmeFromBrief } from './files.js';
 import { checkProject } from './projectCheck.js';
-import { describeGenerateState, generateFiles, type GenerateState } from './generate.js';
+import { describeGenerateState, generateFiles, type GenerateState, type PageLook } from './generate.js';
 import { assetPath, assetsByIds, isChart, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { chartsAvailable, createChartTools } from './charts.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
-import { renderPageImages } from './render.js';
+import { inspectLayout, renderPageImages } from './render.js';
 import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
 import {
   cleanSummary,
@@ -357,6 +357,17 @@ const toolStage = (name: string, args: Record<string, unknown>, phase = '自检'
       ? `绘制图表：${String(args.title || args.type || '').slice(0, 30)}`
       : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
 
+/** Screenshots (about 1000 px on the long side) and layout findings of pages a batch just wrote. */
+async function lookAtPages(db: DB, doc: DeckDoc): Promise<PageLook[]> {
+  const view = assignIds(doc, { keepScripts: true });
+  const resolver = makeAssetResolver(db);
+  const shots = await renderPageImages(view, resolver, { scale: Math.min(1, 1000 / Math.max(doc.width, doc.height)), type: 'jpeg' });
+  const reports = await inspectLayout(view, resolver);
+  const image = new Map(shots.map((s) => [s.pageId, `data:image/jpeg;base64,${s.image.toString('base64')}`]));
+  const issues = new Map(reports.map((r) => [r.pageId, r.issues]));
+  return view.pages.map((p) => ({ image: image.get(p.id), issues: issues.get(p.id) ?? [] }));
+}
+
 /** make_chart for decks when the server can draw (templates keep placeholder charts in inline SVG). */
 function chartToolsFor(db: DB, project: ProjectRow, userId: number): FileTools | undefined {
   return project.type === 'deck' && chartsAvailable() ? createChartTools(db, project.id, userId) : undefined;
@@ -668,6 +679,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
                 pagesStage = stage;
                 if (batches.size) showPages();
               },
+              lookAt: settings.pageReview === false ? undefined : (d) => lookAtPages(db, d),
               pagesPerCall: Number(settings.genPagesPerCall) || 3,
               parallel: Math.min(Number(settings.genParallel) || 4, parallelCapacity(db)),
               retryDelayMs: config.pageRetryDelayMs,
