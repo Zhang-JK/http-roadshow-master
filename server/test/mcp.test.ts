@@ -216,6 +216,8 @@ describe('mcp tools through the SDK client', () => {
     const update = tools.find((t) => t.name === 'update_roadshow_slides')!;
     expect(update.inputSchema.required).toEqual(['projectId']);
     expect((update.inputSchema.properties as any).files.items).toEqual((create.inputSchema.properties as any).files.items);
+    expect((create.inputSchema.properties as any).data).toEqual((update.inputSchema.properties as any).data);
+    expect((create.inputSchema.properties as any).data.description).toMatch(/Raw data and statistics/);
     expect(tools.find((t) => t.name === 'delete_roadshow_slides')!.annotations).toMatchObject({ destructiveHint: true, readOnlyHint: false });
     expect(tools.find((t) => t.name === 'list_roadshow_slides')!.annotations).toMatchObject({ readOnlyHint: true });
   });
@@ -249,6 +251,7 @@ describe('mcp tools through the SDK client', () => {
         audience: '研发负责人',
         pageCount: 3,
         notes: '每页标注数据来源',
+        data: '| 版本 | QPS |\n|---|---|\n| 基线 | 5200 |\n| v2 | 7400 |',
         files: [
           { filename: 'latency.png', data: PNG_1x1 },
           { filename: 'flame.png', data: `data:image/png;base64,${PNG_1x1}`, role: 'reference' },
@@ -265,9 +268,11 @@ describe('mcp tools through the SDK client', () => {
       ['flame.png', 'image', 'reference'],
       ['results.csv', 'document', 'reference'],
       ['report.md', 'document', 'reference'],
+      ['原始数据.md', 'document', 'reference'],
     ]);
 
     const p = (await req('GET', `/api/projects/${projectId}`, admin)).json;
+    expect(p.assets.find((a: any) => a.filename === '原始数据.md')).toMatchObject({ mime: 'text/markdown', hasText: true });
     expect(p.project).toMatchObject({ type: 'deck', templateId, createdBy: 'MCP', width: 1920, height: 1080 });
     expect(p.project.meta.brief).toEqual({
       name: '搜索服务 v2 压测报告',
@@ -294,6 +299,7 @@ describe('mcp tools through the SDK client', () => {
     expect(calls.every((c) => !(c.body.tools ?? []).some((t: any) => t.function.name === 'ask_user'))).toBe(true);
     expect(calls[0].text).toContain('季度测试评审');
     expect(calls[0].text).toContain('baseline,12,48,5200');
+    expect(calls[0].text).toContain('| v2 | 7400 |');
     expect(calls[0].images.some((u) => u.startsWith('data:image/png'))).toBe(true);
     const jobs = (await req('GET', `/api/projects/${projectId}/jobs`, admin)).json.jobs;
     expect(jobs).toEqual([expect.objectContaining({ kind: 'create', status: 'done', questions: [] })]);
@@ -420,6 +426,7 @@ describe('mcp tools through the SDK client', () => {
       ['flame.png', 'reference', 'MCP'],
       ['results.csv', 'reference', 'MCP'],
       ['report.md', 'reference', 'MCP'],
+      ['原始数据.md', 'reference', 'MCP'],
     ]);
     expect(d.history.map((h: any) => [h.version, h.action, h.by])).toEqual([
       [1, 'created', 'MCP'],

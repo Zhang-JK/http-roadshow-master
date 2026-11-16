@@ -5,7 +5,8 @@ import type { DB } from './db.js';
 import { config } from './config.js';
 import { HttpError, requireMcpCaller, type ServiceUser } from './auth.js';
 import { ASPECTS, type DeckDoc } from './deck.js';
-import { makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRow } from './assets.js';
+import { chartsAvailable } from './charts.js';
+import { isChart, makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRow } from './assets.js';
 import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from './create.js';
 import {
   deleteProject,
@@ -29,6 +30,8 @@ export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '202
 const BODY_LIMIT = 200 * 1024 * 1024;
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const MAX_CONTENT = 100_000;
+const MAX_DATA = 500_000;
+const DATA_FILE = '原始数据.md';
 const DEFAULT_WAIT_SECONDS = 20;
 const MAX_WAIT_SECONDS = 50;
 const MAX_PREVIEW_PAGES = 12;
@@ -69,7 +72,7 @@ const EXPORT_FORMATS = ['html', 'pdf', 'pdf-image', 'pptx', 'zip'] as const;
 
 const INSTRUCTIONS = `Creates roadshow slide decks (路演材料: HTML slides, exportable to PDF and PPTX) with HTTP 路演生成器.
 1. Call list_roadshow_templates and pick a templateId.
-2. Call create_roadshow_slides with everything the deck must show: the full test data and results, and the charts/screenshots as images.
+2. Call create_roadshow_slides with everything the deck must show: the full test data and results (raw numbers and statistics in data; the server picks and draws the charts), and screenshots or existing charts as images. When the deck should show results but the user has not given the numbers, ask the user for the raw data first.
 3. Call get_roadshow_slides_status until status is "ready" (generation takes a few minutes), then share editorUrl or download the exports with the same bearer token.
 To change a deck made earlier: call list_roadshow_slides to find it (title, dates, author, change history), get_roadshow_slides for its original request, files and full history, then update_roadshow_slides with the new data or changes (and get_roadshow_slides_status until it is "ready" again), or delete_roadshow_slides to remove it.`;
 
@@ -193,8 +196,23 @@ const fileItemSchema = {
 
 const projectIdSchema = { type: 'string', description: 'projectId from list_roadshow_slides or create_roadshow_slides.' };
 
+const dataSchema = (charts: boolean) => ({
+  type: 'string',
+  description: `Raw data and statistics (原始数据) as Markdown tables, CSV or JSON: every number with its unit, period and source, e.g. monthly revenue, latency percentiles per build, conversion per funnel step. ${
+    charts
+      ? 'The generator picks a suitable chart for each data set (trend, comparison, share, conversion…) and draws it, adding chart areas or chart pages even where the template has none.'
+      : 'The generator reads it and draws simple charts.'
+  } At most ${MAX_DATA} characters; it is kept with the deck as ${DATA_FILE}.`,
+});
+
+const chartsLine = (charts: boolean) =>
+  charts
+    ? `\n- data: the raw numbers and statistics behind the results. If the user has not given any but the deck is about measurable results (performance, growth, usage, finances, test outcomes), ask the user for them first. The generator chooses and draws the charts (bar, line, combo, donut, waterfall, funnel, scatter, heatmap, radar…) itself, so do not plot them yourself unless you already have the images.`
+    : '';
+
 function toolDefinitions(db: DB) {
   const ids = readyTemplates(db).map((t) => t.id);
+  const charts = chartsAvailable();
   return [
     {
       name: 'list_roadshow_templates',
@@ -217,7 +235,7 @@ function toolDefinitions(db: DB) {
 
 The deck can only show what you send, and the generator does not make up numbers. For tests, experiments, benchmarks or evaluations send the complete material, not a summary:
 - content: the goal and what was tested; the setup (hardware, software and versions, datasets, parameters); the method and test cases; every metric with exact values and units plus baselines or previous results, as Markdown tables; failures, anomalies and limitations; conclusions, risks and next steps; and what each section of the deck should say.
-- files: charts, plots, screenshots and diagrams as images (PNG/JPEG/GIF/WebP; role "embed" lets them appear on slides), and the raw results and reports (CSV, JSON, Markdown, logs, PDF, PPTX) for the generator to read. Name each file in content and say what it shows and where it belongs.`,
+- files: charts, plots, screenshots and diagrams as images (PNG/JPEG/GIF/WebP; role "embed" lets them appear on slides), and the raw results and reports (CSV, JSON, Markdown, logs, PDF, PPTX) for the generator to read. Name each file in content and say what it shows and where it belongs.${chartsLine(charts)}`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -245,6 +263,7 @@ The deck can only show what you send, and the generator does not make up numbers
           width: { type: 'integer', minimum: 320, maximum: 4000, description: 'Slide width in pixels, only with aspect "custom".' },
           height: { type: 'integer', minimum: 320, maximum: 4000, description: 'Slide height in pixels, only with aspect "custom".' },
           notes: { type: 'string', description: 'Other requirements (其他要求), e.g. language, a logo on every page, colours to avoid.' },
+          data: dataSchema(charts),
           files: {
             type: 'array',
             maxItems: MAX_UPLOAD_FILES,
@@ -314,7 +333,9 @@ The deck can only show what you send, and the generator does not make up numbers
       title: 'Update roadshow slides',
       description: `Change a deck created through MCP, the same as the 修改 box in the web editor: the generator edits the current deck according to instructions and saves the result as a new version (earlier versions stay in the history and can be restored on the web page). Returns at once; then call get_roadshow_slides_status until status is "ready" again and check lastRequest.
 
-Send the new data in full, as for create_roadshow_slides: new or corrected numbers with units as Markdown tables, what changed since the last version, and which pages or sections they replace or extend. New charts and data files go in files; name each in instructions and say where it belongs. name alone renames the deck without the generator.`,
+Send the new data in full, as for create_roadshow_slides: new or corrected numbers with units as Markdown tables, what changed since the last version, and which pages or sections they replace or extend. New charts and data files go in files; name each in instructions and say where it belongs.${
+        charts ? ' New raw numbers go in data: the generator redraws the affected charts or adds new ones; ask the user for the figures when the change is about results they have not given yet.' : ''
+      } name alone renames the deck without the generator.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -329,6 +350,7 @@ Send the new data in full, as for create_roadshow_slides: new or corrected numbe
             description: 'Only change this page (1-based, see pages in get_roadshow_slides). Omit to let the change cover the whole deck: adding, removing or reordering pages as needed.',
           },
           name: { type: 'string', description: 'New deck title (材料名称).' },
+          data: dataSchema(charts),
           files: {
             type: 'array',
             maxItems: MAX_UPLOAD_FILES,
@@ -463,16 +485,20 @@ const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** files, plus `data` (raw numbers for the charts) as one more text file. */
 function decodeFiles(args: Args): UploadFile[] {
   const rawFiles = args.files ?? [];
   if (!Array.isArray(rawFiles)) throw new ToolError('"files" must be an array');
   if (rawFiles.length > MAX_UPLOAD_FILES) throw new ToolError(`At most ${MAX_UPLOAD_FILES} files; merge small tables into one CSV or Markdown file`);
-  return rawFiles.map(decodeFile);
+  const files = rawFiles.map(decodeFile);
+  const data = textArg(args, 'data', { max: MAX_DATA })?.trim();
+  if (data) files.push({ filename: DATA_FILE, mime: 'text/markdown', buf: Buffer.from(data, 'utf8') });
+  return files;
 }
 
 const publicAsset = (db: DB, a: AssetRow) => ({
   filename: a.filename,
-  kind: a.kind,
+  kind: isChart(a) ? 'chart' : a.kind,
   role: a.role,
   bytes: a.size,
   ...(a.kind === 'document' ? { pagesAsImages: slideAssets(db, a.id).length, textExtracted: !!a.extracted_text } : {}),
