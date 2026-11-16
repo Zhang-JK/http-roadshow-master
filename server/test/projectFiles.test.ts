@@ -72,10 +72,12 @@ afterAll(async () => {
 describe('settings for long outputs and small contexts', () => {
   it('defaults to staged generation with a 65536-token output limit inside a 200K context', async () => {
     const s = (await req('GET', '/api/settings')).json.settings;
-    expect(s).toMatchObject({ maxTokens: 65536, contextTokens: 200000, generateMode: 'files', genPagesPerCall: 3 });
-    const r = (await req('PUT', '/api/settings', { contextTokens: 10, genPagesPerCall: 99, generateMode: 'weird', maxTokens: 'x' })).json.settings;
-    expect(r).toMatchObject({ contextTokens: 8000, genPagesPerCall: 10, generateMode: 'files', maxTokens: 65536 });
-    await req('PUT', '/api/settings', { contextTokens: 200000, genPagesPerCall: 3 });
+    expect(s).toMatchObject({ maxTokens: 65536, contextTokens: 200000, generateMode: 'files', genPagesPerCall: 3, genParallel: 4 });
+    const r = (await req('PUT', '/api/settings', { contextTokens: 10, genPagesPerCall: 99, genParallel: 0, generateMode: 'weird', maxTokens: 'x' })).json
+      .settings;
+    expect(r).toMatchObject({ contextTokens: 8000, genPagesPerCall: 10, genParallel: 4, generateMode: 'files', maxTokens: 65536 });
+    expect((await req('PUT', '/api/settings', { genParallel: 99 })).json.settings.genParallel).toBe(16);
+    await req('PUT', '/api/settings', { contextTokens: 200000, genPagesPerCall: 3, genParallel: 4 });
   });
 
   it('moves a saved copy of the old 32000 default to the new default', async () => {
@@ -95,14 +97,18 @@ describe('settings for long outputs and small contexts', () => {
 describe('staged multi-file generation', () => {
   let projectId = '';
 
-  it('writes README and styles first, then pages in batches; every request fits the context', async () => {
+  it('writes README and styles first, then pages in parallel batches; every request fits the context', async () => {
     const { id, job, calls } = await create({ name: '分步模板', notes: 'MANY_PAGES' });
     projectId = id;
     expect(job.status).toBe('done');
-    expect(calls.map((c) => (isPlan(c) ? 'plan' : isPages(c) ? 'pages' : 'other'))).toEqual(['plan', 'pages', 'pages', 'pages']);
-    expect(calls[1].text).toContain('第 1–3 页');
-    expect(calls[3].text).toContain('本批是第 7 页');
-    expect(calls[2].text).toContain('【风格参照：已完成的 pages/content-2.html】');
+    expect(calls.map((c) => (isPlan(c) ? 'plan' : isPages(c) ? 'pages' : 'other'))).toEqual(['plan', 'pages', 'pages', 'pages', 'pages']);
+    // Seven pages over four parallel calls: the batches are spread evenly and written at the same time.
+    const batches = calls.filter(isPages).map((c) => c.text.match(/本批是第 ([\d–]+) 页/)![1]);
+    expect(batches.sort()).toEqual(['1–2', '3–4', '5–6', '7']);
+    expect(mock.pagesAtOnce).toBe(4);
+    const last = calls.find((c) => c.text.includes('本批是第 7 页'))!;
+    expect(last.text).toContain('【同时进行】第 1、2、3、4、5、6 页正由其他批次同时制作');
+    expect(last.text).not.toContain('【风格参照');
     for (const c of calls) expect(c.body.max_tokens).toBe(65536);
     const doc = savedDoc(id);
     expect(doc.pages).toHaveLength(7);
@@ -114,14 +120,21 @@ describe('staged multi-file generation', () => {
   });
 
   it('recovers from a plan and a page batch cut off by the output limit', async () => {
-    const { id, job, calls } = await create({ name: '截断模板', notes: 'TRUNCATE_PLAN TRUNCATE_PAGES' });
-    expect(job.status).toBe('done');
-    expect(calls.filter(isPlan)).toHaveLength(2);
-    expect(calls[1].body.messages.at(-1).content).toContain('回复达到最大输出长度被截断');
-    // One page fit into the cut-off reply, so the rest is asked for one page at a time.
-    const pages = calls.filter(isPages);
-    expect(pages.map((c) => c.text.match(/本批是第 ([\d–]+) 页/)![1])).toEqual(['1–3', '2', '3']);
-    expect(savedDoc(id).pages.map((p) => p.html.match(/第(\d)页标题/)![1])).toEqual(['1', '2', '3']);
+    await req('PUT', '/api/settings', { genParallel: 1 });
+    try {
+      const { id, job, calls } = await create({ name: '截断模板', notes: 'TRUNCATE_PLAN TRUNCATE_PAGES' });
+      expect(job.status).toBe('done');
+      expect(calls.filter(isPlan)).toHaveLength(2);
+      expect(calls[1].body.messages.at(-1).content).toContain('回复达到最大输出长度被截断');
+      // One page fit into the cut-off reply, so the rest is asked for one page at a time.
+      const pages = calls.filter(isPages);
+      expect(pages.map((c) => c.text.match(/本批是第 ([\d–]+) 页/)![1])).toEqual(['1–3', '2', '3']);
+      expect(pages[1].text).toContain('【风格参照：已完成的 pages/cover.html】');
+      expect(pages[1].text).not.toContain('【同时进行】');
+      expect(savedDoc(id).pages.map((p) => p.html.match(/第(\d)页标题/)![1])).toEqual(['1', '2', '3']);
+    } finally {
+      await req('PUT', '/api/settings', { genParallel: 4 });
+    }
   });
 
   it('single-shot mode continues a cut-off reply and still writes a README', async () => {

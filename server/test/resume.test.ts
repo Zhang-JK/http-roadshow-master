@@ -56,7 +56,8 @@ beforeAll(async () => {
   await req('POST', '/api/users', admin, { username: 'alice', password: 'alice123', displayName: '爱丽丝' });
   alice = cookieOf(await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'alice', password: 'alice123' } }));
   await req('POST', '/api/llm/endpoints', admin, { name: 'local', baseUrl: mock.url, apiKey: 'good-key', model: 'mock-vision' });
-  await req('PUT', '/api/settings', admin, { selfCheck: false });
+  // Page batches one after another, so the model can go away between two of them.
+  await req('PUT', '/api/settings', admin, { selfCheck: false, genParallel: 1 });
 });
 
 afterAll(async () => {
@@ -119,6 +120,30 @@ describe('continuing a failed job where it stopped', () => {
     expect(done.durationMs).toBeLessThan(row.finished_at - row.created_at - 250);
     expect(h.json.versions[0].durationMs).toBe(done.durationMs);
     expect((await req('POST', `/api/jobs/${failed.id}/resume`, admin)).status).toBe(409);
+  });
+
+  it('a page batch that fails while others run in parallel keeps their pages and continues with its own', async () => {
+    await req('PUT', '/api/settings', admin, { genParallel: 4 });
+    try {
+      const before = mock.calls.length;
+      const r = await req('POST', '/api/projects', alice, { type: 'template', style: '简约', name: '并行断线', notes: 'MANY_PAGES PAGE5_DOWN' });
+      const failed = await waitJob(r.json.job.id);
+      expect(failed).toMatchObject({ status: 'error' });
+      expect(failed.error).toContain('model offline (MOCK)');
+      // The other batches finished before the job stopped, and their pages were kept.
+      expect((await failedJob(r.json.project.id, failed.id)).resume.label).toBe('已完成规划与 5/7 页');
+
+      mock.setOnline();
+      expect((await req('POST', `/api/jobs/${failed.id}/resume`, alice)).status).toBe(200);
+      expect((await waitJob(failed.id)).status).toBe('done');
+      const calls = mock.calls.slice(before);
+      expect(calls.filter(isPlan)).toHaveLength(1);
+      // Continuing, the two missing pages are spread over the free workers too.
+      expect(calls.filter(isPages).map(batchOf).sort()).toEqual(['1–2', '3–4', '5', '6', '7']);
+      expect(savedDoc(r.json.project.id).pages.map((p) => p.html.match(/第(\d)页标题/)![1])).toEqual(['1', '2', '3', '4', '5', '6', '7']);
+    } finally {
+      await req('PUT', '/api/settings', admin, { genParallel: 1 });
+    }
   });
 
   it('single-call generation continues a cut-off reply from the part already written', async () => {

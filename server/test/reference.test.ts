@@ -212,7 +212,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const job = await waitJob(r.json().job.id);
     expect(job.status).toBe('done');
     const calls = mock.calls.slice(before);
-    expect(calls).toHaveLength(4); // three rounds for the plan (two of them with tools), then one page batch
+    expect(calls).toHaveLength(6); // three rounds for the plan (two of them with tools), then the three pages at once
 
     const first = calls[0];
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
@@ -241,7 +241,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
     const imageMsg = calls[2].body.messages.find((m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.text?.includes('工具调用返回的图片'));
     expect(imageMsg.content.some((p: any) => p.type === 'image_url' && p.image_url.url.startsWith('data:image/jpeg'))).toBe(true);
     expect(calls[2].body.tool_choice).toBe('auto');
-    expect(job.cost).toBeCloseTo(0.0005, 6); // three plan rounds, one page batch and the self-check reply
+    expect(job.cost).toBeCloseTo(0.0007, 6); // three plan rounds, three single-page calls and the self-check reply
   });
 
   it('deleting a PPT asset removes its slide images', async () => {

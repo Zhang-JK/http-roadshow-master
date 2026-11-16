@@ -256,7 +256,7 @@ describe('staged generation', () => {
       generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template, assets: [] }, deps),
     ).rejects.toThrow(/模型多次都没有输出任何页面/);
     // Each page gets three tries on its own before it is skipped.
-    expect(sizes).toEqual([2, 1, 1, 1, 1, 1]);
+    expect(sizes).toEqual([2, 1, 1, 1, 1, 1, 1]);
 
     const ok = scripted([
       () => result('<file path="README.md">\n# T\n## 页面规划\n1. pages/a.html ｜ cover\n</file>'),

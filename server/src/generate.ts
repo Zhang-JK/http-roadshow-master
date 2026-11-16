@@ -1,7 +1,8 @@
 /**
  * Staged generation of a multi-file project: one call writes the README (requirements, style guide,
- * page plan) and the style files, then the pages are written a few per call. No single reply has to
- * hold the whole deck, and a reply cut off by the output limit only loses the file it was writing.
+ * page plan) and the style files, then the pages are written a few per call, several calls at once.
+ * No single reply has to hold the whole deck, and a reply cut off by the output limit only loses the
+ * file it was writing. The self-check and delivery check run on the whole deck afterwards.
  */
 import * as cheerio from 'cheerio';
 import type { DeckDoc, DeckPage } from './deck.js';
@@ -13,6 +14,9 @@ export const MAX_PLANNED_PAGES = 60;
 
 /** Times a reply missing required files is sent back to the model before the step gives up. */
 export const MAX_PLAN_FIXES = 3;
+
+/** Replies without a page before it is left to the delivery check. */
+const MAX_PAGE_MISSES = 3;
 
 /**
  * Style sheets written without <file> tags (```css blocks), named by the styles/*.css path mentioned
@@ -45,6 +49,8 @@ export interface GenerateDeps {
   call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages') => Promise<ChatResult>;
   onStage?: (stage: string) => void;
   pagesPerCall: number;
+  /** Page batches written at the same time (1: one after another). */
+  parallel?: number;
   /** Continue a generation saved by onCheckpoint. */
   resume?: GenerateState;
   /** Called before each model call once there is work worth keeping. */
@@ -54,7 +60,7 @@ export interface GenerateDeps {
 /** How far a staged generation got. */
 export type GenerateState =
   | { step: 'plan'; doc: DeckDoc; early: FileBlock[]; messages: ChatMessage[]; attempt: number }
-  | { step: 'pages'; doc: DeckDoc; done: string[]; skipped: string[]; size: number; failures: number; lastCut: boolean };
+  | { step: 'pages'; doc: DeckDoc; done: string[]; skipped: string[]; size: number; lastCut: boolean; misses?: Record<string, number> };
 
 /** A short description of a saved generation, for the user deciding whether to continue it. */
 export function describeGenerateState(s: GenerateState): string {
@@ -178,14 +184,16 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     return true;
   };
   let size = Math.max(1, deps.pagesPerCall);
-  let failures = 0;
   let lastCut = false;
-  // Pages the model failed to write three times running: left to the delivery check, which reports them as missing.
+  // Pages the model failed to write MAX_PAGE_MISSES times: left to the delivery check, which reports them as missing.
   const skipped = new Set<string>();
+  /** Replies with nothing usable when the page was asked for on its own. */
+  const misses = new Map<string, number>();
   if (resume?.step === 'pages') {
     resume.done.forEach((p) => done.add(p));
     resume.skipped.forEach((p) => skipped.add(p));
-    ({ size, failures, lastCut } = resume);
+    ({ size, lastCut } = resume);
+    for (const [p, n] of Object.entries(resume.misses ?? {})) misses.set(p, n);
     // Each file's pages follow its first page, which names the file.
     let rank = plan.length;
     let n = 0;
@@ -195,15 +203,38 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     }
   } else for (const b of early) if (order.has(b.path) && !done.has(b.path)) addFile(b.path, b.content);
 
-  for (;;) {
-    const queue = plan.filter((p) => !done.has(p.path) && !skipped.has(p.path));
-    if (!queue.length) break;
-    deps.onCheckpoint?.({ step: 'pages', doc, done: [...done], skipped: [...skipped], size, failures, lastCut });
-    const batch = queue.slice(0, size);
+  // Every page is planned, so batches are independent: up to `parallel` of them are written at once.
+  const parallel = Math.max(1, deps.parallel ?? 1);
+  const writing = new Map<PlannedPage[], Promise<void>>();
+  const inFlight = () => [...writing.keys()].flat();
+  const label = (batch: PlannedPage[]) => {
     const from = plan.indexOf(batch[0]) + 1;
-    const stage = `生成页面：第 ${from}${batch.length > 1 ? `–${from + batch.length - 1}` : ''} 页（共 ${plan.length} 页）`;
-    deps.onStage?.(stage);
-    const r = await deps.call(buildPagesPrompt(doc, kind, brief, template, assets, batch, plan), stage, 'pages');
+    return `${from}${batch.length > 1 ? `–${from + batch.length - 1}` : ''}`;
+  };
+  const save = () => deps.onCheckpoint?.({ step: 'pages', doc, done: [...done], skipped: [...skipped], size, lastCut, misses: Object.fromEntries(misses) });
+  const report = () => {
+    const batches = [...writing.keys()];
+    if (batches.length > 1) deps.onStage?.(`生成页面：第 ${batches.map(label).join('、')} 页同时进行（已完成 ${done.size}/${plan.length} 页）`);
+    else if (batches.length) deps.onStage?.(`生成页面：第 ${label(batches[0])} 页（共 ${plan.length} 页）`);
+  };
+  const nextBatch = (): PlannedPage[] | undefined => {
+    const busy = new Set(inFlight().map((p) => p.path));
+    const queue = plan.filter((p) => !done.has(p.path) && !skipped.has(p.path) && !busy.has(p.path));
+    if (!queue.length) return undefined;
+    if (misses.get(queue[0].path)) return [queue[0]];
+    // What is left is spread over the free workers, at most `size` consecutive pages per call.
+    const per = Math.max(1, Math.min(size, Math.ceil(queue.length / (parallel - writing.size))));
+    const batch = [queue[0]];
+    for (const p of queue.slice(1)) {
+      if (batch.length >= per || misses.get(p.path) || plan.indexOf(p) !== plan.indexOf(batch.at(-1)!) + 1) break;
+      batch.push(p);
+    }
+    return batch;
+  };
+  const write = async (batch: PlannedPage[]) => {
+    const others = inFlight().filter((p) => !batch.includes(p));
+    const stage = `生成页面：第 ${label(batch)} 页（共 ${plan.length} 页）`;
+    const r = await deps.call(buildPagesPrompt(doc, kind, brief, template, assets, batch, plan, others), stage, 'pages');
     const blocks = parseFileBlocks(r.text).filter((b) => b.complete);
     let got = 0;
     const strays: FileBlock[] = [];
@@ -213,24 +244,52 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
       else if (c?.kind === 'page' && batch.some((p) => p.path === c.path) && !done.has(c.path)) got += addFile(c.path, b.content) ? 1 : 0;
       else if (!c || c.kind === 'page') strays.push(b);
     }
-    // Pages written under other names fill the planned files that are still missing, in order.
+    // Pages written under other names fill the planned files of this batch that are still missing, in order.
     for (const b of strays) {
       const slot = batch.find((p) => !done.has(p.path));
       if (!slot) break;
       got += addFile(slot.path, b.content) ? 1 : 0;
     }
     if (got) {
-      failures = 0;
-      if (r.finishReason === 'length' && got < batch.length) size = Math.max(1, got);
-      continue;
+      if (r.finishReason === 'length' && got < batch.length) size = Math.max(1, Math.min(size, got));
+      return;
     }
-    failures++;
-    if (size > 1) size = 1;
-    else if (failures >= 3) {
+    if (batch.length > 1) {
+      size = 1;
+      return;
+    }
+    const n = (misses.get(batch[0].path) ?? 0) + 1;
+    misses.set(batch[0].path, n);
+    if (n >= MAX_PAGE_MISSES) {
       skipped.add(batch[0].path);
-      failures = 0;
       lastCut = r.finishReason === 'length';
     }
+  };
+  // A failed call stops new batches; the ones under way finish and keep their pages, then the step fails.
+  let failed: { error: unknown } | undefined;
+  for (;;) {
+    while (!failed && writing.size < parallel) {
+      const batch = nextBatch();
+      if (!batch) break;
+      save();
+      writing.set(
+        batch,
+        write(batch).then(
+          () => void writing.delete(batch),
+          (error) => {
+            writing.delete(batch);
+            failed ??= { error };
+          },
+        ),
+      );
+    }
+    if (!writing.size) break;
+    report();
+    await Promise.race(writing.values());
+  }
+  if (failed) {
+    save();
+    throw failed.error;
   }
   if (!doc.pages.length) {
     throw new Error(`模型多次都没有输出任何页面${lastCut ? '（回复达到最大输出长度被截断，请提高「最大输出 tokens」）' : ''}，生成中止`);

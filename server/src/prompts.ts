@@ -602,7 +602,10 @@ function templateLayouts(template: DeckDoc, batch: PlannedPage[]): string {
   return out.join('\n\n');
 }
 
-/** Step two, repeated: a few page files at a time, with the README and the styles as the contract. */
+/**
+ * Step two, repeated: a few page files at a time, with the README and the styles as the contract.
+ * `others` are the pages other calls are writing at the same time.
+ */
 export function buildPagesPrompt(
   doc: DeckDoc,
   kind: 'template' | 'deck',
@@ -611,6 +614,7 @@ export function buildPagesPrompt(
   assets: AssetRef[],
   batch: PlannedPage[],
   plan: PlannedPage[],
+  others: PlannedPage[] = [],
 ): ChatMessage[] {
   const images = planImages(assets, PAGE_BUDGET);
   const done = nameFiles(doc.pages);
@@ -630,8 +634,12 @@ ${kind === 'deck' ? `【用户需求原文】\n${briefBlock(kind, brief, CONTENT
 ${assetsBlock(assets, images, kind === 'template')}
 
 【已完成的页面】
-${done.length ? done.map((p, i) => `${i + 1}. ${p.file}：${pageText(p).split('\n')[0]?.slice(0, 40) ?? ''}`).join('\n') : '（无，本批是第一批）'}
-${sample ? `\n【风格参照：已完成的 ${sample.file}】\n${sample.html}\n` : ''}
+${done.length ? done.map((p, i) => `${i + 1}. ${p.file}：${pageText(p).split('\n')[0]?.slice(0, 40) ?? ''}`).join('\n') : first === 1 ? '（无，本批是第一批）' : '（暂无）'}
+${sample ? `\n【风格参照：已完成的 ${sample.file}】\n${sample.html}\n` : ''}${
+    others.length
+      ? `\n【同时进行】第 ${others.map((p) => plan.indexOf(p) + 1).join('、')} 页正由其他批次同时制作，不要输出它们；各批只依据 README 与样式文件，所以本批页面要严格遵守风格约定，页脚页码按规划中的序号写。\n`
+      : ''
+  }
 【本批任务】按 README 的页面规划输出下列 ${batch.length} 个页面文件：
 ${batch.map((b) => `- 第 ${plan.indexOf(b) + 1} 页：${b.line}`).join('\n')}
 
