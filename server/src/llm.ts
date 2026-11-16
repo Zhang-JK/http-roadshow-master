@@ -2,7 +2,7 @@ import zlib from 'node:zlib';
 import { getSettings, type DB } from './db.js';
 import type { ToolDef, ToolOutput } from './fileTools.js';
 import { compactHistory, DEFAULT_CONTEXT_TOKENS, estimateTokens, fitMaxTokens, inputBudget, MIN_OUTPUT_TOKENS, requestTokens } from './context.js';
-import { liveCalls, recordCall, type LiveCall } from './calls.js';
+import { addLiveCall, recordCall, removeLiveCall, type LiveCall } from './calls.js';
 import { activeProxy, directDispatcher } from './proxy.js';
 
 export const DEFAULT_IDLE_TIMEOUT_SEC = 600;
@@ -94,6 +94,13 @@ export class LlmError extends Error {
 /** Enabled endpoints in priority order. */
 export function listEnabledEndpoints(db: DB): Endpoint[] {
   return db.prepare('SELECT * FROM llm_endpoints WHERE enabled = 1 ORDER BY priority, id').all() as Endpoint[];
+}
+
+/** Requests the enabled endpoints take at the same time: the sum of their limits, Infinity if one has none. */
+export function parallelCapacity(db: DB): number {
+  const eps = listEnabledEndpoints(db);
+  if (eps.some((e) => !e.max_concurrency)) return Infinity;
+  return Math.max(1, eps.reduce((n, e) => n + e.max_concurrency, 0));
 }
 
 function chatUrl(baseUrl: string) {
@@ -374,17 +381,25 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
   const errors: string[] = [];
   const tried = new Set<number>();
   const jobId = opts.jobId;
+  let shown: LiveCall | undefined;
+  const show = (call?: LiveCall) => {
+    if (!jobId) return;
+    if (shown) removeLiveCall(jobId, shown);
+    shown = call;
+    if (call) addLiveCall(jobId, call);
+  };
   while (tried.size < endpoints.length) {
     const queuedAt = Date.now();
     const ep = await acquireEndpoint(
       endpoints.filter((e) => !tried.has(e.id)),
       opts.signal,
       () => {
-        if (jobId && !liveCalls.get(jobId)?.queuedSince) {
-          liveCalls.set(jobId, { endpointId: 0, endpointName: '', model: '', stage: opts.stage, queuedSince: queuedAt, tokens: 0 });
-        }
+        if (!shown?.queuedSince) show({ endpointId: 0, endpointName: '', model: '', stage: opts.stage, queuedSince: queuedAt, tokens: 0 });
       },
-    );
+    ).catch((e) => {
+      show();
+      throw e;
+    });
     tried.add(ep.id);
     let o = fitted;
     let msgs = messages;
@@ -393,7 +408,7 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
       for (let attempt = 0; ; attempt++) {
         const startedAt = Date.now();
         const live = { endpointId: ep.id, endpointName: ep.name, model: ep.model, stage: opts.stage, startedAt, tokens: 0 } as LiveCall;
-        if (jobId) liveCalls.set(jobId, live);
+        show(live);
         const record = (r: Partial<ChatResult>, e?: unknown) => {
           if (!jobId) return;
           const outText = (r.text ?? '') + (r.toolCalls ?? []).map((c) => c.function.name + c.function.arguments).join('');
@@ -442,7 +457,7 @@ export async function chat(db: DB, userId: number, messages: ChatMessage[], opts
         }
       }
     } finally {
-      if (jobId) liveCalls.delete(jobId);
+      show();
       release(ep.id);
     }
     errors.push((err as Error).message);
