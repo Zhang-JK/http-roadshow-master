@@ -279,6 +279,40 @@ test('page duplicate and delete', async () => {
   await expect(historyItems().first()).toContainText('删除页面');
 });
 
+test('drag a page thumbnail to change the order; Alt + arrow keys move the focused page', async () => {
+  const thumbs = page.locator('[data-testid=page-thumb]');
+  const titles = () => thumbs.evaluateAll((els) => els.map((el) => el.querySelector('iframe')!.contentDocument!.querySelector('h1, h2')?.textContent ?? ''));
+  await expect(thumbs.first().locator('button[title="上移"], button[title="下移"]')).toHaveCount(0);
+  const [a, b, c] = await titles();
+
+  // While dragging, a line shows where the page would land.
+  const last = (await thumbs.nth(2).boundingBox())!;
+  await thumbs.nth(0).hover();
+  await page.mouse.down();
+  await page.mouse.move(last.x + last.width / 2, last.y + last.height - 6, { steps: 5 });
+  await page.mouse.move(last.x + last.width / 2, last.y + last.height - 4);
+  await expect(thumbs.nth(2)).toHaveClass(/drop-after/);
+  await expect(thumbs.nth(0)).toHaveClass(/dragging/);
+  await page.mouse.up();
+  await expect.poll(titles).toEqual([b, c, a]);
+  await expect(historyItems().first()).toContainText('将第 1 页移动到第 3 位');
+  await expect(thumbs.nth(2)).not.toHaveClass(/drop-after|dragging/);
+
+  // Dropping a page where it already is changes nothing.
+  const versions = await historyItems().count();
+  await thumbs.nth(1).dragTo(thumbs.nth(1), { targetPosition: { x: 40, y: 10 } });
+  await expect.poll(titles).toEqual([b, c, a]);
+  expect(await historyItems().count()).toBe(versions);
+
+  await thumbs.nth(2).focus();
+  await page.keyboard.press('Alt+ArrowUp');
+  await expect.poll(titles).toEqual([b, a, c]);
+  await expect(thumbs.nth(1)).toBeFocused();
+  await page.keyboard.press('Alt+ArrowUp');
+  await expect.poll(titles).toEqual([a, b, c]);
+  await expect(historyItems().first()).toContainText('将第 2 页移动到第 1 位');
+});
+
 test('preview and revert a historical version', async () => {
   const v1 = historyItems().last();
   await v1.locator('button:has-text("预览")').click();

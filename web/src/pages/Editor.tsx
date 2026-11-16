@@ -63,6 +63,8 @@ export function EditorPage() {
   const [nameDraft, setNameDraft] = useState('');
   const [textEditing, setTextEditing] = useState(false);
   const [frameNonce, setFrameNonce] = useState(0);
+  /** The page being dragged in the rail, and the page it is over: it would land before or after that one. */
+  const [drag, setDrag] = useState<{ id: string; over?: string; after?: boolean } | null>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   /** eid of the element being typed into in the stage; while set, polling must not reload the frame. */
   const textEditRef = useRef<string | null>(null);
@@ -301,16 +303,43 @@ export function EditorPage() {
     }
   };
 
-  const pageOp = async (op: 'delete' | 'duplicate' | 'move', pid: string, toIndex?: number) => {
+  const pageOp = async (op: 'delete' | 'duplicate', pid: string) => {
     if (!project) return;
     if (op === 'delete' && !confirm('确定删除这一页？（可在历史记录中恢复）')) return;
     try {
-      await api.post(`/api/projects/${project.id}/pages/${pid}/${op}`, { toIndex });
+      await api.post(`/api/projects/${project.id}/pages/${pid}/${op}`);
       await loadProject();
     } catch (e) {
       toast((e as Error).message, 'error');
     }
   };
+
+  /** Shown in the new order at once; the saved version replaces it when it arrives. */
+  const movePageTo = async (pid: string, toIndex: number) => {
+    if (!project) return;
+    setData((d) => {
+      if (!d?.project.doc) return d;
+      const rest = d.project.doc.pages.filter((p) => p.id !== pid);
+      rest.splice(toIndex, 0, d.project.doc.pages.find((p) => p.id === pid)!);
+      return { ...d, project: { ...d.project, doc: { ...d.project.doc, pages: rest } } };
+    });
+    try {
+      await api.post(`/api/projects/${project.id}/pages/${pid}/move`, { toIndex });
+    } catch (e) {
+      toast((e as Error).message, 'error');
+      versionRef.current = -1;
+    }
+    await loadProject();
+  };
+  /** Where the dragged page would land (its index among the others), or null when it would stay put. */
+  const dropIndex = (d: typeof drag) => {
+    if (!d || d.over === undefined) return null;
+    const at = pages.filter((p) => p.id !== d.id).findIndex((p) => p.id === d.over);
+    if (at < 0) return null;
+    const to = at + (d.after ? 1 : 0);
+    return to === pages.findIndex((p) => p.id === d.id) ? null : to;
+  };
+  const pendingDrop = dropIndex(drag);
 
   const doExport = async (format: 'html' | 'pdf' | 'pdf-image' | 'pptx' | 'zip') => {
     if (!project) return;
@@ -491,18 +520,64 @@ export function EditorPage() {
       ) : (
         <div className="editor-body">
           <aside className="pages-rail">
-            <div className="rail-head">页面 <span className="muted">{pages.length}</span></div>
-            <div className="rail-list">
+            <div className="rail-head" title={preview ? undefined : '拖动缩略图调整页面顺序（也可聚焦后按 Alt + ↑ ↓）'}>
+              页面 <span className="muted">{pages.length}</span>
+            </div>
+            <div
+              className="rail-list"
+              onDragLeave={(e) => {
+                if (drag && !e.currentTarget.contains(e.relatedTarget as Node)) setDrag({ id: drag.id });
+              }}
+            >
               {pages.map((p, i) => (
-                <div key={p.id} className={`rail-item ${p.id === currentPage?.id ? 'on' : ''}`} onClick={() => setPageId(p.id)} data-testid="page-thumb">
+                <div
+                  key={p.id}
+                  className={[
+                    'rail-item',
+                    p.id === currentPage?.id ? 'on' : '',
+                    drag?.id === p.id ? 'dragging' : '',
+                    pendingDrop !== null && drag?.over === p.id ? (drag.after ? 'drop-after' : 'drop-before') : '',
+                  ].join(' ').trim()}
+                  onClick={() => setPageId(p.id)}
+                  tabIndex={0}
+                  aria-label={`第 ${i + 1} 页${preview ? '' : '，拖动或按 Alt + 上下方向键调整顺序'}`}
+                  draggable={!preview}
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', `第 ${i + 1} 页`);
+                    setDrag({ id: p.id });
+                  }}
+                  onDragEnd={() => setDrag(null)}
+                  onDragOver={(e) => {
+                    if (!drag) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    const box = e.currentTarget.getBoundingClientRect();
+                    const after = e.clientY > box.top + box.height / 2;
+                    if (drag.over !== p.id || drag.after !== after) setDrag({ id: drag.id, over: p.id, after });
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDrag(null);
+                    if (pendingDrop !== null && drag) movePageTo(drag.id, pendingDrop);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') setPageId(p.id);
+                    if (preview || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                    e.preventDefault();
+                    const to = i + (e.key === 'ArrowUp' ? -1 : 1);
+                    if (to < 0 || to >= pages.length) return;
+                    const el = e.currentTarget;
+                    movePageTo(p.id, to).then(() => el.isConnected && el.focus());
+                  }}
+                  data-testid="page-thumb"
+                >
                   <span className="rail-no">{i + 1}</span>
                   <div className="rail-thumb" style={{ aspectRatio: `${doc!.width} / ${doc!.height}` }}>
                     <SlideFrame doc={doc} pageId={p.id} width={doc!.width} height={doc!.height} />
                   </div>
                   {!preview && (
                     <div className="rail-ops" onClick={(e) => e.stopPropagation()}>
-                      <button title="上移" disabled={i === 0} onClick={() => pageOp('move', p.id, i - 1)}>↑</button>
-                      <button title="下移" disabled={i === pages.length - 1} onClick={() => pageOp('move', p.id, i + 1)}>↓</button>
                       <button title="复制此页" onClick={() => pageOp('duplicate', p.id)}>⧉</button>
                       <button title="删除此页" disabled={pages.length <= 1} onClick={() => pageOp('delete', p.id)} data-testid="page-delete">🗑</button>
                     </div>
