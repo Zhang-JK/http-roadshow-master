@@ -128,7 +128,8 @@ export interface JobStats {
   completionTokens: number;
   estimated: boolean;
   tokensPerSec: number | null;
-  live: { stage?: string; endpoint: string; queued: boolean; tokens: number; tokensPerSec: number | null; waitingMs: number } | null;
+  /** The calls running now, together; `parallel` is how many (page batches are written side by side). */
+  live: { stage?: string; endpoint: string; queued: boolean; tokens: number; tokensPerSec: number | null; waitingMs: number; parallel: number } | null;
 }
 
 export interface JobQuestion {

@@ -94,6 +94,7 @@ export function ModelsPage() {
     contextTokens: number;
     generateMode: 'files' | 'single';
     genPagesPerCall: number;
+    genParallel: number;
     askUser: boolean;
     askTimeoutMinutes: number;
   } | null>(null);
@@ -460,6 +461,12 @@ export function ModelsPage() {
               <label className="field inline" title="分步生成时每次调用生成的页数；模型较慢或页面复杂时调小">
                 <span>每次生成页数</span>
                 <input type="number" min="1" max="10" defaultValue={settings.genPagesPerCall} onBlur={(e) => saveSettings({ genPagesPerCall: Number(e.target.value) })} data-testid="pages-per-call" />
+              </label>
+            )}
+            {settings.generateMode !== 'single' && (
+              <label className="field inline" title="规划好 README、样式与每页内容后，同时生成的页面批次数（1 = 逐批生成）；实际并行数不超过所有接入点的并发上限之和">
+                <span>并行生成批次</span>
+                <input type="number" min="1" max="16" defaultValue={settings.genParallel} onBlur={(e) => saveSettings({ genParallel: Number(e.target.value) })} data-testid="gen-parallel" />
               </label>
             )}
             <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">

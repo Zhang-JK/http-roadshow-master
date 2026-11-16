@@ -311,9 +311,14 @@ export async function startMockLlm(opts: MockOptions = {}) {
   /** Page batches being answered right now, and the most at once (MANY_PAGES replies take a moment). */
   let pagesNow = 0;
   let pagesMax = 0;
+  const setOnline = () => {
+    offline = false;
+    for (const k of page5Down) page5Healed.add(k);
+    page5Down.clear();
+  };
   const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/__mock/online') {
-      offline = false;
+      setOnline();
       res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}');
       return;
     }
@@ -516,11 +521,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
     get pagesAtOnce() {
       return pagesMax;
     },
-    setOnline: () => {
-      offline = false;
-      for (const k of page5Down) page5Healed.add(k);
-      page5Down.clear();
-    },
+    setOnline,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }

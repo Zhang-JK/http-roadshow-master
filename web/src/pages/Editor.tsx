@@ -21,7 +21,8 @@ function progressText(j: Job): string {
   if (!j.progress) return `排队中 · 已等待 ${elapsed(j.createdAt)}`;
   const parts = [j.progress.stage];
   if (live && !live.tokens && live.waitingMs > 5000) parts.push(`等待模型响应 ${duration(live.waitingMs)}`);
-  if (live?.tokensPerSec) parts.push(speed(live.tokensPerSec));
+  if (live?.tokensPerSec) parts.push(`${live.parallel > 1 ? `${live.parallel} 路并行，合计 ` : ''}${speed(live.tokensPerSec)}`);
+  else if (live && live.parallel > 1) parts.push(`${live.parallel} 路并行`);
   if (j.stats && (j.stats.promptTokens || j.stats.completionTokens)) {
     parts.push(`输入 ${num(j.stats.promptTokens)} / 输出 ${num(j.stats.completionTokens)} tokens`);
   } else if (j.progress.chars) parts.push(`${j.progress.chars.toLocaleString()} 字符`);

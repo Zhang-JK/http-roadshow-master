@@ -203,6 +203,7 @@ export function SessionsPage() {
                     </td>
                     <td className="nowrap" data-testid="session-speed">
                       {lv?.tokensPerSec ? <strong>{speed(lv.tokensPerSec)}</strong> : speed(s.stats?.tokensPerSec)}
+                      {lv && lv.parallel > 1 && <div className="muted small" data-testid="session-parallel">{lv.parallel} 路并行{lv.tokensPerSec ? '合计' : ''}</div>}
                       {lv?.tokensPerSec && s.stats?.tokensPerSec ? <div className="muted small">平均 {speed(s.stats.tokensPerSec)}</div> : null}
                     </td>
                   </tr>
