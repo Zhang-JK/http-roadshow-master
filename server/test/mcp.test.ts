@@ -62,6 +62,16 @@ async function connect(auth = token) {
   return client;
 }
 
+const TOOL_NAMES = [
+  'list_roadshow_templates',
+  'create_roadshow_slides',
+  'get_roadshow_slides_status',
+  'list_roadshow_slides',
+  'get_roadshow_slides',
+  'update_roadshow_slides',
+  'delete_roadshow_slides',
+];
+
 const textOf = (r: any) => (r.content as any[]).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
 
 beforeAll(async () => {
@@ -160,7 +170,7 @@ describe('mcp http layer', () => {
     expect(note.body).toBe('');
     const batch = (await rpc([{ jsonrpc: '2.0', id: 'a', method: 'ping' }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 'b', method: 'tools/list' }])).json();
     expect(batch.map((m: any) => m.id)).toEqual(['a', 'b']);
-    expect(batch[1].result.tools.map((t: any) => t.name)).toEqual(['list_roadshow_templates', 'create_roadshow_slides', 'get_roadshow_slides_status']);
+    expect(batch[1].result.tools.map((t: any) => t.name)).toEqual(TOOL_NAMES);
     expect((await rpc({ jsonrpc: '2.0', id: 2, method: 'server/discover' })).json().error.code).toBe(-32601);
     expect((await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'nope', arguments: {} } })).json().error.code).toBe(-32602);
     expect((await rpc({ id: 4, method: 'ping' })).json().error.code).toBe(-32600);
@@ -198,11 +208,16 @@ describe('mcp tools through the SDK client', () => {
   it('lists the tools with the ready templates as choices', async () => {
     expect(client.getServerVersion()).toMatchObject({ name: 'roadshow' });
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name)).toEqual(['list_roadshow_templates', 'create_roadshow_slides', 'get_roadshow_slides_status']);
+    expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES);
     const create = tools.find((t) => t.name === 'create_roadshow_slides')!;
     expect(create.inputSchema.required).toEqual(['templateId', 'name', 'content']);
     expect((create.inputSchema.properties as any).templateId.enum).toEqual([templateId]);
     expect(create.description).toMatch(/test data|exact values/);
+    const update = tools.find((t) => t.name === 'update_roadshow_slides')!;
+    expect(update.inputSchema.required).toEqual(['projectId']);
+    expect((update.inputSchema.properties as any).files.items).toEqual((create.inputSchema.properties as any).files.items);
+    expect(tools.find((t) => t.name === 'delete_roadshow_slides')!.annotations).toMatchObject({ destructiveHint: true, readOnlyHint: false });
+    expect(tools.find((t) => t.name === 'list_roadshow_slides')!.annotations).toMatchObject({ readOnlyHint: true });
   });
 
   it('list_roadshow_templates describes each template, with optional covers', async () => {
@@ -330,17 +345,234 @@ describe('mcp tools through the SDK client', () => {
     expect((await req('GET', '/api/projects?type=deck', admin)).json.projects.length).toBe(projects);
   });
 
+  const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as any;
+
+  async function untilSettled(id: string) {
+    let status: any;
+    for (let i = 0; i < 30; i++) {
+      status = (await call('get_roadshow_slides_status', { projectId: id, waitSeconds: 5 })).structuredContent;
+      if (status.status !== 'generating' && status.status !== 'updating') return status;
+    }
+    throw new Error(`deck ${id} still ${status.status}`);
+  }
+
+  let aliceDeck = '';
+
+  it('list_roadshow_slides finds the decks MCP created, with dates, authors and history', async () => {
+    const a = await req('POST', '/api/projects', alice, { type: 'deck', templateId, name: 'Alice 的季度汇报', content: '网页上创建的材料' });
+    aliceDeck = a.json.project.id;
+    expect((await waitJob(a.json.job.id)).status).toBe('done');
+    expect((await req('PATCH', `/api/projects/${projectId}`, alice, { name: '搜索服务 v2 压测报告（评审版）' })).status).toBe(200);
+
+    const r = await call('list_roadshow_slides', {});
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent.total).toBe(1);
+    const [deck] = r.structuredContent.decks;
+    expect(deck).toMatchObject({
+      projectId,
+      name: '搜索服务 v2 压测报告（评审版）',
+      status: 'ready',
+      version: 2,
+      pageCount: 3,
+      size: '1920×1080',
+      template: { templateId, name: '测试报告模板' },
+      purpose: '季度测试评审',
+      audience: '研发负责人',
+      createdBy: 'MCP',
+      updatedBy: 'alice',
+      historyCount: 2,
+      editorUrl: `${base}/p/${projectId}`,
+    });
+    expect(deck.contentPreview).toContain('测试目标');
+    expect(Date.parse(deck.createdAt)).toBeGreaterThan(0);
+    expect(Date.parse(deck.updatedAt)).toBeGreaterThanOrEqual(Date.parse(deck.createdAt));
+    expect(deck.history).toEqual([
+      { version: 1, action: 'created', by: 'MCP', at: expect.any(String), request: expect.stringContaining('name: 搜索服务 v2 压测报告') },
+      { version: 2, action: 'renamed', by: 'alice', at: expect.any(String), request: '重命名为「搜索服务 v2 压测报告（评审版）」' },
+    ]);
+    expect(JSON.stringify(r.structuredContent)).not.toContain(aliceDeck);
+
+    expect((await call('list_roadshow_slides', { query: '压测' })).structuredContent.total).toBe(1);
+    expect((await call('list_roadshow_slides', { query: '季度测试' })).structuredContent.total).toBe(1);
+    const none = await call('list_roadshow_slides', { query: 'Alice' });
+    expect(none.structuredContent).toMatchObject({ total: 0, decks: [] });
+    expect(textOf(none)).toMatch(/No deck matches "Alice"/);
+    expect((await call('list_roadshow_slides', { offset: 1 })).structuredContent).toMatchObject({ total: 1, decks: [] });
+    expect((await call('list_roadshow_slides', { limit: 0 })).isError).toBe(true);
+  });
+
+  it('get_roadshow_slides returns the original request, the files and the full history', async () => {
+    const r = await call('get_roadshow_slides', { projectId });
+    expect(r.isError).toBeFalsy();
+    const d = r.structuredContent;
+    expect(d).toMatchObject({ projectId, status: 'ready', version: 2, createdBy: 'MCP', updatedBy: 'alice', pageCount: 3, size: '1920×1080' });
+    expect(d.originalRequest).toEqual({
+      templateId,
+      name: '搜索服务 v2 压测报告',
+      content: '## 测试目标\n验证 v2 在 7000 QPS 下的延迟。ASK_ME\n## 结果\n见 results.csv 与 latency.png：p99 从 48 ms 降到 31 ms。',
+      purpose: '季度测试评审',
+      audience: '研发负责人',
+      pageCount: 3,
+      notes: '每页标注数据来源',
+    });
+    expect(d.files.map((f: any) => [f.filename, f.role, f.uploadedBy])).toEqual([
+      ['latency.png', 'embed', 'MCP'],
+      ['flame.png', 'reference', 'MCP'],
+      ['results.csv', 'reference', 'MCP'],
+      ['report.md', 'reference', 'MCP'],
+    ]);
+    expect(d.history.map((h: any) => [h.version, h.action, h.by])).toEqual([
+      [1, 'created', 'MCP'],
+      [2, 'renamed', 'alice'],
+    ]);
+    expect(d.history[0].request).toContain('p99 从 48 ms 降到 31 ms');
+    expect(d.lastRequest).toMatchObject({ kind: 'create', status: 'done', requestedBy: 'MCP', resultVersion: 1 });
+    expect(d.failedRequests).toBeUndefined();
+    expect(d.pages).toHaveLength(3);
+    expect(Object.keys(d.downloads)).toEqual(['html', 'pdf', 'pdf-image', 'pptx', 'zip']);
+    expect((await call('get_roadshow_slides', { projectId: aliceDeck })).isError).toBe(true);
+    expect((await call('get_roadshow_slides', { projectId: templateId })).isError).toBe(true);
+  });
+
+  it('update_roadshow_slides applies new data as a new version, with the files, and never asks', async () => {
+    const before = mock.calls.length;
+    const r = await call('update_roadshow_slides', {
+      projectId,
+      instructions: '## 复测结果 ASK_ME\n用 rerun.csv 的数据替换结果页：p99 从 31 ms 进一步降到 28 ms，并更新结论。',
+      files: [{ filename: 'rerun.csv', text: 'case,p99_ms\nv2.1,28\n' }],
+    });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ projectId, status: 'updating', version: 2, scope: 'deck', jobId: expect.any(String) });
+    expect(r.structuredContent.files).toEqual([expect.objectContaining({ filename: 'rerun.csv', kind: 'document', role: 'reference' })]);
+
+    const status = await untilSettled(projectId);
+    expect(status).toMatchObject({ status: 'ready', version: 3, pageCount: 3 });
+    expect(status.lastRequest).toMatchObject({
+      jobId: r.structuredContent.jobId,
+      kind: 'update',
+      status: 'done',
+      requestedBy: 'MCP',
+      scope: 'deck',
+      resultVersion: 3,
+      request: expect.stringContaining('复测结果'),
+    });
+    expect(status.downloads).toBeDefined();
+
+    const calls = mock.calls.slice(before);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0].text).toContain('p99 从 31 ms 进一步降到 28 ms');
+    expect(calls[0].text).toContain('rerun.csv');
+    expect(calls.every((c) => !(c.body.tools ?? []).some((t: any) => t.function.name === 'ask_user'))).toBe(true);
+    const job = (await req('GET', `/api/jobs/${r.structuredContent.jobId}`, admin)).json.job;
+    expect(job).toMatchObject({ kind: 'edit', status: 'done', questions: [], request: { askUser: false, scope: 'global' } });
+    expect(job.request.attachmentIds).toHaveLength(1);
+    expect(projectDocCss()).toContain('#111827');
+
+    const d = (await call('get_roadshow_slides', { projectId })).structuredContent;
+    expect(d.history.at(-1)).toMatchObject({ version: 3, action: 'updated', by: 'MCP', request: expect.stringContaining('复测结果') });
+    expect(d.files.map((f: any) => f.filename)).toContain('rerun.csv');
+    expect(d.originalRequest.content).not.toContain('复测结果');
+  });
+
+  function projectDocCss() {
+    const row = db.prepare('SELECT doc FROM projects WHERE id = ?').get(projectId) as { doc: string };
+    return JSON.stringify(JSON.parse(row.doc).css);
+  }
+
+  it('update_roadshow_slides can change one page and rename the deck', async () => {
+    const r = await call('update_roadshow_slides', { projectId, page: 2, instructions: '第 2 页补充复测环境说明', name: '搜索服务 v2.1 压测报告' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ name: '搜索服务 v2.1 压测报告', status: 'updating', scope: 'page 2', version: 4 });
+    const status = await untilSettled(projectId);
+    expect(status).toMatchObject({ status: 'ready', name: '搜索服务 v2.1 压测报告', version: 5, lastRequest: { status: 'done', scope: 'page' } });
+    const doc = JSON.parse((db.prepare('SELECT doc FROM projects WHERE id = ?').get(projectId) as { doc: string }).doc);
+    expect(doc.title).toBe('搜索服务 v2.1 压测报告');
+    expect(doc.pages[1].html).toContain('整页新增段落');
+    expect(doc.pages[0].html).not.toContain('整页新增段落');
+    const { history } = (await call('get_roadshow_slides', { projectId })).structuredContent;
+    expect(history.slice(-2)).toEqual([
+      expect.objectContaining({ version: 4, action: 'renamed', by: 'MCP' }),
+      expect.objectContaining({ version: 5, action: 'updated', by: 'MCP', page: 2, request: '第 2 页补充复测环境说明' }),
+    ]);
+
+    const renamed = await call('update_roadshow_slides', { projectId, name: '搜索服务 v2.1 压测报告（终版）' });
+    expect(renamed.structuredContent).toMatchObject({ status: 'ready', version: 6, name: '搜索服务 v2.1 压测报告（终版）' });
+    expect(renamed.structuredContent.jobId).toBeUndefined();
+  });
+
+  it('a failed update leaves the deck unchanged and says why', async () => {
+    const r = await call('update_roadshow_slides', { projectId, instructions: 'NO_CHANGE 看看还有什么要改' });
+    expect(r.isError).toBeFalsy();
+    const status = await untilSettled(projectId);
+    expect(status).toMatchObject({ status: 'ready', version: 6, lastRequest: { kind: 'update', status: 'error', error: expect.stringContaining('模型没有做任何修改') } });
+    expect(status.next).toMatch(/failed and the deck is unchanged \(version 6\)/);
+    const d = (await call('get_roadshow_slides', { projectId })).structuredContent;
+    expect(d.failedRequests).toEqual([expect.objectContaining({ jobId: r.structuredContent.jobId, kind: 'update', request: 'NO_CHANGE 看看还有什么要改' })]);
+    expect(d.history).toHaveLength(6);
+  });
+
+  it('update_roadshow_slides reports bad arguments and refuses a second change while one runs', async () => {
+    const bad = async (args: Record<string, unknown>) => {
+      const r = await call('update_roadshow_slides', args);
+      expect(r.isError).toBe(true);
+      return textOf(r);
+    };
+    const versions = () => (db.prepare('SELECT COUNT(*) AS n FROM project_versions WHERE project_id = ?').get(projectId) as { n: number }).n;
+    const jobs = () => (db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE project_id = ?').get(projectId) as { n: number }).n;
+    const [v0, j0] = [versions(), jobs()];
+    expect(await bad({ projectId })).toMatch(/instructions .*name/);
+    expect(await bad({ projectId, name: '  ' })).toMatch(/"name" must not be empty/);
+    expect(await bad({ projectId, page: 2, name: '只改名' })).toMatch(/go with instructions/);
+    expect(await bad({ projectId, name: '只改名', files: [{ filename: 'a.md', text: 'a' }] })).toMatch(/go with instructions/);
+    expect(await bad({ projectId, instructions: 'x', page: 9 })).toMatch(/"page" must be from 1 to 3/);
+    expect(await bad({ projectId, instructions: 'x', page: 0 })).toMatch(/page/);
+    expect(await bad({ projectId, instructions: 'x', files: [{ filename: 'tool.exe', data: PNG_1x1 }] })).toMatch(/unsupported file type/);
+    expect(await bad({ projectId: aliceDeck, instructions: 'x' })).toMatch(/No deck .* created through MCP/);
+    expect(await bad({ projectId: templateId, name: 'x' })).toMatch(/No deck/);
+    expect(await bad({ projectId: 'missing', instructions: 'x' })).toMatch(/list_roadshow_slides/);
+    expect([versions(), jobs()]).toEqual([v0, j0]);
+
+    const change = (id: number, instructions: string) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'update_roadshow_slides', arguments: { projectId, instructions } } });
+    const [first, second] = (await rpc([change(1, '第一个修改'), change(2, '第二个修改')])).json();
+    expect(first.result.isError).toBeFalsy();
+    expect(second.result.isError).toBe(true);
+    expect(second.result.content[0].text).toMatch(new RegExp(`still running \\(jobId ${first.result.structuredContent.jobId}\\)`));
+    expect(await untilSettled(projectId)).toMatchObject({ status: 'ready', version: 7, lastRequest: { status: 'done', request: '第一个修改' } });
+  });
+
+  it('delete_roadshow_slides removes the deck with its history and files', async () => {
+    const { assetPath } = await import('../src/assets.js');
+    const assets = (db.prepare('SELECT id FROM assets WHERE project_id = ?').all(projectId) as { id: string }[]).map((a) => assetPath(a.id));
+    expect(assets.length).toBeGreaterThan(4);
+    expect(assets.every((f) => fs.existsSync(f))).toBe(true);
+    expect((await call('delete_roadshow_slides', { projectId: aliceDeck })).isError).toBe(true);
+    expect((await call('delete_roadshow_slides', { projectId: templateId })).isError).toBe(true);
+
+    const r = await call('delete_roadshow_slides', { projectId });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toEqual({ projectId, name: '搜索服务 v2.1 压测报告（终版）', deleted: true });
+    expect(assets.some((f) => fs.existsSync(f))).toBe(false);
+    expect((await req('GET', `/api/projects/${projectId}`, admin)).status).toBe(404);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM project_versions WHERE project_id = ?').get(projectId)).toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE project_id = ?').get(projectId)).toEqual({ n: 0 });
+    expect((await call('list_roadshow_slides', {})).structuredContent.total).toBe(0);
+    expect(textOf(await call('list_roadshow_slides', {}))).toMatch(/No deck has been created through MCP yet/);
+    expect((await call('get_roadshow_slides_status', { projectId })).isError).toBe(true);
+    expect((await call('delete_roadshow_slides', { projectId })).isError).toBe(true);
+    expect((await req('GET', `/api/projects/${aliceDeck}`, admin)).status).toBe(200);
+  });
+
   it('switching MCP off or replacing the token locks clients out', async () => {
     await req('PATCH', `/api/users/${mcpId}`, admin, { mcpEnabled: false });
     await expect(client.listTools()).rejects.toThrow(/403|允许 MCP 请求/);
     await req('PATCH', `/api/users/${mcpId}`, admin, { mcpEnabled: true });
-    expect((await client.listTools()).tools).toHaveLength(3);
+    expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length);
     const old = token;
     token = (await req('POST', `/api/users/${mcpId}/token`, admin)).json.token;
     expect(token).not.toBe(old);
     await expect(client.listTools()).rejects.toThrow(/401|令牌/);
     const fresh = await connect(token);
-    expect((await fresh.listTools()).tools).toHaveLength(3);
+    expect((await fresh.listTools()).tools).toHaveLength(TOOL_NAMES.length);
     expect((await req('DELETE', `/api/users/${mcpId}/token`, admin)).json.user.tokenHint).toBeNull();
     await expect(fresh.listTools()).rejects.toThrow(/401|令牌/);
     await fresh.close();

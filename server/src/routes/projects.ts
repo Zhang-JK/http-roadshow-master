@@ -9,11 +9,13 @@ import {
   cleanTypedText,
   commitVersion,
   createProject,
+  deleteProject,
   editElementText,
   getProject,
   MAX_ELEMENT_TEXT,
   jobProgress,
   projectDoc,
+  renameProject,
   resumeJob,
   retryJob,
   startEdit,
@@ -208,14 +210,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     const { name } = (req.body ?? {}) as { name?: string };
     const newName = String(name ?? '').trim();
     if (!newName) throw new HttpError(400, '名称不能为空');
-    db.prepare('UPDATE projects SET name = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(newName, user.id, Date.now(), p.id);
-    const doc = projectDoc(p);
-    if (doc && doc.pages.length) {
-      await withProjectLock(p.id, () => {
-        const latest = projectDoc(getProject(db, p.id)!)!;
-        return commitVersion(db, p.id, user.id, { ...latest, title: newName }, { action: 'rename', scope: 'global', prompt: `重命名为「${newName}」` });
-      });
-    }
+    await renameProject(db, p.id, user.id, newName);
     return { project: publicProject(getProject(db, p.id)!, userNames(db), false) };
   });
 
@@ -226,9 +221,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
       const used = db.prepare('SELECT COUNT(*) AS c FROM projects WHERE template_id = ?').get(p.id) as { c: number };
       if (used.c > 0) throw new HttpError(409, `该模板已被 ${used.c} 份路演材料使用，无法删除`);
     }
-    const ids = db.prepare('SELECT id FROM assets WHERE project_id = ?').all(p.id) as { id: string }[];
-    for (const a of ids) fs.rmSync(assetPath(a.id), { force: true });
-    db.prepare('DELETE FROM projects WHERE id = ?').run(p.id);
+    deleteProject(db, p.id);
     return { ok: true };
   });
 

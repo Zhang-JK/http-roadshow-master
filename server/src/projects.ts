@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { nanoid } from 'nanoid';
 import type { DB } from './db.js';
 import { getSettings } from './db.js';
@@ -26,7 +27,7 @@ import {
 import { logEdit, plannedPages, readmeFromBrief } from './files.js';
 import { checkProject } from './projectCheck.js';
 import { describeGenerateState, generateFiles, type GenerateState } from './generate.js';
-import { assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
+import { assetPath, assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
 import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
@@ -98,6 +99,8 @@ export interface EditInput {
   elementIds?: string[];
   /** Project assets uploaded together with this edit; sent to the model with their images. */
   attachmentIds?: string[];
+  /** False for callers that cannot answer (MCP): the model must not pause to ask the user. */
+  askUser?: false;
 }
 
 /** Live progress of running jobs (characters streamed so far); kept in memory only. */
@@ -342,6 +345,11 @@ const toolStage = (name: string, args: Record<string, unknown>, phase = '自检'
     ? '等待用户回答问题'
     : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
 
+/** Whether the job may pause for an answer: asking is on in the settings and the requester can answer. */
+function canAsk(db: DB, job: JobRow): boolean {
+  return getSettings(db).askUser !== false && JSON.parse(job.request || '{}').askUser !== false;
+}
+
 /**
  * ask_user while the job may pause for an answer (off in the settings: not offered), and for page and
  * element edits extend_scope. Each question and answer is kept with the job.
@@ -352,7 +360,7 @@ function askToolsFor(db: DB, job: JobRow, extra: { draft?: Draft; prompt?: strin
   const minutes = Math.max(0.01, Number(settings.askTimeoutMinutes) || 30);
   const qa: QaEntry[] = job.questions ? JSON.parse(job.questions) : [];
   return createAskTools({
-    ask: settings.askUser === false ? undefined : (q) => askQuestion({ id: jobId, projectId: job.project_id }, q, minutes * 60_000),
+    ask: canAsk(db, job) ? (q) => askQuestion({ id: jobId, projectId: job.project_id }, q, minutes * 60_000) : undefined,
     timeoutMinutes: minutes,
     onAsked: (entry) => {
       qa.push(entry);
@@ -593,7 +601,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
       const ft = fileToolsFor(db, rows);
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
-      const ask = JSON.parse(job.request || '{}').askUser === false ? undefined : askToolsFor(db, job);
+      const ask = askToolsFor(db, job);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;
@@ -829,7 +837,7 @@ async function prepareEdit(db: DB, job: JobRow, input: EditInput, fileIds?: Map<
       elements,
       screenshot,
       attachments,
-      ask: settings.askUser !== false,
+      ask: canAsk(db, job),
       explicitAll: asksForAll(input.prompt),
     },
     assets,
@@ -893,6 +901,24 @@ export function resumeJob(db: DB, failed: JobRow, userId: number): JobRow {
   if (job.kind === 'create') runGeneration(db, job, owner, cp.data);
   else runEdit(db, job, owner, cp.data);
   return job;
+}
+
+/** Renames the project; a generated one also gets a version with the new title. */
+export async function renameProject(db: DB, projectId: string, userId: number, name: string) {
+  db.prepare('UPDATE projects SET name = ?, updated_by = ?, updated_at = ? WHERE id = ?').run(name, userId, Date.now(), projectId);
+  const p = getProject(db, projectId);
+  if (!p || !projectDoc(p)?.pages.length) return;
+  await withProjectLock(projectId, () => {
+    const latest = projectDoc(getProject(db, projectId)!)!;
+    return commitVersion(db, projectId, userId, { ...latest, title: name }, { action: 'rename', scope: 'global', prompt: `重命名为「${name}」` });
+  });
+}
+
+/** Deletes the project with its versions, jobs and uploaded files. */
+export function deleteProject(db: DB, projectId: string) {
+  const ids = db.prepare('SELECT id FROM assets WHERE project_id = ?').all(projectId) as { id: string }[];
+  for (const a of ids) fs.rmSync(assetPath(a.id), { force: true });
+  db.prepare('DELETE FROM projects WHERE id = ?').run(projectId);
 }
 
 export function applyManual(
