@@ -281,6 +281,13 @@ textarea { resize: vertical; min-height: 40px; }
 .rail-item:hover .rail-thumb { border-color: #c7cbe0; }
 .rail-item.on .rail-thumb { border-color: var(--primary); }
 .rail-item.on .rail-no { color: var(--primary); font-weight: 700; }
+.rail-item[draggable="true"] { cursor: grab; }
+.rail-item:focus-visible { outline: none; }
+.rail-item:focus-visible .rail-thumb { border-color: var(--primary); box-shadow: 0 0 0 2px #c7d2fe; }
+.rail-item.dragging { opacity: .4; }
+.rail-item.drop-before::before, .rail-item.drop-after::after { content: ''; position: absolute; left: 24px; right: 0; height: 3px; border-radius: 2px; background: var(--primary); }
+.rail-item.drop-before::before { top: -7px; }
+.rail-item.drop-after::after { bottom: -7px; }
 .rail-ops { position: absolute; right: 4px; bottom: 4px; display: none; gap: 2px; background: rgba(255,255,255,.95); border-radius: 6px; padding: 2px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
 .rail-item:hover .rail-ops { display: flex; }
 .rail-ops button { border: 0; background: none; cursor: pointer; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
