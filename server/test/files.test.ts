@@ -13,7 +13,7 @@ import {
   readmeBody,
   readmeFromBrief,
 } from '../src/files.js';
-import { generateFiles, type GenerateDeps } from '../src/generate.js';
+import { generateFiles, type GenerateDeps, type GenerateState } from '../src/generate.js';
 import type { ChatMessage, ChatResult } from '../src/llm.js';
 
 const doc = (over: Partial<DeckDoc> = {}): DeckDoc =>
@@ -264,6 +264,39 @@ describe('staged generation', () => {
     ]);
     const d = await generateFiles({ base, kind: 'deck', brief: { name: 'T', content: 'c' }, template, assets: [] }, ok.deps);
     expect(cssFiles(d.css)).toEqual(cssFiles(template.css));
+  });
+
+  it('tries a failed page batch again, and one that keeps failing does not stop the other batches', async () => {
+    const flaky = (fails: (first: number, attempt: number) => boolean) => {
+      const tries = new Map<number, number>();
+      const s = scripted([
+        () => result(plan(4)),
+        (m) => {
+          const b = batchOf(m);
+          const n = (tries.get(b[0]) ?? 0) + 1;
+          tries.set(b[0], n);
+          if (fails(b[0], n)) throw new Error(`模型掉线 ${b[0]}`);
+          return result(b.map(page).join('\n'));
+        },
+      ]);
+      let saved: GenerateState | undefined;
+      Object.assign(s.deps, { parallel: 4, onCheckpoint: (g: GenerateState) => (saved = g) });
+      return { ...s, tries, saved: () => saved };
+    };
+    const input = { base, kind: 'deck' as const, brief: { name: 'T', content: 'c' }, template: null, assets: [] };
+
+    // Page 2 fails twice, then works: the deck is complete and the other pages were each asked for once.
+    const a = flaky((p, n) => p === 2 && n < 3);
+    const d = await generateFiles(input, a.deps);
+    expect(d.pages.map((p) => p.file)).toEqual([1, 2, 3, 4].map((n) => `pages/p${n}.html`));
+    expect([...a.tries.entries()].sort()).toEqual([[1, 1], [2, 3], [3, 1], [4, 1]]);
+    expect(a.stages).toContain('生成页面：第 2 页（共 4 页）（第 3 次尝试）');
+
+    // Page 3 never works: every other page is still written and kept, then the step fails.
+    const b = flaky((p) => p === 3);
+    await expect(generateFiles(input, b.deps)).rejects.toThrow(/^第 3 页生成失败（每批已尝试 3 次），其余页面已完成并保存：模型掉线 3$/);
+    expect(b.tries.get(3)).toBe(3);
+    expect(b.saved()).toMatchObject({ step: 'pages', done: ['pages/p1.html', 'pages/p2.html', 'pages/p4.html'] });
   });
 
   it('fails clearly when the plan never names any pages', async () => {

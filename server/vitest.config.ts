@@ -4,5 +4,6 @@ export default defineConfig({
   test: {
     // Jobs render in headless Chrome (self-check, delivery check); several run inside one test.
     testTimeout: 30_000,
+    env: { PAGE_RETRY_DELAY_MS: '20' },
   },
 });

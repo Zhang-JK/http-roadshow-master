@@ -963,6 +963,7 @@ test('one page batch fails while the others are written in parallel; continuing 
   await expect(page).toHaveURL(/\/p\//);
   await expect(page.locator('[data-testid=job-progress]')).toContainText('页同时进行', { timeout: 30_000 });
   await expect(page.locator('.gen-state h2')).toHaveText('生成失败', { timeout: 60_000 });
+  await expect(page.locator('.gen-state .error-box')).toContainText('第 5–6 页生成失败（每批已尝试 3 次），其余页面已完成并保存');
   await expect(page.locator('.gen-state .error-box')).toContainText('model offline (MOCK)');
   await expect(page.locator('.toast-error')).toContainText('已保存进度，可从中断处继续');
   await expect(page.locator('[data-testid=resume-generation-info]')).toContainText('已保存进度：已完成规划与 5/7 页');

@@ -119,6 +119,17 @@ describe('staged multi-file generation', () => {
     expect(v.summary.pagesAdded).toHaveLength(7);
   });
 
+  it('tries a page batch again when its call fails, while the other batches carry on', async () => {
+    const { id, job, calls } = await create({ name: '重试模板', notes: 'MANY_PAGES PAGE3_FAIL_ONCE' });
+    expect(job.status).toBe('done');
+    expect(calls.filter(isPages)).toHaveLength(4);
+    expect(savedDoc(id).pages.map((p) => p.html.match(/第(\d)页标题/)![1])).toEqual(['1', '2', '3', '4', '5', '6', '7']);
+    const rows = db.prepare(`SELECT stage, status FROM llm_calls WHERE job_id = ? AND stage LIKE '生成页面%' ORDER BY id`).all(job.id) as { stage: string; status: string }[];
+    expect(rows.filter((r) => r.status === 'error')).toEqual([{ stage: '生成页面：第 3–4 页（共 7 页）', status: 'error' }]);
+    expect(rows).toContainEqual({ stage: '生成页面：第 3–4 页（共 7 页）（第 2 次尝试）', status: 'ok' });
+    expect(rows.filter((r) => r.status === 'ok')).toHaveLength(4);
+  });
+
   it('recovers from a plan and a page batch cut off by the output limit', async () => {
     await req('PUT', '/api/settings', { genParallel: 1 });
     try {

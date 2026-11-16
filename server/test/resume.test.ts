@@ -129,7 +129,10 @@ describe('continuing a failed job where it stopped', () => {
       const r = await req('POST', '/api/projects', alice, { type: 'template', style: '简约', name: '并行断线', notes: 'MANY_PAGES PAGE5_DOWN' });
       const failed = await waitJob(r.json.job.id);
       expect(failed).toMatchObject({ status: 'error' });
+      expect(failed.error).toContain('第 5–6 页生成失败（每批已尝试 3 次），其余页面已完成并保存');
       expect(failed.error).toContain('model offline (MOCK)');
+      const tries = db.prepare(`SELECT status FROM llm_calls WHERE job_id = ? AND stage LIKE '生成页面：第 5–6 页%'`).all(failed.id) as { status: string }[];
+      expect(tries.map((t) => t.status)).toEqual(['error', 'error', 'error']);
       // The other batches finished before the job stopped, and their pages were kept.
       expect((await failedJob(r.json.project.id, failed.id)).resume.label).toBe('已完成规划与 5/7 页');
 

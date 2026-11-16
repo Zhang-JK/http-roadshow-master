@@ -18,6 +18,9 @@ export const MAX_PLAN_FIXES = 3;
 /** Replies without a page before it is left to the delivery check. */
 const MAX_PAGE_MISSES = 3;
 
+/** Tries of a page batch whose model call fails, before the batch is given up for this run. */
+export const PAGE_BATCH_TRIES = 3;
+
 /**
  * Style sheets written without <file> tags (```css blocks), named by the styles/*.css path mentioned
  * just before each block, else theme.css then components.css.
@@ -51,6 +54,8 @@ export interface GenerateDeps {
   pagesPerCall: number;
   /** Page batches written at the same time (1: one after another). */
   parallel?: number;
+  /** Pause before a failed page batch is tried again; doubles with each try. */
+  retryDelayMs?: number;
   /** Continue a generation saved by onCheckpoint. */
   resume?: GenerateState;
   /** Called before each model call once there is work worth keeping. */
@@ -217,8 +222,11 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     if (batches.length > 1) deps.onStage?.(`生成页面：第 ${batches.map(label).join('、')} 页同时进行（已完成 ${done.size}/${plan.length} 页）`);
     else if (batches.length) deps.onStage?.(`生成页面：第 ${label(batches[0])} 页（共 ${plan.length} 页）`);
   };
+  /** Batches whose calls failed on every try; the other batches carry on without them. */
+  const failures: { batch: PlannedPage[]; error: unknown }[] = [];
+  const failedPages = () => new Set(failures.flatMap((f) => f.batch.map((p) => p.path)));
   const nextBatch = (): PlannedPage[] | undefined => {
-    const busy = new Set(inFlight().map((p) => p.path));
+    const busy = new Set([...inFlight().map((p) => p.path), ...failedPages()]);
     const queue = plan.filter((p) => !done.has(p.path) && !skipped.has(p.path) && !busy.has(p.path));
     if (!queue.length) return undefined;
     if (misses.get(queue[0].path)) return [queue[0]];
@@ -231,10 +239,22 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     }
     return batch;
   };
-  const write = async (batch: PlannedPage[]) => {
-    const others = inFlight().filter((p) => !batch.includes(p));
+  /** A failed call (model offline, overloaded, network) is tried again after a pause; only this batch waits. */
+  const callBatch = async (batch: PlannedPage[]) => {
     const stage = `生成页面：第 ${label(batch)} 页（共 ${plan.length} 页）`;
-    const r = await deps.call(buildPagesPrompt(doc, kind, brief, template, assets, batch, plan, others), stage, 'pages');
+    for (let attempt = 1; ; attempt++) {
+      const others = inFlight().filter((p) => !batch.includes(p));
+      const messages = buildPagesPrompt(doc, kind, brief, template, assets, batch, plan, others);
+      try {
+        return await deps.call(messages, attempt > 1 ? `${stage}（第 ${attempt} 次尝试）` : stage, 'pages');
+      } catch (e) {
+        if (attempt >= PAGE_BATCH_TRIES) throw e;
+        await new Promise((r) => setTimeout(r, (deps.retryDelayMs ?? 0) * 2 ** (attempt - 1)));
+      }
+    }
+  };
+  const write = async (batch: PlannedPage[]) => {
+    const r = await callBatch(batch);
     const blocks = parseFileBlocks(r.text).filter((b) => b.complete);
     let got = 0;
     const strays: FileBlock[] = [];
@@ -265,10 +285,10 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
       lastCut = r.finishReason === 'length';
     }
   };
-  // A failed call stops new batches; the ones under way finish and keep their pages, then the step fails.
-  let failed: { error: unknown } | undefined;
+  // A batch that still fails does not hold up the others: every other page is written first, then the
+  // step fails with that progress saved, and continuing writes only the failed pages.
   for (;;) {
-    while (!failed && writing.size < parallel) {
+    while (writing.size < parallel) {
       const batch = nextBatch();
       if (!batch) break;
       save();
@@ -278,7 +298,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
           () => void writing.delete(batch),
           (error) => {
             writing.delete(batch);
-            failed ??= { error };
+            failures.push({ batch, error });
           },
         ),
       );
@@ -287,9 +307,11 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     report();
     await Promise.race(writing.values());
   }
-  if (failed) {
+  if (failures.length) {
     save();
-    throw failed.error;
+    const pages = failures.map((f) => label(f.batch)).join('、');
+    const why = failures[0].error instanceof Error ? failures[0].error.message : String(failures[0].error);
+    throw new Error(`第 ${pages} 页生成失败（每批已尝试 ${PAGE_BATCH_TRIES} 次），其余页面已完成并保存：${why}`);
   }
   if (!doc.pages.length) {
     throw new Error(`模型多次都没有输出任何页面${lastCut ? '（回复达到最大输出长度被截断，请提高「最大输出 tokens」）' : ''}，生成中止`);

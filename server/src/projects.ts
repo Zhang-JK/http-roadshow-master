@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { nanoid } from 'nanoid';
 import type { DB } from './db.js';
 import { getSettings } from './db.js';
+import { config } from './config.js';
 import {
   assignIds,
   diffDocs,
@@ -647,6 +648,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
               },
               pagesPerCall: Number(settings.genPagesPerCall) || 3,
               parallel: Math.min(Number(settings.genParallel) || 4, parallelCapacity(db)),
+              retryDelayMs: config.pageRetryDelayMs,
               resume: cp.gen,
               onCheckpoint: (gen) => save({ gen }),
             },

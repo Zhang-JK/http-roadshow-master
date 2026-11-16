@@ -365,7 +365,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
     const pageTask = text.includes('【本批任务】') ? text.slice(text.indexOf('【本批任务】')) : '';
     const page5 = key.includes('PAGE5_DOWN') && pageTask.includes('- 第 5 页：') && !page5Healed.has(key);
     if (page5) page5Down.add(key);
-    if (offline || page5) {
+    // PAGE3_FAIL_ONCE: the first request for the batch holding page 3 fails; trying again works.
+    const page3 = key.includes('PAGE3_FAIL_ONCE') && pageTask.includes('- 第 3 页：') && !failedOnce.has(`page3|${key}`);
+    if (page3) failedOnce.add(`page3|${key}`);
+    if (offline || page5 || page3) {
       offlineCalls++;
       res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model offline (MOCK)' } }));
       return;
