@@ -67,7 +67,7 @@ function McpCard({ user, onChange }: { user: User; onChange: (u: User) => void }
       <h3>MCP 接入</h3>
       <p className="muted small">
         AI 助手（Cursor、Claude 等）可以通过 MCP 用 <code>{user.username}</code> 账户创建路演材料：先列出可用模板，再上传完整的测试数据、结果与图片生成材料。
-        创建的材料出现在「路演材料」中，所有用户都可以继续修改。
+        之后还可以通过 MCP 找到以前创建的材料，查看原始需求与修改历史，提交新数据修改或删除它们（仅限通过 MCP 创建的材料）。创建的材料出现在「路演材料」中，所有用户都可以继续修改。
       </p>
       <div className="kv">
         <span>状态</span>
@@ -88,7 +88,9 @@ function McpCard({ user, onChange }: { user: User; onChange: (u: User) => void }
         <span><code data-testid="mcp-url">{url}</code>（Streamable HTTP，请求头 <code>Authorization: Bearer {TOKEN_PLACEHOLDER}</code>）</span>
         <span>工具</span>
         <span>
-          <code>list_roadshow_templates</code> 列出模板 · <code>create_roadshow_slides</code> 创建路演材料 · <code>get_roadshow_slides_status</code> 查询进度与下载链接
+          <code>list_roadshow_templates</code> 列出模板 · <code>create_roadshow_slides</code> 创建路演材料 · <code>get_roadshow_slides_status</code> 查询进度与下载链接 ·{' '}
+          <code>list_roadshow_slides</code> 查找已创建的材料 · <code>get_roadshow_slides</code> 原始需求、文件与修改历史 · <code>update_roadshow_slides</code> 提交新数据修改 ·{' '}
+          <code>delete_roadshow_slides</code> 删除材料
         </span>
       </div>
       <h4 className="mcp-sub">Cursor / Claude Desktop（mcp.json）</h4>
