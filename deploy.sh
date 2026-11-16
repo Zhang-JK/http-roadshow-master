@@ -615,6 +615,8 @@ detect_pkg() {
   if have apt-get; then echo apt; elif have dnf; then echo dnf; elif have yum; then echo yum; elif have zypper; then echo zypper; else echo none; fi
 }
 
+CHART_WARN="python3-matplotlib 安装失败，生成材料时将不能按数据绘制图表（make_chart）"
+
 ensure_system_deps() {
   is_root || { warn "非 root 运行，跳过系统依赖安装（git/curl/tar/字体/浏览器依赖）"; return 0; }
   local pm; pm="$(detect_pkg)"
@@ -628,6 +630,8 @@ ensure_system_deps() {
       # PPT/PDF reference uploads are exported page by page to images.
       "${apt[@]}" install -y -qq --no-install-recommends libreoffice-impress libreoffice-writer poppler-utils >/dev/null \
         || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
+      # Data charts (make_chart) are drawn with matplotlib.
+      "${apt[@]}" install -y -qq --no-install-recommends python3 python3-matplotlib >/dev/null || warn "$CHART_WARN"
       ;;
     dnf|yum)
       local dnf=("$pm" ${DNF_NET[@]+"${DNF_NET[@]}"})
@@ -635,12 +639,14 @@ ensure_system_deps() {
         || "${dnf[@]}" install -y -q git curl tar xz unzip >/dev/null || warn "部分依赖安装失败"
       "${dnf[@]}" install -y -q libreoffice-impress libreoffice-writer poppler-utils >/dev/null 2>&1 \
         || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
+      "${dnf[@]}" install -y -q python3 python3-matplotlib >/dev/null 2>&1 || warn "$CHART_WARN"
       ;;
     zypper)
       zypper -n -q install git curl tar xz unzip noto-sans-sc-fonts >/dev/null || warn "部分依赖安装失败"
       zypper -n -q install libreoffice-impress libreoffice-writer poppler-tools >/dev/null || warn "LibreOffice/poppler 安装失败，上传 PPT 参考时将无法逐页转图片"
+      zypper -n -q install python3 python3-matplotlib >/dev/null || warn "$CHART_WARN"
       ;;
-    *) warn "未识别的包管理器，请手动安装 git curl tar xz unzip、中文字体、LibreOffice 与 poppler-utils" ;;
+    *) warn "未识别的包管理器，请手动安装 git curl tar xz unzip、中文字体、LibreOffice、poppler-utils 与 python3-matplotlib" ;;
   esac
 }
 
