@@ -7,6 +7,7 @@ import { startMockLlm } from '../../server/test/mockLlm.ts';
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-e2e-'));
 process.env.DATA_DIR = dataDir;
 process.env.WEB_DIST = path.resolve(import.meta.dirname, '../dist');
+process.env.PAGE_RETRY_DELAY_MS ??= '300';
 
 const mock = await startMockLlm({ delayMs: 1500, chunkDelayMs: 60 });
 const { openDb } = await import('../../server/src/db.ts');

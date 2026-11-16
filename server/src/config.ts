@@ -30,6 +30,8 @@ export const config = {
   adminUsername: process.env.ADMIN_USERNAME ?? 'admin',
   adminPassword: process.env.ADMIN_PASSWORD ?? 'admin123',
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
+  /** First pause before a failed page batch is tried again (doubles after that). */
+  pageRetryDelayMs: Number(process.env.PAGE_RETRY_DELAY_MS ?? 5000),
   chromePath: findChrome(),
   appRoot,
   /** Origin used in links handed to MCP clients; defaults to the request's Host. */
