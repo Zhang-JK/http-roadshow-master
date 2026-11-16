@@ -111,6 +111,25 @@ describe('parallel requests across endpoints', () => {
     expect(stats.tokensPerSec).toBeLessThan(400);
   });
 
+  it('shows the calls of one job running side by side together, one queued at the limit', async () => {
+    endpoints({ name: 'a', max: 1 }, { name: 'b', max: 1 });
+    const { jobStats } = await import('../src/calls.js');
+    const { parallelCapacity } = await import('../src/llm.js');
+    expect(parallelCapacity(db)).toBe(2);
+    const id = newJob();
+    const all = Promise.all([ask(id), ask(id), ask(id)]);
+    await sleep(80);
+    expect(jobStats(db, [id]).get(id)!.live).toMatchObject({ parallel: 3, queued: false, stage: '3 个模型调用同时进行' });
+    expect(jobStats(db, [id]).get(id)!.live!.endpoint.split('、').sort()).toEqual(['a', 'b']);
+    await sleep(250);
+    const busy = jobStats(db, [id]).get(id)!.live!;
+    expect(busy.tokens).toBeGreaterThan(0);
+    await all;
+    expect(jobStats(db, [id]).get(id)!).toMatchObject({ calls: 3, live: null });
+    endpoints({ name: 'a', max: 1 }, { name: 'b' });
+    expect(parallelCapacity(db)).toBe(Infinity);
+  });
+
   it('records a failed attempt and moves on to the next endpoint', async () => {
     endpoints({ name: 'fail' }, { name: 'ok' });
     const { jobStats } = await import('../src/calls.js');

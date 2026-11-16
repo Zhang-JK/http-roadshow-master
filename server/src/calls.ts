@@ -50,7 +50,7 @@ export function recordCall(db: DB, c: CallRecord) {
   }
 }
 
-/** A model call in progress, by job. */
+/** A model call in progress; a job may have several at once (page batches written in parallel). */
 export interface LiveCall {
   endpointId: number;
   endpointName: string;
@@ -64,7 +64,42 @@ export interface LiveCall {
   tokens: number;
 }
 
-export const liveCalls = new Map<string, LiveCall>();
+const liveCalls = new Map<string, Set<LiveCall>>();
+
+export function addLiveCall(jobId: string, call: LiveCall) {
+  const set = liveCalls.get(jobId) ?? new Set();
+  set.add(call);
+  liveCalls.set(jobId, set);
+}
+
+export function removeLiveCall(jobId: string, call: LiveCall) {
+  const set = liveCalls.get(jobId);
+  if (!set) return;
+  set.delete(call);
+  if (!set.size) liveCalls.delete(jobId);
+}
+
+/** The job's calls in progress taken together: total output, combined speed, queued only if all are. */
+function liveStats(calls: LiveCall[], now: number): JobStats['live'] {
+  if (!calls.length) return null;
+  const running = calls.filter((l) => l.startedAt);
+  const speeds = running.map((l) => (l.firstTokenAt && now - l.firstTokenAt >= 1000 ? tokensPerSec(l.tokens, now - l.firstTokenAt) : null));
+  const queued = !running.length;
+  const silent = running.filter((l) => !l.firstTokenAt);
+  return {
+    stage: calls.length === 1 ? calls[0].stage : `${calls.length} 个模型调用同时进行`,
+    endpoint: [...new Set(running.map((l) => l.endpointName))].join('、'),
+    queued,
+    tokens: calls.reduce((n, l) => n + l.tokens, 0),
+    tokensPerSec: speeds.some((s) => s !== null) ? Math.round(speeds.reduce<number>((n, s) => n + (s ?? 0), 0) * 10) / 10 : null,
+    waitingMs: queued
+      ? now - Math.min(...calls.map((l) => l.queuedSince ?? now))
+      : silent.length === running.length
+        ? now - Math.max(...running.map((l) => l.startedAt!))
+        : 0,
+    parallel: calls.length,
+  };
+}
 
 /** Seconds of output and tokens produced in them, for calls whose speed can be measured. */
 export const SPEED_SQL = `SUM(CASE WHEN c.status = 'ok' AND c.first_token_at IS NOT NULL AND c.ended_at > c.first_token_at AND c.completion_tokens > 0 THEN c.completion_tokens END) AS speed_tokens,
@@ -94,8 +129,8 @@ export interface JobStats {
   estimated: boolean;
   /** Average output speed over the finished calls. */
   tokensPerSec: number | null;
-  /** The call running now: its output speed and tokens so far. */
-  live: { stage?: string; endpoint: string; queued: boolean; tokens: number; tokensPerSec: number | null; waitingMs: number } | null;
+  /** The calls running now, together: output speed and tokens so far; `parallel` is how many. */
+  live: { stage?: string; endpoint: string; queued: boolean; tokens: number; tokensPerSec: number | null; waitingMs: number; parallel: number } | null;
 }
 
 interface StatsRow {
@@ -130,25 +165,15 @@ export function jobStats(db: DB, jobIds: string[]): Map<string, JobStats> {
   const now = Date.now();
   for (const id of jobIds) {
     const r = byId.get(id);
-    const l = liveCalls.get(id);
-    const liveMs = l?.firstTokenAt ? now - l.firstTokenAt : 0;
+    const live = liveStats([...(liveCalls.get(id) ?? [])], now);
     out.set(id, {
       calls: r?.calls ?? 0,
       failedCalls: r?.failed ?? 0,
       promptTokens: r?.prompt ?? 0,
-      completionTokens: (r?.completion ?? 0) + (l?.tokens ?? 0),
-      estimated: !!r?.estimated || !!l,
+      completionTokens: (r?.completion ?? 0) + (live?.tokens ?? 0),
+      estimated: !!r?.estimated || !!live,
       tokensPerSec: tokensPerSec(r?.speed_tokens, r?.speed_ms),
-      live: l
-        ? {
-            stage: l.stage,
-            endpoint: l.endpointName,
-            queued: !!l.queuedSince && !l.startedAt,
-            tokens: l.tokens,
-            tokensPerSec: liveMs >= 1000 ? tokensPerSec(l.tokens, liveMs) : null,
-            waitingMs: l.startedAt ? (l.firstTokenAt ? 0 : now - l.startedAt) : l.queuedSince ? now - l.queuedSince : 0,
-          }
-        : null,
+      live,
     });
   }
   return out;
