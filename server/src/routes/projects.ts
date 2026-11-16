@@ -591,6 +591,8 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     if (!row || !fs.existsSync(assetPath(row.id))) throw new HttpError(404, '素材不存在');
     reply.header('Content-Type', row.mime);
     reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    // Uploaded SVGs can carry scripts; opened directly they must not run on this origin.
+    if (row.mime === 'image/svg+xml') reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
     return reply.send(fs.readFileSync(assetPath(row.id)));
   });
 }

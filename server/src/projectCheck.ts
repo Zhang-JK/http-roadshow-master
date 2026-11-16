@@ -182,7 +182,14 @@ async function checkInBrowser(db: DB | undefined, input: CheckInput, add: (i: Pr
         missing.get(who)!.add(path);
         return route.fulfill({ status: 404, body: 'not found' });
       }
-      const type = path.endsWith('.html') ? 'text/html; charset=utf-8' : path.endsWith('.css') ? 'text/css; charset=utf-8' : undefined;
+      // Raster images are sniffed; SVG only renders when labelled as SVG.
+      const type = path.endsWith('.html')
+        ? 'text/html; charset=utf-8'
+        : path.endsWith('.css')
+          ? 'text/css; charset=utf-8'
+          : path.endsWith('.svg')
+            ? 'image/svg+xml'
+            : undefined;
       return route.fulfill({ status: 200, body, contentType: type });
     });
     const failedExternal = new Set<string>();

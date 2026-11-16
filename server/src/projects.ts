@@ -20,6 +20,8 @@ import {
   buildTemplatePrompt,
   type DeckBrief,
   ASK_NOTE,
+  CHART_NOTE,
+  CHART_PLAN_NOTE,
   withNote,
   type EditMode,
   type EditScope,
@@ -28,7 +30,8 @@ import {
 import { logEdit, plannedPages, readmeFromBrief } from './files.js';
 import { checkProject } from './projectCheck.js';
 import { describeGenerateState, generateFiles, type GenerateState } from './generate.js';
-import { assetPath, assetsByIds, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
+import { assetPath, assetsByIds, isChart, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
+import { chartsAvailable, createChartTools } from './charts.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { renderPageImages } from './render.js';
 import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
@@ -341,6 +344,7 @@ function describeTool(name: string, args: Record<string, unknown>): string {
 
 /** Sets up the read-only file tools over the given uploads; returns undefined when there are none. */
 function fileToolsFor(db: DB, rows: AssetRow[]): { tools: FileTools; ids: Map<string, string> } | undefined {
+  rows = rows.filter((r) => !isChart(r));
   if (!rows.length) return undefined;
   const files = assignFileIds(rows);
   return { tools: createFileTools(db, files), ids: new Map([...files].map(([fid, r]) => [r.id, fid])) };
@@ -349,7 +353,14 @@ function fileToolsFor(db: DB, rows: AssetRow[]): { tools: FileTools; ids: Map<st
 const toolStage = (name: string, args: Record<string, unknown>, phase = '自检') =>
   name === 'ask_user' || name === 'extend_scope'
     ? '等待用户回答问题'
-    : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+    : name === 'make_chart'
+      ? `绘制图表：${String(args.title || args.type || '').slice(0, 30)}`
+      : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+
+/** make_chart for decks when the server can draw (templates keep placeholder charts in inline SVG). */
+function chartToolsFor(db: DB, project: ProjectRow, userId: number): FileTools | undefined {
+  return project.type === 'deck' && chartsAvailable() ? createChartTools(db, project.id, userId) : undefined;
+}
 
 /** Whether the job may pause for an answer: asking is on in the settings and the requester can answer. */
 function canAsk(db: DB, job: JobRow): boolean {
@@ -610,6 +621,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
       const ask = askToolsFor(db, job);
+      const charts = chartToolsFor(db, project, userId);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;
@@ -632,6 +644,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
             {
               call: (messages, stage, step) => {
                 if (step === 'plan') {
+                  if (charts) messages = withNote(messages, CHART_PLAN_NOTE);
                   return ask
                     ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
                     : runStep(db, job.id, userId, messages, ft?.tools, stage, true);
@@ -640,7 +653,16 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
                   batches.set(stage, p);
                   showPages();
                 };
-                return runStep(db, job.id, userId, messages, ft?.tools, stage, true, report).finally(() => batches.delete(stage));
+                return runStep(
+                  db,
+                  job.id,
+                  userId,
+                  charts ? withNote(messages, CHART_NOTE) : messages,
+                  combineTools(ft?.tools, charts),
+                  stage,
+                  true,
+                  report,
+                ).finally(() => batches.delete(stage));
               },
               onStage: (stage) => {
                 pagesStage = stage;
@@ -659,7 +681,9 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
         } else {
           reviewContext =
             project.type === 'template' ? buildTemplatePrompt(base, meta.brief, assets) : buildDeckPrompt(base, template, meta.brief, assets);
-          const text = await runLlm(db, job.id, userId, ask ? withNote(reviewContext, ASK_NOTE) : reviewContext, combineTools(ft?.tools, ask), {
+          let messages = charts ? withNote(reviewContext, `${CHART_PLAN_NOTE}\n\n${CHART_NOTE}`) : reviewContext;
+          if (ask) messages = withNote(messages, ASK_NOTE);
+          const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, charts, ask), {
             resume: cp.write,
             save: (write) => save({ write }),
           });
@@ -750,18 +774,21 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
       const ft = fileToolsFor(db, [...otherRows, ...attachedRows]);
       const ctx = cp.edit ? { edit: cp.edit } : await prepareEdit(db, job, input, ft?.ids);
       const { snapshot, messages, mode } = ctx.edit;
+      const charts = chartToolsFor(db, getProject(db, projectId)!, userId);
+      const prompt = charts ? withNote(messages, CHART_NOTE) : messages;
       let draft: Draft;
       if (cp.review) draft = Draft.restore(cp.review.draft);
       else {
         if (mode === 'tools') {
           const d = cp.tools ? Draft.restore(cp.tools.draft) : scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
           draft = d;
-          await editWithTools(db, job.id, userId, d, messages, ft?.tools, askToolsFor(db, job, { draft: d, prompt: input.prompt }), {
+          const fileTools = charts ? combineTools(ft?.tools, charts) : ft?.tools;
+          await editWithTools(db, job.id, userId, d, prompt, fileTools, askToolsFor(db, job, { draft: d, prompt: input.prompt }), {
             resume: cp.tools?.loop,
             save: (loop) => save({ ...ctx, tools: { draft: d.save(), loop } }),
           });
         } else {
-          const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, askToolsFor(db, job)), {
+          const text = await runLlm(db, job.id, userId, prompt, combineTools(ft?.tools, charts, askToolsFor(db, job)), {
             resume: cp.write,
             save: (write) => save({ ...ctx, write }),
           });

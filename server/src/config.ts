@@ -30,6 +30,8 @@ export const config = {
   adminUsername: process.env.ADMIN_USERNAME ?? 'admin',
   adminPassword: process.env.ADMIN_PASSWORD ?? 'admin123',
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
+  /** Python with matplotlib, for the charts the model draws (make_chart); without it the tool is not offered. */
+  python: process.env.PYTHON || 'python3',
   /** First pause before a failed page batch is tried again (doubles after that). */
   pageRetryDelayMs: Number(process.env.PAGE_RETRY_DELAY_MS ?? 5000),
   chromePath: findChrome(),

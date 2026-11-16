@@ -38,6 +38,12 @@ export const assetUrl = (id: string) => `/api/assets/${id}`;
 export const assetPath = (id: string) => path.join(config.assetDir, id);
 export const slidesScript = () => path.join(config.appRoot, 'server', 'scripts', 'slides-to-images.sh');
 
+/** A chart drawn by make_chart: an SVG whose extracted_text is CHART_MARK + the spec it was drawn from. */
+export const CHART_MARK = 'make_chart ';
+export const isChart = (a: Pick<AssetRow, 'mime' | 'extracted_text'>) =>
+  a.mime === 'image/svg+xml' && !!a.extracted_text?.startsWith(CHART_MARK);
+export const chartSpec = (a: Pick<AssetRow, 'extracted_text'>) => (a.extracted_text ?? '').slice(CHART_MARK.length);
+
 export const isSlidesFile = (filename: string) => SLIDES_EXT.test(filename);
 export const isHtmlFile = (filename: string, mime = '') => HTML_EXT.test(filename) || mime === 'text/html';
 export const isZipFile = (filename: string) => ZIP_EXT.test(filename);
@@ -225,7 +231,11 @@ export function toAssetRefs(db: DB, rows: AssetRow[], withData: boolean, fileIds
       fileId: fileIds?.get(r.id),
       fileType: fileType(r),
     };
-    if (withData && r.kind === 'image') ref.dataUrl = dataUrl(r);
+    // Model APIs take raster images only; a chart is described by its spec instead.
+    if (isChart(r)) {
+      ref.chart = true;
+      ref.text = chartSpec(r);
+    } else if (withData && r.kind === 'image' && r.mime !== 'image/svg+xml') ref.dataUrl = dataUrl(r);
     if (r.kind === 'document') {
       const slides = slideAssets(db, r.id);
       if (slides.length) {

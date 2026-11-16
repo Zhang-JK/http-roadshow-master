@@ -65,9 +65,27 @@ export const MIXED = '<p class="note">收入 <b class="num">3,200</b> 万元，�
   '<svg class="mini" viewBox="0 0 200 60" width="600" height="180"><rect x="0" y="0" width="200" height="60" fill="#eef2ff"/><text x="10" y="38" font-size="20" fill="#1e3a8a">营收</text><text x="140" y="38" font-size="20" fill="#1e3a8a" text-anchor="middle">3,200</text><text x="60" y="38" font-size="20">底层</text><text x="60" y="38" font-size="20">顶层</text></svg>' +
   '<div class="legend" style="position:relative;width:400px"><span>图例说明</span><div class="veil" style="position:absolute;left:0;top:0;width:100%;height:100%"></div></div>';
 
+/** The <img> make_chart returned (the latest one). */
+const CHART_IMG = /<img src="\/api\/assets\/[\w-]+" alt="[^"]*" class="chart-img"[^>]*>/g;
+const lastChart = (text: string) => [...text.matchAll(CHART_IMG)].at(-1)?.[0];
+
+/** The chart DRAW_CHART has make_chart draw. */
+export const MOCK_CHART = {
+  type: 'combo',
+  categories: ['2022', '2023', '2024'],
+  series: [
+    { name: '收入', values: [1200, 2100, 3200], type: 'bar', axis: 'left' },
+    { name: '同比增长', values: [40, 75, 52], type: 'line', axis: 'right' },
+  ],
+  unit: '万元',
+  unit2: '%',
+  colors: ['#1e40af', '#f59e0b'],
+  alt: '2022–2024 年收入与增长率',
+};
+
 /** Page 2 extras that the delivery check must catch: BAD_PAGE_JS (a script and an onclick handler). */
 const pageExtra = (text: string) =>
-  `${text.includes('MIXED_TEXT') ? MIXED : ''}${text.includes('BAD_IMG') ? '<img src="/api/assets/no-such-image" alt="缺失">' : ''}${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
+  `${text.includes('DRAW_CHART') ? lastChart(text) ?? '' : ''}${text.includes('MIXED_TEXT') ? MIXED : ''}${text.includes('BAD_IMG') ? '<img src="/api/assets/no-such-image" alt="缺失">' : ''}${text.includes('BAD_PAGE_JS') ? '<script>alert(1)</script><button onclick="go()">下一步</button>' : ''}${text.includes('COPY_REF') ? `<p class="body">${LEAKED}</p>` : ''}`;
 
 const README_DOC = (title: string, n: number, notes: string) => `# ${title}
 
@@ -408,6 +426,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
     const toolEdit = !review && text.includes('【修改方式】') && !/FULL_REWRITE|NO_CHANGE/.test(text);
     const planStep = text.includes('本次只输出 README.md 与样式文件');
     const pageStep = text.includes('【本批任务】');
+    // DRAW_CHART: page steps and edits draw MOCK_CHART first; an edit then appends it to the section.
+    const called = (name: string) => body.messages.some((m: any) => m.role === 'assistant' && m.tool_calls?.some((c: any) => c.function.name === name));
+    const drawChart = !review && text.includes('DRAW_CHART') && (pageStep || toolEdit) && (body.tools ?? []).some((t: any) => t.function.name === 'make_chart');
+    const newChart = lastChart(toolMsgs.map((m: any) => String(m.content)).join('\n'));
     const toolCalls = !canCall
       ? null
       : checkPhase
@@ -418,6 +440,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
           : null
         : planStep && text.includes('ASK_ME') && !toolMsgs.length
           ? [{ name: 'ask_user', args: { question: 'MOCK-QUESTION 面向谁？', options: ['投资人', '客户'] } }]
+        : drawChart && !called('make_chart')
+          ? [{ name: 'make_chart', args: MOCK_CHART }]
+        : drawChart && toolEdit && newChart && !called('edit_elements')
+          ? [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: newChart } } }]
         : toolEdit
           ? ((text.includes('USE_TOOLS') ? mockToolRound(toolMsgs) : null) ?? mockEditRound(text, body.messages))
           : text.includes('USE_TOOLS') && !pageStep
