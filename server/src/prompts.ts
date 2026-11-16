@@ -16,6 +16,8 @@ export interface AssetRef {
   /** Id the read-only file tools know this file by (F1, F2, …); set when tools are available. */
   fileId?: string;
   fileType?: string;
+  /** Drawn by make_chart; `text` is the spec it was drawn from. */
+  chart?: boolean;
 }
 
 /** Documents longer than this are only previewed inline; the model reads the rest through the file tools. */
@@ -65,6 +67,9 @@ function assetsBlock(assets: AssetRef[], plan?: ImagePlan, styleOnly = false): s
     .map((a, i) => {
       const attached = plan?.images.has(a.id);
       const idTag = a.fileId ? `［file_id=${a.fileId}］` : '';
+      if (a.chart) {
+        return `${i + 1}. 图表「${a.filename}」（make_chart 生成），可在页面中通过 <img src="${a.url}"> 使用；绘制参数：${(a.text ?? '').slice(0, 1500)}`;
+      }
       if (a.kind === 'image') {
         if (a.role === 'reference') {
           return `${i + 1}. 参考图「${a.filename}」${idTag}：仅供参考（借鉴其版式、风格、配色或内容），不要把它嵌入页面${attached ? '（附图见后）' : ''}`;
@@ -155,9 +160,9 @@ const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>, output: 'tools' | 'rewrit
     ? '所有样式写在 <head> 中唯一的一个 <style> 内'
     : '项目由多个文件组成：README.md（需求与风格说明）、styles/*.css（全部页面共享的样式，按主题变量、组件等拆分）和每页一个 pages/*.html（只含一个 <section class="slide">）。样式写在 styles/ 下的 CSS 文件中，页面文件里不要写 <style>'
 }，使用语义化的 class（例如 .cover-title、.kpi-card），尽量少用内联 style。可使用 CSS 变量定义主题色。
-5. 禁止使用 <script>、<iframe>、外部 JS。图表请用内联 <svg> 或纯 CSS 实现。
+5. 禁止使用 <script>、<iframe>、外部 JS。图表请用内联 <svg> 或纯 CSS 实现（提供了 make_chart 工具时，有具体数据的图表用它绘制）。
 6. 字体使用系统字体栈，例如 "PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",Arial,sans-serif；如确需网络字体，只能通过 <link rel="stylesheet"> 引入 Google Fonts。
-7. 图片：只能使用用户提供的素材 URL（见素材列表），或使用 CSS 渐变、内联 SVG 图形、emoji/图标字符做装饰。禁止编造外部图片链接。
+7. 图片：只能使用用户提供的素材 URL（见素材列表）、make_chart 返回的图表地址，或使用 CSS 渐变、内联 SVG 图形、emoji/图标字符做装饰。禁止编造外部图片链接。
 8. 不要使用 position:fixed，不要依赖视口单位（vw/vh），一律使用 px 或 %。材料需要导出为 PDF/PPT，因此不要使用 background-clip:text 渐变文字和 mix-blend-mode（导出时会出现瑕疵），强调文字请用纯色、text-shadow 或色块背景。
 9. 已有元素上的 data-eid 与 data-page-id 属性是系统用于追踪修改历史的标识，修改时必须原样保留在对应元素上；新增元素不需要添加 data-eid。
 10. ${
@@ -212,6 +217,17 @@ ${ask ? ASK_LINE : ''}${scope === 'global' ? '' : `${SIMILAR_GUIDE(scope, explic
 /** Generation: the model may clarify the brief before writing anything. */
 export const ASK_NOTE =
   '【需求澄清】如果需求中有关键信息含糊或矛盾（例如受众或用途不明确、重点内容不清楚、页数与内容量明显不匹配、上传的资料与描述不一致），可以先调用 ask_user 向用户提问（一次一个问题，给出 2–4 个选项），得到回答后再输出文件；信息足够时不要提问，直接开始。';
+
+/** Deck planning when make_chart is available: data gets charts, whether or not the layout has room. */
+export const CHART_PLAN_NOTE =
+  '【数据图表】用户提供了数据（正文中的表格、数字与统计结果，或 CSV / 表格等文件）时，凡是能用图表说明的内容（趋势、对比、构成、转化、增减拆解、分布等）都要在页面规划中安排图表：在对应页的内容要点里写明「图表：类型 + 用到的数据（具体数值）+ 要说明的结论」。所选模板或现有版式中没有图表位置也要安排：调整该页版式留出图表区域，或新增一页专门放图表。生成页面时会用 make_chart 工具按这些数据绘制。';
+
+/** Writing or editing deck pages when make_chart is available. */
+export const CHART_NOTE = `【图表工具 make_chart】页面要展示具体数据时，用 make_chart 绘制图表：传入图表类型、类别与数值、单位，以及 README 风格约定中的配色和字体（深色背景的页面文字用浅色）。工具返回 <img src="/api/assets/…"> 代码（这个地址是合法的素材地址）和一张预览图，把 <img> 放进页面。
+- 按数据的特点选择图表类型（见工具说明）；一张图说明一个结论，结论写在页面标题或图注里；数值必须与用户提供的数据一致，不要编造
+- 页面中没有预留图表位置也要放：调整版式（如左侧要点、右侧图表，或上方结论、下方图表），或新增一页；容器按返回的宽高比留足空间，图表不能被裁切、遮挡或溢出页面
+- 已有的 make_chart 图表要改数据或样式时，重新调用 make_chart，再把 <img> 的 src 换成新地址
+- 示意性的小图形与图标仍可用内联 SVG / CSS；有具体数据的图表优先用 make_chart`;
 
 /** The messages with a note added to the first user message. */
 export function withNote(messages: ChatMessage[], note: string): ChatMessage[] {
