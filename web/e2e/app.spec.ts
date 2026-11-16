@@ -137,10 +137,12 @@ test('admin drags endpoints to set their priority, or moves them with the arrow 
 test('generation settings default to staged multi-file output within a 200K context', async () => {
   await expect(page.locator('[data-testid=generate-mode]')).toHaveValue('files');
   await expect(page.locator('[data-testid=pages-per-call]')).toHaveValue('3');
+  await expect(page.locator('[data-testid=gen-parallel]')).toHaveValue('4');
   await expect(page.locator('[data-testid=max-tokens]')).toHaveValue('65536');
   await expect(page.locator('[data-testid=context-tokens]')).toHaveValue('200000');
   await page.selectOption('[data-testid=generate-mode]', 'single');
   await expect(page.locator('[data-testid=pages-per-call]')).toHaveCount(0);
+  await expect(page.locator('[data-testid=gen-parallel]')).toHaveCount(0);
   await page.selectOption('[data-testid=generate-mode]', 'files');
   await expect(page.locator('[data-testid=pages-per-call]')).toBeVisible();
   const s = await page.evaluate(() => fetch('/api/settings').then((r) => r.json()));
@@ -951,25 +953,26 @@ async function mockOnline(on: Page = page) {
   expect((await on.request.post(`${new URL(ep.baseUrl).origin}/__mock/online`)).ok()).toBe(true);
 }
 
-test('the model goes offline halfway through a generation; continuing keeps the pages already written', async () => {
+test('one page batch fails while the others are written in parallel; continuing writes only the missing pages', async () => {
   await page.goto('/templates');
   await page.click('[data-testid=create-btn]');
   await page.fill('input[name=name]', '断线续做模板');
   await page.fill('textarea[name=style]', '简约');
-  await page.fill('textarea[name=notes]', 'MANY_PAGES OFFLINE_AT_PAGES');
+  await page.fill('textarea[name=notes]', 'MANY_PAGES PAGE5_DOWN');
   await page.click('[data-testid=submit-create]');
   await expect(page).toHaveURL(/\/p\//);
+  await expect(page.locator('[data-testid=job-progress]')).toContainText('页同时进行', { timeout: 30_000 });
   await expect(page.locator('.gen-state h2')).toHaveText('生成失败', { timeout: 60_000 });
   await expect(page.locator('.gen-state .error-box')).toContainText('model offline (MOCK)');
   await expect(page.locator('.toast-error')).toContainText('已保存进度，可从中断处继续');
-  await expect(page.locator('[data-testid=resume-generation-info]')).toContainText('已保存进度：已完成规划与 3/7 页');
+  await expect(page.locator('[data-testid=resume-generation-info]')).toContainText('已保存进度：已完成规划与 5/7 页');
   await expect(page.locator('[data-testid=regenerate-btn]')).toHaveText('从头重新生成');
 
   await mockOnline();
   await page.click('[data-testid=resume-generation-btn]');
-  await expect(page.locator('.toast-info')).toContainText('正在从中断处继续：已完成规划与 3/7 页');
+  await expect(page.locator('.toast-info')).toContainText('正在从中断处继续：已完成规划与 5/7 页');
   await expect(page.locator('.gen-state h2')).toContainText('AI 正在生成');
-  await expect(page.locator('[data-testid=job-progress]')).toContainText(/第 4–6 页|第 7 页|自检|交付检查/, { timeout: 30_000 });
+  await expect(page.locator('[data-testid=job-progress]')).toContainText(/第 5|第 6 页|自检|交付检查/, { timeout: 30_000 });
   await expect(page.locator('[data-testid=page-thumb]')).toHaveCount(7, { timeout: 60_000 });
   await expect(page.locator('.toast-success')).toContainText('生成完成');
   await page.click('.tabs button:has-text("修改历史")');
