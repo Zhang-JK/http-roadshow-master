@@ -238,6 +238,7 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   contextTokens: 200000,
   generateMode: 'files',
   genPagesPerCall: 3,
+  genParallel: 4,
   temperature: 0.7,
   editMode: 'tools',
   editToolRounds: 12,

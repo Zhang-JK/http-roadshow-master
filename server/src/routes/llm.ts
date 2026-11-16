@@ -247,6 +247,7 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     if (body.contextTokens !== undefined) patch.contextTokens = Math.max(8000, Math.min(10_000_000, Math.floor(Number(body.contextTokens)) || 200000));
     if (body.generateMode !== undefined) patch.generateMode = body.generateMode === 'single' ? 'single' : 'files';
     if (body.genPagesPerCall !== undefined) patch.genPagesPerCall = Math.max(1, Math.min(10, Math.floor(Number(body.genPagesPerCall)) || 3));
+    if (body.genParallel !== undefined) patch.genParallel = Math.max(1, Math.min(16, Math.floor(Number(body.genParallel)) || 4));
     if (body.temperature !== undefined) patch.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
     if (body.editMode !== undefined) patch.editMode = body.editMode === 'rewrite' ? 'rewrite' : 'tools';
     if (body.editToolRounds !== undefined) patch.editToolRounds = Math.max(2, Math.min(40, Math.floor(Number(body.editToolRounds)) || 12));

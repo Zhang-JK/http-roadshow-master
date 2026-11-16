@@ -179,7 +179,7 @@ describe('self-check agent loop', () => {
 
     expect(job.review).toMatchObject({ before: { errors: 1 }, after: { errors: 0 }, passes: 1, edits: 1, toolCalls: 6 });
     expect(job.review.summary).toContain('已修复');
-    expect(job.cost).toBeCloseTo(0.0005, 6); // the plan, one page batch and three review rounds
+    expect(job.cost).toBeCloseTo(0.0007, 6); // the plan, three pages written at once and three review rounds
     expect(job.promptTokens).toBeGreaterThan(calls.reduce((n, c) => n + c.text.length / 2, 0) - 10);
     const doc = savedDoc(r.json.project.id);
     expect(doc.pages).toHaveLength(3);

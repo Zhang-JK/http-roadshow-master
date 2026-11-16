@@ -300,10 +300,17 @@ export async function startMockLlm(opts: MockOptions = {}) {
    * setOnline() or POST /__mock/online. Markers take it offline, each once per request:
    * OFFLINE_AT_PAGES at the second batch of pages, OFFLINE_IN_EDIT at the second round of a tool
    * edit, OFFLINE_IN_CHECK when the model is asked to fix a failed delivery check,
-   * OFFLINE_AT_CONTINUE when a cut-off reply is to be continued.
+   * OFFLINE_AT_CONTINUE when a cut-off reply is to be continued. PAGE5_DOWN fails only the page
+   * batch holding page 5, also until setOnline().
    */
   let offline = false;
   const tripped = new Set<string>();
+  /** PAGE5_DOWN: only the page batch holding page 5 fails, until setOnline(). */
+  const page5Down = new Set<string>();
+  const page5Healed = new Set<string>();
+  /** Page batches being answered right now, and the most at once (MANY_PAGES replies take a moment). */
+  let pagesNow = 0;
+  let pagesMax = 0;
   const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/__mock/online') {
       offline = false;
@@ -350,7 +357,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
     trip('OFFLINE_IN_EDIT', text.includes('【修改方式】') && !text.includes('【自检阶段】') && body.messages.some((m: any) => m.role === 'tool'));
     trip('OFFLINE_IN_CHECK', lastUserStr.includes('【交付检查】'));
     trip('OFFLINE_AT_CONTINUE', lastUserStr.includes('请从中断处继续输出'));
-    if (offline) {
+    const pageTask = text.includes('【本批任务】') ? text.slice(text.indexOf('【本批任务】')) : '';
+    const page5 = key.includes('PAGE5_DOWN') && pageTask.includes('- 第 5 页：') && !page5Healed.has(key);
+    if (page5) page5Down.add(key);
+    if (offline || page5) {
       offlineCalls++;
       res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model offline (MOCK)' } }));
       return;
@@ -427,6 +437,11 @@ export async function startMockLlm(opts: MockOptions = {}) {
       const answers = toolMsgs.map((m: any) => String(m.content)).filter((c: string) => /用户|回答/.test(c)).join(' ');
       reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, `${(text.match(/【其他要求】(.*)/)?.[1] ?? '').trim()}${answers ? ` ASK-RESULT ${answers}` : ''}`);
     } else if (pageStep) {
+      if (text.includes('MANY_PAGES')) {
+        pagesMax = Math.max(pagesMax, ++pagesNow);
+        await new Promise((r) => setTimeout(r, 100));
+        pagesNow--;
+      }
       reply = pagesReply(text, broken, text.includes('STRAY_NAMES'));
       if (text.includes('TRUNCATE_PAGES') && text.includes('（无，本批是第一批）')) {
         const second = reply.indexOf('<file', 10);
@@ -498,8 +513,13 @@ export async function startMockLlm(opts: MockOptions = {}) {
     get offlineCalls() {
       return offlineCalls;
     },
+    get pagesAtOnce() {
+      return pagesMax;
+    },
     setOnline: () => {
       offline = false;
+      for (const k of page5Down) page5Healed.add(k);
+      page5Down.clear();
     },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };

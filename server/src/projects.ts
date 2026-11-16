@@ -11,7 +11,7 @@ import {
   type DeckDoc,
   type DiffSummary,
 } from './deck.js';
-import { chat, chatWithTools, type ChatMessage, type ChatResult, type ToolLoopState } from './llm.js';
+import { chat, chatWithTools, parallelCapacity, type ChatMessage, type ChatResult, type ToolLoopState } from './llm.js';
 import {
   buildDeckPrompt,
   buildEditPrompt,
@@ -104,7 +104,12 @@ export interface EditInput {
 }
 
 /** Live progress of running jobs (characters streamed so far); kept in memory only. */
-export const jobProgress = new Map<string, { chars: number; stage: string }>();
+export interface JobProgress {
+  chars: number;
+  stage: string;
+}
+
+export const jobProgress = new Map<string, JobProgress>();
 
 const projectLocks = new Map<string, Promise<unknown>>();
 
@@ -450,16 +455,18 @@ async function runStep(
   stage: string,
   /** The caller treats an empty reply as a miss and asks again. */
   allowEmpty = false,
+  /** Where progress goes; steps running side by side share the job's progress line. */
+  report: (progress: JobProgress) => void = (p) => jobProgress.set(jobId, p),
 ): Promise<ChatResult> {
   const settings = getSettings(db);
-  jobProgress.set(jobId, { chars: 0, stage });
+  report({ chars: 0, stage });
   const opts = {
     jobId,
     stage,
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
-    onDelta: (_c: string, total: number) => jobProgress.set(jobId, { chars: total, stage }),
-    onReasoning: (total: number) => jobProgress.set(jobId, { chars: total, stage: `${stage}（思考中）` }),
+    onDelta: (_c: string, total: number) => report({ chars: total, stage }),
+    onReasoning: (total: number) => report({ chars: total, stage: `${stage}（思考中）` }),
     allowEmpty,
   };
   if (!tools?.defs.length) {
@@ -471,7 +478,7 @@ async function runStep(
     ...opts,
     tools: tools.defs,
     execute: tools.execute,
-    onTool: (name, args) => jobProgress.set(jobId, { chars: 0, stage: toolStage(name, args) }),
+    onTool: (name, args) => report({ chars: 0, stage: toolStage(name, args) }),
     onRound: (r) => recordUsage(db, jobId, r),
     allowEmptyFinal: allowEmpty,
   });
@@ -611,14 +618,35 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
         reviewContext = cp.review.prompt;
       } else {
         if (cp.gen || (!cp.write && settings.generateMode !== 'single')) {
+          // Page batches written side by side: one alone shows its own progress, several show the
+          // overall stage with their characters added up.
+          const batches = new Map<string, JobProgress>();
+          let pagesStage = '';
+          const showPages = () => {
+            const all = [...batches.values()];
+            jobProgress.set(job.id, all.length === 1 ? all[0] : { chars: all.reduce((n, p) => n + p.chars, 0), stage: pagesStage });
+          };
           const doc = await generateFiles(
             { base, kind: project.type, brief: meta.brief, template, assets },
             {
-              call: (messages, stage, step) =>
-                step === 'plan' && ask
-                  ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
-                  : runStep(db, job.id, userId, messages, ft?.tools, stage, true),
+              call: (messages, stage, step) => {
+                if (step === 'plan') {
+                  return ask
+                    ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
+                    : runStep(db, job.id, userId, messages, ft?.tools, stage, true);
+                }
+                const report = (p: JobProgress) => {
+                  batches.set(stage, p);
+                  showPages();
+                };
+                return runStep(db, job.id, userId, messages, ft?.tools, stage, true, report).finally(() => batches.delete(stage));
+              },
+              onStage: (stage) => {
+                pagesStage = stage;
+                if (batches.size) showPages();
+              },
               pagesPerCall: Number(settings.genPagesPerCall) || 3,
+              parallel: Math.min(Number(settings.genParallel) || 4, parallelCapacity(db)),
               resume: cp.gen,
               onCheckpoint: (gen) => save({ gen }),
             },
