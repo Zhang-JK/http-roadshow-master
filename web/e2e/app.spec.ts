@@ -1014,7 +1014,7 @@ test('a failed edit keeps its progress only while it is the latest change; conti
   await expect(page.locator('.toast-success', { hasText: '修改已应用' })).toBeVisible();
 });
 
-test('admin allows MCP requests and issues a token; an MCP client creates a deck from a template', async ({ baseURL }) => {
+test('admin allows MCP requests and issues a token; an MCP client creates a deck, then finds, updates and deletes it', async ({ baseURL }) => {
   let token = '';
   let id = 0;
   const mcp = async (method: string, params: Record<string, unknown> = {}) => {
@@ -1088,6 +1088,34 @@ test('admin allows MCP requests and issues a token; an MCP client creates a deck
   await page.click('.tabs button:has-text("素材")');
   await expect(page.locator('.asset-list')).toContainText('latency.png');
   await expect(page.locator('.asset-list')).toContainText('results.csv');
+
+  const found = await tool('list_roadshow_slides', { query: 'MCP 压测' });
+  expect(found.decks.map((d: { projectId: string }) => d.projectId)).toEqual([created.projectId]);
+  expect(found.decks[0]).toMatchObject({ createdBy: 'MCP', historyCount: 1 });
+  expect((await tool('get_roadshow_slides', { projectId: created.projectId })).originalRequest.content).toContain('| p99 | 48 ms | 31 ms |');
+  const update = await tool('update_roadshow_slides', {
+    projectId: created.projectId,
+    instructions: 'MCP-UPDATE 复测后 p99 降到 28 ms，按 rerun.csv 更新结果',
+    files: [{ filename: 'rerun.csv', text: 'case,p99_ms\nv2.1,28\n' }],
+  });
+  expect(update.status).toBe('updating');
+  status = update;
+  for (let i = 0; i < 12 && status.status === 'updating'; i++) {
+    status = await tool('get_roadshow_slides_status', { projectId: created.projectId, waitSeconds: 5 });
+  }
+  expect(status).toMatchObject({ status: 'ready', version: 2, lastRequest: { kind: 'update', status: 'done' } });
+  await page.reload();
+  await page.click('.tabs button:has-text("修改历史")');
+  await expect(historyItems().first()).toContainText('v2');
+  await expect(historyItems().first()).toContainText('MCP');
+  await expect(historyItems().first()).toContainText('MCP-UPDATE');
+  await page.click('.tabs button:has-text("素材")');
+  await expect(page.locator('.asset-list')).toContainText('rerun.csv');
+
+  expect(await tool('delete_roadshow_slides', { projectId: created.projectId })).toMatchObject({ deleted: true });
+  await page.goto('/decks');
+  await expect(page.locator('[data-testid=project-card]').first()).toBeVisible();
+  await expect(page.locator('[data-testid=project-card]:has-text("MCP 压测报告")')).toHaveCount(0);
 
   await page.goto('/users');
   await row.locator('[data-testid=mcp-toggle]').uncheck();
