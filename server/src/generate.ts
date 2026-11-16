@@ -2,13 +2,22 @@
  * Staged generation of a multi-file project: one call writes the README (requirements, style guide,
  * page plan) and the style files, then the pages are written a few per call, several calls at once.
  * No single reply has to hold the whole deck, and a reply cut off by the output limit only loses the
- * file it was writing. The self-check and delivery check run on the whole deck afterwards.
+ * file it was writing. Each batch then looks at its own rendered pages and fixes them; the self-check
+ * and delivery check run on the whole deck afterwards.
  */
 import * as cheerio from 'cheerio';
 import type { DeckDoc, DeckPage } from './deck.js';
 import { ADDITIONS_CSS, appendCss, checkPath, cssFiles, joinCssFiles, parseFileBlocks, plannedPages, README, type FileBlock } from './files.js';
-import type { ChatMessage, ChatResult } from './llm.js';
-import { buildPagesPrompt, buildPlanPrompt, type AssetRef, type DeckBrief, type PlannedPage, type TemplateBrief } from './prompts.js';
+import type { ChatMessage, ChatResult, ContentPart } from './llm.js';
+import {
+  buildPagesPrompt,
+  buildPlanPrompt,
+  pageReviewNote,
+  type AssetRef,
+  type DeckBrief,
+  type PlannedPage,
+  type TemplateBrief,
+} from './prompts.js';
 
 export const MAX_PLANNED_PAGES = 60;
 
@@ -20,6 +29,9 @@ const MAX_PAGE_MISSES = 3;
 
 /** Tries of a page batch whose model call fails, before the batch is given up for this run. */
 export const PAGE_BATCH_TRIES = 3;
+
+/** Looks at each batch's rendered pages: one review, and a second only if layout errors are left. */
+export const PAGE_REVIEW_ROUNDS = 2;
 
 /**
  * Style sheets written without <file> tags (```css blocks), named by the styles/*.css path mentioned
@@ -47,9 +59,24 @@ function salvageCss(b: FileBlock): FileBlock | null {
   return open === 0 ? { ...b, content: css, complete: true } : null;
 }
 
+/** How one page just written looks: a screenshot and what the automatic layout check found. */
+export interface PageLook {
+  /** data: URL */
+  image?: string;
+  issues: { severity: 'error' | 'warning'; message: string }[];
+}
+
 export interface GenerateDeps {
-  /** One model call (with the read-only reference tools when there are uploads); must not throw on truncation. */
-  call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages') => Promise<ChatResult>;
+  /**
+   * One model call (with the read-only reference tools when there are uploads); must not throw on
+   * truncation. 'review' continues a page batch's conversation with how its pages rendered.
+   */
+  call: (messages: ChatMessage[], stage: string, step: 'plan' | 'pages' | 'review') => Promise<ChatResult>;
+  /**
+   * Renders the pages of `doc` (just written, without ids yet), one look per page in order. When
+   * given, each batch shows the model how its pages rendered and takes its corrections.
+   */
+  lookAt?: (doc: DeckDoc) => Promise<PageLook[]>;
   onStage?: (stage: string) => void;
   pagesPerCall: number;
   /** Page batches written at the same time (1: one after another). */
@@ -246,15 +273,75 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
       const others = inFlight().filter((p) => !batch.includes(p));
       const messages = buildPagesPrompt(doc, kind, brief, template, assets, batch, plan, others);
       try {
-        return await deps.call(messages, attempt > 1 ? `${stage}（第 ${attempt} 次尝试）` : stage, 'pages');
+        return { r: await deps.call(messages, attempt > 1 ? `${stage}（第 ${attempt} 次尝试）` : stage, 'pages'), messages, stage };
       } catch (e) {
         if (attempt >= PAGE_BATCH_TRIES) throw e;
         await new Promise((r) => setTimeout(r, (deps.retryDelayMs ?? 0) * 2 ** (attempt - 1)));
       }
     }
   };
+  /** The pages written from one planned file (a file may hold several). */
+  const pagesOf = (path: string) => {
+    const rank = order.get(path) ?? plan.length;
+    return doc.pages.filter((p) => {
+      const r = rankOf.get(p);
+      return r !== undefined && r >= rank && r < rank + 1;
+    });
+  };
+  const replaceFile = (path: string, content: string) => {
+    if (!toPages(path, content).pages.length) return false;
+    const old = new Set(pagesOf(path));
+    doc = { ...doc, pages: doc.pages.filter((p) => !old.has(p)) };
+    done.delete(path);
+    return addFile(path, content);
+  };
+  /**
+   * The batch's own conversation goes on: the model sees screenshots of the pages it just wrote and
+   * the layout check, and rewrites the pages that need it. Its other pages and the other batches are
+   * untouched; if rendering or the call fails, the pages stay as written (the whole-draft check follows).
+   */
+  const reviewBatch = async (batch: PlannedPage[], messages: ChatMessage[], reply: string, stage: string) => {
+    if (!deps.lookAt) return;
+    const files = batch.filter((p) => done.has(p.path)).map((p) => p.path);
+    let convo = messages;
+    let last = reply;
+    for (let round = 1; round <= PAGE_REVIEW_ROUNDS; round++) {
+      const shown = files.flatMap((path) => pagesOf(path).map((page, k, all) => ({ page, label: all.length > 1 ? `${path}（第 ${k + 1} 屏）` : path })));
+      if (!shown.length) return;
+      let looks: PageLook[];
+      try {
+        looks = await deps.lookAt({ ...doc, pages: shown.map((s) => s.page) });
+      } catch {
+        return;
+      }
+      const errors = looks.flatMap((l) => l.issues).filter((i) => i.severity === 'error').length;
+      if (round > 1 && !errors) return;
+      const parts: ContentPart[] = [{ type: 'text', text: pageReviewNote(shown.map((s, i) => ({ label: s.label, issues: looks[i]?.issues ?? [] })), round) }];
+      shown.forEach((s, i) => {
+        const image = looks[i]?.image;
+        if (image) parts.push({ type: 'text', text: `【${s.label}】` }, { type: 'image_url', image_url: { url: image } });
+      });
+      convo = [...convo, { role: 'assistant', content: last || '（无输出）' }, { role: 'user', content: parts }];
+      let r: ChatResult;
+      try {
+        r = await deps.call(convo, `${stage}：检查渲染效果${round > 1 ? `（第 ${round} 轮）` : ''}`, 'review');
+      } catch {
+        return;
+      }
+      let changed = 0;
+      for (const b of parseFileBlocks(r.text).filter((x) => x.complete)) {
+        const c = pathOf(b);
+        if (c?.kind === 'css') {
+          doc.css = appendCss(doc.css, c.path === ADDITIONS_CSS ? ADDITIONS_CSS : c.path, b.content);
+          changed++;
+        } else if (c?.kind === 'page' && files.includes(c.path) && replaceFile(c.path, b.content)) changed++;
+      }
+      if (!changed) return;
+      last = r.text;
+    }
+  };
   const write = async (batch: PlannedPage[]) => {
-    const r = await callBatch(batch);
+    const { r, messages, stage } = await callBatch(batch);
     const blocks = parseFileBlocks(r.text).filter((b) => b.complete);
     let got = 0;
     const strays: FileBlock[] = [];
@@ -272,6 +359,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
     }
     if (got) {
       if (r.finishReason === 'length' && got < batch.length) size = Math.max(1, Math.min(size, got));
+      await reviewBatch(batch, messages, r.text, stage);
       return;
     }
     if (batch.length > 1) {

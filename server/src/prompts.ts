@@ -229,6 +229,28 @@ export const CHART_NOTE = `【图表工具 make_chart】页面要展示具体数
 - 已有的 make_chart 图表要改数据或样式时，重新调用 make_chart，再把 <img> 的 src 换成新地址
 - 示意性的小图形与图标仍可用内联 SVG / CSS；有具体数据的图表优先用 make_chart`;
 
+/** After a page batch: how its pages rendered, for the model that wrote them to check and correct. */
+export function pageReviewNote(pages: { label: string; issues: { severity: 'error' | 'warning'; message: string }[] }[], round: number): string {
+  const found = pages
+    .filter((p) => p.issues.length)
+    .map((p) => `${p.label}：\n${p.issues.map((i) => `  ${i.severity === 'error' ? '✗' : '△'} ${i.message}`).join('\n')}`)
+    .join('\n');
+  const report = found ? `自动布局检查发现：\n${found}` : '自动布局检查没有发现问题，但它看不出视觉效果，请仍然对照截图检查。';
+  const intro =
+    round > 1
+      ? `【页面自检】按你的修改重新渲染了这几页（${pages.map((p) => p.label).join('、')}），仍有问题，请继续修正。`
+      : `【页面自检】下面是你刚写的页面在浏览器中的实际渲染效果（${pages.map((p) => p.label).join('、')}，截图按顺序附在后面），请像设计评审一样逐页检查。`;
+  return `${intro}
+${report}
+
+检查要点：
+- 文字超出页面、被容器裁切、相互重叠或被遮挡；字号过小、行距过挤；中英文换行是否难看（如单字成行）
+- 图表与图片完整、清晰、比例合适，数据标签与图例可读，没有被拉伸、裁掉或溢出
+- 版面平衡：留白、对齐、信息层级、配色与字体符合 README 的风格约定，页面不空也不过满
+- 内容完整：本页规划的要点都在，没有遗留的占位文字或大片空白
+需要修改的页面，输出修改后的完整页面文件（<file path="pages/…"> … </file>，路径不变；需要补充样式时输出 ${ADDITIONS_CSS}，只写新增或覆盖的规则，会追加在该文件末尾）；没有问题的页面不要输出。全部没有问题时只回复「无需修改」。`;
+}
+
 /** The messages with a note added to the first user message. */
 export function withNote(messages: ChatMessage[], note: string): ChatMessage[] {
   const i = messages.findIndex((m) => m.role === 'user');

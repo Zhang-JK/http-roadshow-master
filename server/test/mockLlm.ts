@@ -309,6 +309,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
   const calls: MockCall[] = [];
   /** Requests made during the self-check phase (kept apart so draft-phase assertions stay simple). */
   const reviewCalls: MockCall[] = [];
+  /** A page batch shown its rendered pages (【页面自检】), kept apart like reviewCalls. */
+  const pageReviewCalls: MockCall[] = [];
   /** Requests answering a failed delivery check (also counted in calls / reviewCalls). */
   const checkCalls: MockCall[] = [];
   const failedOnce = new Set<string>();
@@ -415,7 +417,30 @@ export async function startMockLlm(opts: MockOptions = {}) {
       return;
     }
     const review = text.includes('【自检阶段】');
-    (review ? reviewCalls : calls).push({ model: body.model, stream: !!body.stream, user: body.user, text, images, body });
+    const lastUserParts = lastUserMsg && Array.isArray(lastUserMsg.content) ? lastUserMsg.content : [];
+    const lastUserAll = lastUserStr || lastUserParts.map((p: any) => (p.type === 'text' ? p.text : '')).join('\n');
+    const pageReview = lastUserAll.includes('【页面自检】');
+    (review ? reviewCalls : pageReview ? pageReviewCalls : calls).push({ model: body.model, stream: !!body.stream, user: body.user, text, images, body });
+    // PAGE_REVIEW: page 2 is written running off the page and fixed once the model sees the render
+    // (PAGE_REVIEW_STUBBORN: the fix it sends still runs off). Otherwise the pages look fine to it.
+    if (pageReview) {
+      if (text.includes('PAGE_REVIEW_DOWN')) {
+        res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model offline (PAGE_REVIEW_DOWN)' } }));
+        return;
+      }
+      const fix = text.includes('PAGE_REVIEW') && /pages\/content-1\.html：\n\s+✗/.test(lastUserAll);
+      const html = PAGE(2, 'content', text.includes('PAGE_REVIEW_STUBBORN'), '<p class="body">REVIEWED</p>');
+      const reply = fix ? `<file path="pages/content-1.html">\n${html}\n</file>` : '无需修改';
+      if (!body.stream) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { content: reply }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\n`);
+      res.end('data: [DONE]\n\n');
+      return;
+    }
 
     const toolMsgs = body.messages.filter((m: any) => m.role === 'tool');
     const canCall = body.tools && body.tool_choice !== 'none';
@@ -428,7 +453,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
     const pageStep = text.includes('【本批任务】');
     // DRAW_CHART: page steps and edits draw MOCK_CHART first; an edit then appends it to the section.
     const called = (name: string) => body.messages.some((m: any) => m.role === 'assistant' && m.tool_calls?.some((c: any) => c.function.name === name));
-    const drawChart = !review && text.includes('DRAW_CHART') && (pageStep || toolEdit) && (body.tools ?? []).some((t: any) => t.function.name === 'make_chart');
+    const drawChart = !review && !pageReview && text.includes('DRAW_CHART') && (pageStep || toolEdit) && (body.tools ?? []).some((t: any) => t.function.name === 'make_chart');
     const newChart = lastChart(toolMsgs.map((m: any) => String(m.content)).join('\n'));
     const toolCalls = !canCall
       ? null
@@ -457,7 +482,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
     let reply: string;
     let finish = 'stop';
     const title = (text.match(/【(?:模板|材料)名称】(.*)/)?.[1] ?? 'Mock').trim();
-    const broken = text.includes('FIX_DRAFT') || text.includes('BROKEN_ONLY');
+    const broken = text.includes('FIX_DRAFT') || text.includes('BROKEN_ONLY') || text.includes('PAGE_REVIEW');
     const lastUser = [...body.messages].reverse().find((m: any) => m.role === 'user');
     const continuing = typeof lastUser?.content === 'string' && lastUser.content.includes('你上一条回复没有完成');
     if (planStep && !continuing && text.includes('TRUNCATE_PLAN')) {
@@ -540,6 +565,7 @@ export async function startMockLlm(opts: MockOptions = {}) {
     brokenUrl: `http://127.0.0.1:${port}/broken/v1`,
     calls,
     reviewCalls,
+    pageReviewCalls,
     checkCalls,
     get offline() {
       return offline;
