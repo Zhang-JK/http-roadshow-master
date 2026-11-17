@@ -58,6 +58,14 @@ const groupReport = (calls: { text: string; body: any }[]) =>
     .filter((m: any) => m.role === 'tool' && String(m.content).startsWith('并行修改完成'))
     .at(-1)?.content as string | undefined;
 
+/** Images the editing model was shown after its last group round. */
+const overviewImages = (calls: { text: string; body: any }[]) => {
+  const messages = calls.filter(isEdit).at(-1)!.body.messages as any[];
+  const at = messages.findLastIndex((m) => m.role === 'tool' && String(m.content).startsWith('并行修改完成'));
+  const shown = messages[at + 1];
+  return Array.isArray(shown?.content) ? shown.content.filter((p: any) => p.type === 'image_url').length : 0;
+};
+
 beforeAll(async () => {
   mock = await startMockLlm();
   const { openDb } = await import('../src/db.js');
@@ -114,7 +122,10 @@ describe('whole-deck edits split into parallel groups', () => {
     const report = groupReport(calls)!;
     expect(report).toContain('7 组中 7 组成功');
     expect(report).toContain('- 第 3 组（pages/content-2.html）：改写了 pages/content-2.html');
-    expect(report).toMatch(/render_pages 或 check_project/);
+    // The editing model reviews the whole round: thumbnails of every changed page and their layout check.
+    expect(report).toContain('【本轮审阅】本轮改过的 7 页的缩略图附在后面');
+    expect(report).toMatch(/再派下一轮 edit_pages_in_parallel/);
+    expect(overviewImages(calls)).toBe(1);
 
     const rows = stages(job.id);
     expect(rows.filter((r) => r.status === 'ok' && !r.stage.includes('检查渲染效果'))).toHaveLength(7);
@@ -134,7 +145,8 @@ describe('whole-deck edits split into parallel groups', () => {
     const report = groupReport(failed.calls)!;
     expect(report).toContain('7 组中 6 组成功');
     expect(report).toMatch(/- 第 2 组（pages\/content-1\.html）：失败（已尝试 3 次）：.*这组页面保持原样/);
-    expect(report).toContain('可以把失败的组再派一次');
+    expect(report).toContain('失败的组可以再派一次');
+    expect(report).toContain('本轮改过的 6 页');
     const rows = stages(failed.job.id).filter((r) => r.stage.startsWith('并行修改：第 2 组'));
     expect(rows.map((r) => r.status)).toEqual(['error', 'error', 'error']);
 
@@ -156,6 +168,46 @@ describe('whole-deck edits split into parallel groups', () => {
     expect(doc.pages[1]).toMatchObject({ file: 'pages/group-extra.html' });
     expect(doc.pages[1].html).toContain('GROUP-NEW-PAGE');
     expect(cssFiles(doc.css).find((f) => f.path === 'styles/additions.css')?.css).toContain('.group-note');
+  });
+
+  it('after reviewing a round the editing model sends the pages that need rework to the next one', async () => {
+    const { pages: before } = savedDoc(projectId);
+    const pages = before.length;
+    const second = before[1].file!;
+    const { job, calls } = await edit('PARALLEL_ROUNDS 更新每一页后返工');
+    expect(job.status).toBe('done');
+    expect(calls.filter(isEdit)[0].text).toContain('【工作流程：你负责规划与审阅，页面交给子任务并行修改】');
+    const groups = calls.filter(isGroup);
+    expect(groups).toHaveLength(pages + 1);
+    const rework = groups.at(-1)!;
+    expect(rework.text).toContain('【本组任务】\nROUND-2 返工：统一数据口径');
+    // The second round starts from what the first one wrote.
+    expect(rework.text).toContain(`<file path="${second}">`);
+    expect(rework.text).toContain('GROUP-2-EDITED');
+    const report = groupReport(calls)!;
+    expect(report).toContain('1 组中 1 组成功');
+    expect(report).toContain('本轮改过的 1 页');
+    const doc = savedDoc(projectId);
+    expect(doc.pages[1].html).toMatch(/GROUP-2-EDITED[\s\S]*ROUND-2-EDITED/);
+    expect(doc.pages[2].html).not.toContain('ROUND-2-EDITED');
+  });
+
+  it('the delivery check of a new project hands the pages to fix to sub-agents', async () => {
+    const before = { checks: mock.checkCalls.length, calls: mock.calls.length };
+    const r = await req('POST', '/api/projects', { type: 'template', name: '交付分派', style: '简约', notes: 'BAD_PAGE_JS CHECK_DELEGATE' });
+    const job = await waitJob(r.json.job.id);
+    expect(job.status).toBe('done');
+    const [check] = mock.checkCalls.slice(before.checks);
+    expect(check.text).toContain('【分派修复】');
+    expect(check.body.tools.map((t: any) => t.function.name)).toContain('edit_pages_in_parallel');
+    const group = mock.calls.slice(before.calls).find(isGroup)!;
+    expect(group.text).toContain('【本组任务】\nREMOVE_SCRIPT');
+    expect(group.text).toContain('按 README.md 的需求、风格约定与页面规划完成这份材料');
+    expect(job.review.check).toMatchObject({ errors: 0, fixes: 1 });
+    const page = savedDoc(r.json.project.id).pages[1].html;
+    expect(page).not.toMatch(/<script|onclick/);
+    expect(page).toContain('REMOVE_SCRIPT-EDITED');
+    expect(stages(job.id)).toContainEqual({ stage: '并行修改：第 1 组（1 页）', status: 'ok' });
   });
 
   it('is offered only for whole-deck tool edits with more than one group at a time', async () => {

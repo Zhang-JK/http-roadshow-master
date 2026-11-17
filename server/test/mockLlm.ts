@@ -179,9 +179,15 @@ function mockReviewRound(toolMsgs: { content: string }[]): { name: string; args:
  * Scripted fix after a failed delivery check (the last user message has 【交付检查】): remove scripts
  * from the pages named in the report and list the files, then rewrite the README with every section
  * and a page plan of the actual files; pages reported as not written and missing style sheets are
- * written with write_file. Markers: CHECK_STUBBORN never fixes anything.
+ * written with write_file. Markers: CHECK_STUBBORN never fixes anything; CHECK_DELEGATE hands the
+ * pages with scripts to edit_pages_in_parallel when it is offered.
  */
-function mockCheckRound(report: string, after: { content: string }[], stubborn: boolean): { name: string; args: Record<string, unknown> }[] | null {
+function mockCheckRound(
+  report: string,
+  after: { content: string }[],
+  stubborn: boolean,
+  delegate = false,
+): { name: string; args: Record<string, unknown> }[] | null {
   if (stubborn) return null;
   if (after.length === 0) {
     const scripted = [...report.matchAll(/✗ (pages\/[\w.-]+\.html)：包含 /g)].map((m) => m[1]);
@@ -202,10 +208,12 @@ function mockCheckRound(report: string, after: { content: string }[], stubborn: 
         args: { path, after: 1, content: '<section class="slide" data-layout="content"><h1 class="title">CHECK-WROTE-PAGE</h1><p class="body">补写的页面</p></section>' },
       })),
       ...leaked.map((path) => ({ name: 'replace_in_draft', args: { path, old_text: LEAKED, new_text: '「公司名称」YYYY 年营收 X,XXX 万元' } })),
-      ...scripted.flatMap((path) => [
-        { name: 'edit_elements', args: { path, selector: 'script', remove: true, all: true } },
-        { name: 'edit_elements', args: { path, selector: '[onclick]', attrs: { onclick: null }, all: true } },
-      ]),
+      ...(delegate && scripted.length
+        ? [{ name: 'edit_pages_in_parallel', args: { groups: scripted.map((path) => ({ pages: [path], instructions: 'REMOVE_SCRIPT 删除脚本与内联事件' })) } }]
+        : scripted.flatMap((path) => [
+            { name: 'edit_elements', args: { path, selector: 'script', remove: true, all: true } },
+            { name: 'edit_elements', args: { path, selector: '[onclick]', attrs: { onclick: null }, all: true } },
+          ])),
     ];
   }
   const list = after[0].content;
@@ -256,6 +264,12 @@ function mockEditRound(text: string, messages: any[]): { name: string; args: Rec
       ];
     }
     return null;
+  }
+  // PARALLEL_ROUNDS: after reviewing the first round, page 2 goes back to a group for rework.
+  const rounds = messages.filter((m) => m.role === 'assistant' && m.tool_calls?.some((c: any) => c.function.name === 'edit_pages_in_parallel')).length;
+  if (request.includes('PARALLEL_ROUNDS') && rounds === 1) {
+    const page2 = text.match(/^(pages\/[\w.-]+\.html) — 第 2 页/m)?.[1];
+    return [{ name: 'edit_pages_in_parallel', args: { groups: [{ pages: [page2], instructions: 'ROUND-2 返工：统一数据口径' }] } }];
   }
   if (done) return null;
   // PARALLEL: change the shared colour, then send every page to a group of its own
@@ -465,7 +479,8 @@ export async function startMockLlm(opts: MockOptions = {}) {
 
     const toolMsgs = body.messages.filter((m: any) => m.role === 'tool');
     const canCall = body.tools && body.tool_choice !== 'none';
-    const lastUserAt = body.messages.map((m: any) => m.role).lastIndexOf('user');
+    // The images a tool returns come as a user message of their own; the prompt is the last user text before them.
+    const lastUserAt = body.messages.findLastIndex((m: any) => m.role === 'user' && !(Array.isArray(m.content) && m.content[0]?.text?.startsWith('以下是上述工具调用返回的图片')));
     const lastUserText = typeof body.messages[lastUserAt]?.content === 'string' ? (body.messages[lastUserAt].content as string) : '';
     const checkPhase = lastUserText.includes('【交付检查】');
     if (checkPhase) checkCalls.push({ model: body.model, stream: !!body.stream, user: body.user, text: lastUserText, images, body });
@@ -479,7 +494,12 @@ export async function startMockLlm(opts: MockOptions = {}) {
     const toolCalls = !canCall
       ? null
       : checkPhase
-        ? mockCheckRound(lastUserText, body.messages.slice(lastUserAt + 1).filter((m: any) => m.role === 'tool'), text.includes('CHECK_STUBBORN'))
+        ? mockCheckRound(
+            lastUserText,
+            body.messages.slice(lastUserAt + 1).filter((m: any) => m.role === 'tool'),
+            text.includes('CHECK_STUBBORN'),
+            text.includes('CHECK_DELEGATE') && (body.tools ?? []).some((t: any) => t.function.name === 'edit_pages_in_parallel'),
+          )
       : review
         ? text.includes('FIX_DRAFT')
           ? mockReviewRound(toolMsgs)
@@ -522,7 +542,10 @@ export async function startMockLlm(opts: MockOptions = {}) {
       groupsNow--;
       const files = [...text.slice(text.indexOf('【本组页面当前内容】')).matchAll(/<file path="(pages\/[\w.-]+\.html)">\n([\s\S]*?)\n<\/file>/g)];
       const tag = groupTask.split(' ')[0];
-      reply = files.map(([, path, html]) => `<file path="${path}">\n${html.replace(/<\/section>\s*$/, `<p class="body">${tag}-EDITED</p></section>`)}\n</file>`).join('\n\n');
+      const clean = (html: string) => (tag === 'REMOVE_SCRIPT' ? html.replace(/<script[\s\S]*?<\/script>/g, '').replace(/\s+onclick="[^"]*"/g, '') : html);
+      reply = files
+        .map(([, path, html]) => `<file path="${path}">\n${clean(html).replace(/<\/section>\s*$/, `<p class="body">${tag}-EDITED</p></section>`)}\n</file>`)
+        .join('\n\n');
       if (editRequest.includes('PARALLEL_NEW_PAGE') && tag === 'GROUP-1') {
         reply += `\n\n<file path="pages/group-extra.html">\n<section class="slide" data-layout="content"><h1 class="title">GROUP-NEW-PAGE</h1></section>\n</file>\n\n<file path="${'styles/additions.css'}">\n.group-note{color:#0f766e}\n</file>`;
       }
