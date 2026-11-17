@@ -70,6 +70,9 @@ const TOOL_NAMES = [
   'get_roadshow_slides',
   'update_roadshow_slides',
   'delete_roadshow_slides',
+  'list_roadshow_files',
+  'get_roadshow_file',
+  'download_roadshow_slides',
 ];
 
 const textOf = (r: any) => (r.content as any[]).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
@@ -545,6 +548,151 @@ describe('mcp tools through the SDK client', () => {
     expect(second.result.isError).toBe(true);
     expect(second.result.content[0].text).toMatch(new RegExp(`still running \\(jobId ${first.result.structuredContent.jobId}\\)`));
     expect(await untilSettled(projectId)).toMatchObject({ status: 'ready', version: 7, lastRequest: { status: 'done', request: '第一个修改' } });
+  });
+
+  const auth = () => ({ authorization: `Bearer ${token}` });
+  let latencyPath = '';
+
+  it('list_roadshow_files lists the source files as in the ZIP, with links that take the token', async () => {
+    const latency = db.prepare(`SELECT id FROM assets WHERE project_id = ? AND filename = 'latency.png'`).get(projectId) as { id: string };
+    const row = db.prepare('SELECT doc FROM projects WHERE id = ?').get(projectId) as { doc: string };
+    const doc = JSON.parse(row.doc);
+    doc.pages[0].html += `<img src="/api/assets/${latency.id}" alt="延迟分布">`;
+    db.prepare('UPDATE projects SET doc = ? WHERE id = ?').run(JSON.stringify(doc), projectId);
+    latencyPath = `assets/${latency.id}.png`;
+
+    const r = await call('list_roadshow_files', { projectId });
+    expect(r.isError).toBeFalsy();
+    const d = r.structuredContent;
+    expect(d).toMatchObject({ projectId, version: 7, current: true, pageCount: 3, zipUrl: `${base}/api/projects/${projectId}/source`, downloadAuth: expect.stringContaining('Bearer') });
+    const kinds = d.files.map((f: any) => f.kind);
+    expect(kinds[0]).toBe('readme');
+    expect(kinds.filter((k: string) => k === 'page')).toHaveLength(3);
+    expect(kinds.slice(-1)).toEqual(['image']);
+    expect(kinds).toContain('style');
+    expect(kinds.indexOf('index')).toBeLessThan(kinds.indexOf('page'));
+    expect(d.files.filter((f: any) => f.kind === 'page').map((f: any) => [f.page, f.path])).toEqual(
+      d.files.filter((f: any) => f.kind === 'page').map((f: any, i: number) => [i + 1, expect.stringMatching(/^pages\/.+\.html$/)]),
+    );
+    expect(d.files.find((f: any) => f.kind === 'page').title).toEqual(expect.any(String));
+    expect(d.files.at(-1)).toMatchObject({ path: latencyPath, mimeType: 'image/png', bytes: Buffer.from(PNG_1x1, 'base64').length });
+    expect(d.fileCount).toBe(d.files.length);
+    expect(d.totalBytes).toBe(d.files.reduce((n: number, f: any) => n + f.bytes, 0));
+    expect(d.uploads.find((u: any) => u.filename === 'latency.png')).toMatchObject({ role: 'embed', url: `${base}/api/assets/${latency.id}` });
+    expect(Object.keys(d.downloads)).toEqual(['html', 'pdf', 'pdf-image', 'pptx', 'zip']);
+
+    const page1 = d.files.find((f: any) => f.page === 1);
+    const res = await fetch(page1.url, { headers: auth() });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain(`../${latencyPath}`);
+    const img = await fetch(d.files.at(-1).url, { headers: auth() });
+    expect(img.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await img.arrayBuffer()).toString('base64')).toBe(PNG_1x1);
+    expect((await fetch(page1.url)).status).toBe(401);
+
+    const old = await call('list_roadshow_files', { projectId, version: 1 });
+    expect(old.structuredContent).toMatchObject({ version: 1, current: false, zipUrl: `${base}/api/projects/${projectId}/source?versionNo=1` });
+    expect(old.structuredContent.files.some((f: any) => f.kind === 'image')).toBe(false);
+    expect(old.structuredContent.files[0].url).toBe(`${base}/api/projects/${projectId}/source?path=README.md&versionNo=1`);
+    expect(old.structuredContent.downloads.zip).toMatch(/format=zip&versionNo=1$/);
+    expect(textOf(await call('list_roadshow_files', { projectId, version: 99 }))).toMatch(/no version 99; its versions are 1 to 7/);
+    expect((await call('list_roadshow_files', { projectId: aliceDeck })).isError).toBe(true);
+    expect((await call('list_roadshow_files', { projectId: templateId })).isError).toBe(true);
+  });
+
+  it('get_roadshow_file reads text in parts, returns images, and can show the rendered page', async () => {
+    const { files } = (await call('list_roadshow_files', { projectId })).structuredContent;
+    const readme = await call('get_roadshow_file', { projectId, path: 'README.md' });
+    expect(readme.isError).toBeFalsy();
+    const full = await (await fetch(files[0].url, { headers: auth() })).text();
+    expect(readme.content[1]).toEqual({ type: 'text', text: full });
+    expect(readme.structuredContent).toMatchObject({ path: 'README.md', kind: 'readme', mimeType: 'text/markdown', offset: 0, totalChars: full.length, text: full });
+    expect(readme.structuredContent.nextOffset).toBeUndefined();
+    const rest = await call('get_roadshow_file', { projectId, path: 'README.md', offset: 5 });
+    expect(rest.content[1].text).toBe(full.slice(5));
+    expect(textOf(await call('get_roadshow_file', { projectId, path: 'README.md', offset: full.length + 1 }))).toMatch(/past the end/);
+
+    const css = files.find((f: any) => f.kind === 'style');
+    const style = await call('get_roadshow_file', { projectId, path: `./${css.path}` });
+    expect(style.structuredContent).toMatchObject({ path: css.path, kind: 'style', mimeType: 'text/css' });
+    expect(style.content[1].text).toContain('#111827');
+
+    const page = files.find((f: any) => f.page === 2);
+    const shot = await call('get_roadshow_file', { projectId, path: page.path, includeImage: true });
+    expect(shot.structuredContent).toMatchObject({ kind: 'page', page: 2 });
+    expect(shot.content[1].text).toContain('<section');
+    const image = shot.content.find((c: any) => c.type === 'image');
+    expect(image.mimeType).toBe('image/jpeg');
+    expect(Buffer.from(image.data, 'base64').subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+
+    const png = await call('get_roadshow_file', { projectId, path: latencyPath });
+    expect(png.structuredContent).toMatchObject({ kind: 'image', mimeType: 'image/png' });
+    expect(png.content[1]).toEqual({ type: 'image', data: PNG_1x1, mimeType: 'image/png' });
+
+    expect(textOf(await call('get_roadshow_file', { projectId, path: 'README.md', includeImage: true }))).toMatch(/only works for pages/);
+    const missing = await call('get_roadshow_file', { projectId, path: 'pages/99-nope.html' });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toContain('README.md');
+    expect(textOf(missing)).toContain(page.path);
+    expect((await call('get_roadshow_file', { projectId: aliceDeck, path: 'README.md' })).isError).toBe(true);
+  });
+
+  it('download_roadshow_slides returns the ZIP or an export embedded, with its checksum', async () => {
+    const JSZip = (await import('jszip')).default;
+    const { createHash } = await import('node:crypto');
+    const r = await call('download_roadshow_slides', { projectId });
+    expect(r.isError).toBeFalsy();
+    const d = r.structuredContent;
+    expect(d).toMatchObject({
+      version: 7,
+      format: 'zip',
+      filename: '搜索服务 v2.1 压测报告（终版）.zip',
+      mimeType: 'application/zip',
+      embedded: true,
+      url: `${base}/api/projects/${projectId}/source`,
+    });
+    const res = r.content.find((c: any) => c.type === 'resource').resource;
+    expect(res).toMatchObject({ uri: d.url, mimeType: 'application/zip' });
+    const buf = Buffer.from(res.blob, 'base64');
+    expect(buf.length).toBe(d.bytes);
+    expect(createHash('sha256').update(buf).digest('hex')).toBe(d.sha256);
+    const zip = await JSZip.loadAsync(buf);
+    const entries = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+    expect(entries.sort()).toEqual([...d.files].sort());
+    expect(entries).toContain(latencyPath);
+    const listed = (await call('get_roadshow_file', { projectId, path: 'README.md' })).content[1].text;
+    expect(await zip.file('README.md')!.async('string')).toBe(listed);
+
+    const viaHttp = await fetch(d.url, { headers: auth() });
+    expect(viaHttp.headers.get('content-type')).toBe('application/zip');
+    expect(Object.keys((await JSZip.loadAsync(Buffer.from(await viaHttp.arrayBuffer()))).files)).toEqual(expect.arrayContaining(d.files));
+
+    const html = await call('download_roadshow_slides', { projectId, format: 'html' });
+    expect(html.structuredContent).toMatchObject({ format: 'html', mimeType: 'text/html', filename: '搜索服务 v2.1 压测报告（终版）.html' });
+    expect(html.structuredContent.url).toBe(`${base}/api/projects/${projectId}/export?format=html`);
+    expect(Buffer.from(html.content[1].resource.blob, 'base64').toString()).toContain('<section');
+
+    const v1 = await call('download_roadshow_slides', { projectId, version: 1 });
+    expect(v1.structuredContent).toMatchObject({ version: 1, filename: '搜索服务 v2.1 压测报告（终版）-v1.zip', url: `${base}/api/projects/${projectId}/source?versionNo=1` });
+    expect(v1.structuredContent.files).not.toContain(latencyPath);
+    expect(v1.structuredContent.sha256).not.toBe(d.sha256);
+
+    expect(textOf(await call('download_roadshow_slides', { projectId, format: 'docx' }))).toMatch(/"format" must be one of/);
+    expect((await call('download_roadshow_slides', { projectId: aliceDeck })).isError).toBe(true);
+  });
+
+  it('the source endpoint serves files to users and the token, for MCP decks only', async () => {
+    const url = `/api/projects/${projectId}/source?path=README.md&versionNo=1`;
+    const viaToken = await req('GET', url, '', undefined, auth());
+    expect(viaToken.status).toBe(200);
+    expect(viaToken.res.headers['content-type']).toContain('text/markdown');
+    expect((await req('GET', url, alice)).status).toBe(200);
+    expect((await req('GET', `/api/projects/${projectId}/source?path=../secret`, alice)).status).toBe(404);
+    expect((await req('GET', `/api/projects/${projectId}/source?path=README.md&versionNo=99`, alice)).status).toBe(404);
+    expect((await req('GET', `/api/projects/${aliceDeck}/source?path=README.md`, '', undefined, auth())).status).toBe(404);
+    expect((await req('GET', `/api/projects/${aliceDeck}/source`, alice)).res.headers['content-type']).toBe('application/zip');
+    expect((await req('GET', `/api/projects/${projectId}/source`, '')).status).toBe(401);
   });
 
   it('delete_roadshow_slides removes the deck with its history and files', async () => {
