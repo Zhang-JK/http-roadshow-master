@@ -1178,7 +1178,11 @@ function trimPromptImages(messages: ChatMessage[], canReopen: boolean): ChatMess
   return out;
 }
 
-function reviewPrompt(draft: Draft, view: DeckDoc, report: string): string {
+/** Review and check fixes when edit_pages_in_parallel is offered: the reviewer coordinates, sub-agents rewrite. */
+const DELEGATE_LINE =
+  '\n【分派修复】你负责审阅与协调：需要改写多页时（多页内容过多或过空、风格或数据不一致、多页的检查错误），用 edit_pages_in_parallel 把这些页面分组交给子任务同时修复，每组写清每页的问题与改法；共享样式与 README 的问题自己改。子任务完成后审阅返回的缩略图与检查结果，仍有问题就再派一轮，零散的小问题直接用工具修改。';
+
+function reviewPrompt(draft: Draft, view: DeckDoc, report: string, delegate = false): string {
   const scope =
     draft.mode === 'fragment'
       ? draft.canEdit('styles/main.css')
@@ -1191,7 +1195,7 @@ function reviewPrompt(draft: Draft, view: DeckDoc, report: string): string {
 2. 对照缩略图检查视觉问题：拥挤或大片空白、对比度不足、元素错位、各页风格不统一、与要求或参考不符。
 3. 用 render_pages 渲染指定页看细节（可 full_size），用 find_elements / read_draft（path 指定文件）/ find_css 查看源码；优先用 edit_elements（按 data-eid 改文字、样式、属性）、edit_css 或 replace_in_draft 做局部修改，只有需要重新排版整页时才用 rewrite_page；改完用 render_pages 或 check_layout 复查。
 4. 修改只作用于草稿；参考文件始终只读。
-5. 确认无误后，直接用一两句话总结你做了哪些修改（或“无需修改”），不要再输出完整 HTML。${scope}
+5. 确认无误后，直接用一两句话总结你做了哪些修改（或“无需修改”），不要再输出完整 HTML。${scope}${delegate ? DELEGATE_LINE : ''}
 
 【自动布局检查】
 ${report}`;
@@ -1234,6 +1238,8 @@ export interface ReviewOptions extends ChatOptions {
   resolver: Resolver;
   prompt: ChatMessage[];
   fileTools?: FileTools;
+  /** edit_pages_in_parallel: the reviewing model may hand pages that need rewriting to sub-agents. */
+  delegate?: FileTools;
   maxRounds: number;
   onTool?: (name: string, args: Record<string, unknown>) => void;
   onStage?: (stage: string) => void;
@@ -1267,13 +1273,13 @@ export interface ReviewState {
 /** Times a failed delivery check goes back to the model; still failing after that fails the job. */
 export const MAX_CHECK_FIXES = 3;
 
-function checkPrompt(draft: Draft, report: string): string {
+function checkPrompt(draft: Draft, report: string, delegate = false): string {
   const scope =
     draft.mode === 'fragment'
       ? `本次只能修改第 ${draft.describeEditable()} 页、${ADDITIONS_CSS} 与 README.md，其他文件的问题已省略。`
       : '';
   return `【交付检查】草稿已按导出结构组装为 index.html 与各页面文件，并在浏览器中加载检查。${scope}
-请修复下面的「✗ 错误」（用 read_draft 查看文件，用 replace_in_draft / write_file / edit_css / edit_elements 修改），「△ 提醒」酌情处理；修复后可调用 check_project 复查。完成后用一两句话总结，不要输出完整 HTML。
+请修复下面的「✗ 错误」（用 read_draft 查看文件，用 replace_in_draft / write_file / edit_css / edit_elements 修改），「△ 提醒」酌情处理；修复后可调用 check_project 复查。完成后用一两句话总结，不要输出完整 HTML。${delegate ? DELEGATE_LINE : ''}
 
 ${report}`;
 }
@@ -1288,8 +1294,9 @@ ${report}`;
  * the checker itself never fail the job: the draft as it stands is kept.
  */
 export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): Promise<ReviewLog> {
-  const { draft, resolver, prompt, fileTools, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, baseline, resume, onCheckpoint, ...chatOpts } =
+  const { draft, resolver, prompt, fileTools, delegate, maxRounds, onTool, onStage, onUsage, skipIfClean, layoutReview = true, finalCheck = true, baseline, resume, onCheckpoint, ...chatOpts } =
     opts;
+  const delegating = !!delegate && draft.mode === 'doc';
   const editsBefore = resume?.editsBefore ?? draft.edits;
   const focus = () => (draft.mode === 'fragment' ? draft.editablePages() : undefined);
   const inspect = async () => {
@@ -1301,7 +1308,7 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
   const log: ReviewLog = resume?.log ?? { before: { errors: 0, warnings: 0 }, after: { errors: 0, warnings: 0 }, passes: 0, toolCalls: 0, edits: 0 };
   let history: ChatMessage[] | undefined = resume?.history;
   const save = (at: Pick<ReviewState, 'layout' | 'check'>) => onCheckpoint?.({ log, editsBefore, history, ...at });
-  const tools = combineTools(createDraftTools(draft, resolver, db), fileTools);
+  const tools = combineTools(createDraftTools(draft, resolver, db), fileTools, delegating ? delegate : undefined);
   const converse = async (messages: ChatMessage[], rounds: number, at: (loop: ToolLoopState) => Pick<ReviewState, 'layout' | 'check'>, loop?: ToolLoopState) => {
     const r = await chatWithTools(db, userId, messages, {
       ...chatOpts,
@@ -1351,7 +1358,7 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
           ]);
           messages = [
             ...opening(first.view.pages.length),
-            { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text) }, ...images] },
+            { role: 'user', content: [{ type: 'text', text: reviewPrompt(draft, first.view, first.text, delegating) }, ...images] },
           ];
         }
       }
@@ -1417,7 +1424,7 @@ export async function reviewDraft(db: DB, userId: number, opts: ReviewOptions): 
       try {
         const f = fix;
         const r = await converse(
-          loop ? [] : [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues)) }],
+          loop ? [] : [...(history ?? opening(input.doc.pages.length)), { role: 'user', content: checkPrompt(draft, formatProjectReport(input.doc, issues), delegating) }],
           Math.max(3, Math.ceil(maxRounds / 2)),
           (l) => ({ check: { fix: f, loop: l } }),
           loop,

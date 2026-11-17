@@ -388,7 +388,10 @@ function sharedProgress(jobId: string) {
 /** Page batches and edit groups written at once: the setting, within what the endpoints take together. */
 const parallelLimit = (db: DB) => Math.min(Number(getSettings(db).genParallel) || 4, parallelCapacity(db));
 
-/** edit_pages_in_parallel for a whole-deck tool edit: its groups go to sub-agents with the reference and chart tools. */
+/** What sub-agents are told when the review of a new project hands them pages. */
+const GENERATION_REQUEST = '按 README.md 的需求、风格约定与页面规划完成这份材料，并修正审阅与交付检查发现的问题';
+
+/** edit_pages_in_parallel for a whole-deck tool edit or the review of a whole draft: its groups go to sub-agents with the reference and chart tools. */
 function groupEditTools(db: DB, jobId: string, userId: number, draft: Draft, ctx: ParallelEditContext, tools: FileTools | undefined, parallel: number): FileTools {
   const progress = sharedProgress(jobId);
   const charts = tools?.defs.some((t) => t.function.name === 'make_chart');
@@ -396,6 +399,7 @@ function groupEditTools(db: DB, jobId: string, userId: number, draft: Draft, ctx
     call: (messages, stage) =>
       runStep(db, jobId, userId, charts ? withNote(messages, CHART_NOTE) : messages, tools, stage, true, progress.report(stage)).finally(() => progress.done(stage)),
     lookAt: getSettings(db).pageReview === false ? undefined : (d) => lookAtPages(db, d),
+    resolver: makeAssetResolver(db),
     onStage: progress.setStage,
     parallel,
     retryDelayMs: config.pageRetryDelayMs,
@@ -479,7 +483,7 @@ async function selfReview(
   fileTools?: FileTools,
   skipIfClean = false,
   before?: DeckDoc,
-  progress: Progress<ReviewState> = {},
+  progress: Progress<ReviewState> & { delegate?: FileTools } = {},
 ): Promise<ReviewLog> {
   const settings = getSettings(db);
   const log = await reviewDraft(db, userId, {
@@ -487,6 +491,7 @@ async function selfReview(
     resolver: makeAssetResolver(db),
     prompt,
     fileTools,
+    delegate: progress.delegate,
     maxRounds: Number(settings.selfCheckRounds) || 10,
     maxTokens: Number(settings.maxTokens) || undefined,
     temperature: Number(settings.temperature),
@@ -745,7 +750,12 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
         }
         save({ review: { draft: draft.save(), prompt: reviewContext } });
       }
+      const reviewParallel = draft.mode === 'doc' && draft.view().pages.length > 1 ? parallelLimit(db) : 1;
       await selfReview(db, job.id, userId, draft, reviewContext, ft?.tools, false, undefined, {
+        delegate:
+          reviewParallel > 1
+            ? groupEditTools(db, job.id, userId, draft, { request: GENERATION_REQUEST, kind: project.type, assets }, combineTools(ft?.tools, charts), reviewParallel)
+            : undefined,
         resume: cp.review?.state,
         save: (state) => save({ review: { draft: draft.save(), prompt: reviewContext, state } }),
       });
@@ -853,7 +863,12 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
         }
         save({ ...ctx, review: { draft: draft.save(), prompt: messages } });
       }
+      const reviewParallel = scope === 'global' && draft.mode === 'doc' && draft.view().pages.length > 1 ? parallelLimit(db) : 1;
       await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools', snapshot, {
+        delegate:
+          reviewParallel > 1
+            ? groupEditTools(db, job.id, userId, draft, { request: input.prompt, kind: project.type, assets: toAssetRefs(db, projectAssets(db, projectId), false, ft?.ids) }, charts ? combineTools(ft?.tools, charts) : ft?.tools, reviewParallel)
+            : undefined,
         resume: cp.review?.state,
         save: (state) => save({ ...ctx, review: { draft: draft.save(), prompt: messages, state } }),
       });

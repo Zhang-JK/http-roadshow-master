@@ -3,10 +3,13 @@
  * sub-agents that rewrite them at the same time, each in its own conversation with the README and
  * the styles as the contract. Every group is tried again on its own when its call fails, and a group
  * that still fails leaves its pages as they were without holding up the others. When all are done the
- * editing model gets a report, checks the whole draft and fixes what the groups left inconsistent.
+ * coordinating model gets a report with thumbnails and the layout check of every page the round
+ * changed, reviews them all and sends the next round (or fixes small things itself). The same tool
+ * serves the coordinator in the self-check and the delivery-check fixes.
  */
 import type { DeckDoc } from './deck.js';
-import type { Draft } from './draft.js';
+import { formatReport, type Draft } from './draft.js';
+import { inspectLayout, renderContactSheets } from './render.js';
 import type { FileTools, ToolDef, ToolOutput } from './fileTools.js';
 import { ADDITIONS_CSS, checkPath, cssFiles, nameFiles, parseFileBlocks } from './files.js';
 import { PAGE_BATCH_TRIES, PAGE_REVIEW_ROUNDS, type PageLook } from './generate.js';
@@ -17,7 +20,12 @@ export const PARALLEL_EDIT_TOOL = 'edit_pages_in_parallel';
 const MAX_GROUPS = 16;
 const MAX_GROUP_PAGES = 6;
 
+/** Thumbnails per contact sheet returned to the coordinator after a round. */
+const OVERVIEW_PER_SHEET = 12;
+
 export interface ParallelEditDeps {
+  /** When given, a finished round comes back with thumbnails and the layout check of the pages it changed. */
+  resolver?: (html: string) => string;
   /** One sub-agent call; 'review' continues a group's conversation with how its pages rendered. */
   call: (messages: ChatMessage[], stage: string, step: 'pages' | 'review') => Promise<ChatResult>;
   /** Renders pages (one look per page in order); when given, each group checks its rendered pages. */
@@ -264,11 +272,43 @@ export function createParallelEditTools(draft: Draft, ctx: ParallelEditContext, 
       ].filter(Boolean);
       return `${head}：${did.length ? did.join('，') : '子任务认为不需要修改'}${r.reviews ? `；看过渲染截图后又修正了 ${r.reviews} 次` : ''}`;
     });
+    const touched = groups.flatMap((g) => {
+      const r = results.get(g)!;
+      return r.error ? [] : [...r.changed, ...r.added];
+    });
+    const seen = await overview(touched);
+    const failedNote = ok < groups.length ? '失败的组可以再派一次，或自己修改；' : '';
     return {
-      content: `并行修改完成：${groups.length} 组中 ${ok} 组成功。\n${lines.join('\n')}\n各组是分别完成的：请用 render_pages 或 check_project 检查整体效果与页面之间的一致性，补上遗漏或失败的部分${
-        ok < groups.length ? '（可以把失败的组再派一次，或自己修改）' : ''
-      }，然后用一两句话总结所做的修改。`,
+      content: `并行修改完成：${groups.length} 组中 ${ok} 组成功。\n${lines.join('\n')}${seen.text}\n各组是分别完成的，请审阅全部结果：是否符合修改要求与 README，各页的风格、用语与数据是否一致，有没有布局问题${
+        seen.images.length ? '' : '（用 render_pages 或 check_project 查看）'
+      }。需要返工或还有遗漏的页面，再派下一轮 edit_pages_in_parallel（只派这些页面，写清楚每页的问题和要怎么改）；${failedNote}零散的小问题直接用工具修改。全部满意后用一两句话总结所做的修改。`,
+      images: seen.images,
     };
+  }
+
+  /** The coordinator's review of a round: thumbnails of every page it changed and their layout check. */
+  async function overview(files: string[]): Promise<{ text: string; images: { label: string; url: string }[] }> {
+    if (!deps.resolver || !files.length) return { text: '', images: [] };
+    try {
+      const view = draft.view();
+      const named = nameFiles(view.pages);
+      const nums = named.flatMap((p, i) => (files.includes(p.file!) ? [i + 1] : []));
+      if (!nums.length) return { text: '', images: [] };
+      const reports = await inspectLayout(view, deps.resolver, nums.map((n) => named[n - 1].id));
+      const sheets = await renderContactSheets({ ...view, pages: nums.map((n) => named[n - 1]) }, deps.resolver, {
+        labels: nums.map((n) => `第 ${n} 页 ${named[n - 1].file}`),
+        perSheet: OVERVIEW_PER_SHEET,
+      });
+      return {
+        text: `\n\n【本轮审阅】本轮改过的 ${nums.length} 页的缩略图附在后面；自动布局检查：\n${formatReport({ ...view, pages: named }, reports, nums)}`,
+        images: sheets.map((s, i) => ({
+          label: sheets.length > 1 ? `本轮改过的页面 ${i + 1}/${sheets.length}` : '本轮改过的页面',
+          url: `data:image/jpeg;base64,${s.toString('base64')}`,
+        })),
+      };
+    } catch (e) {
+      return { text: `\n\n（本轮结果渲染失败：${(e as Error).message.slice(0, 200)}）`, images: [] };
+    }
   }
 
   return { defs: [toolDef(parallel)], execute };
