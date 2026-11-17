@@ -740,6 +740,12 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
   })();
 }
 
+/** A past version by its number (as the history shows it), or undefined. */
+export function versionDocByNo(db: DB, projectId: string, versionNo: number): DeckDoc | undefined {
+  const row = db.prepare('SELECT doc FROM project_versions WHERE project_id = ? AND version_no = ?').get(projectId, versionNo) as { doc: string } | undefined;
+  return row ? (JSON.parse(row.doc) as DeckDoc) : undefined;
+}
+
 /** The saved document, with a README written from the creation brief when the project predates READMEs. */
 export function withReadme(project: ProjectRow, doc: DeckDoc = projectDoc(project)!): DeckDoc {
   if (doc.readme?.trim()) return doc;

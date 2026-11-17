@@ -1,9 +1,9 @@
 import fs from 'node:fs';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { DB } from '../db.js';
 import { HttpError, requireMcpCaller, requireUser, type ServiceUser } from '../auth.js';
 import { ASPECTS, assembleHtml, deletePage, duplicatePage, movePage, type DeckDoc } from '../deck.js';
-import { assetPath, assetUrl, deleteAsset, makeAssetResolver, projectAssets, saveAsset, slideAssets, type AssetRole, type AssetRow } from '../assets.js';
+import { assetPath, assetUrl, deleteAsset, projectAssets, saveAsset, slideAssets, type AssetRole, type AssetRow } from '../assets.js';
 import {
   applyManual,
   cleanTypedText,
@@ -20,13 +20,13 @@ import {
   retryJob,
   startEdit,
   startGeneration,
+  versionDocByNo,
   withProjectLock,
   withReadme,
   type JobRow,
   type ProjectRow,
 } from '../projects.js';
-import { renderImagePdf, renderPdf, renderPptx } from '../render.js';
-import { exportBundle } from '../bundle.js';
+import { EXPORT_FORMATS, exportDeck, isTextFile, sourceFiles, type ExportFormat } from '../exports.js';
 import { answerQuestion, pendingQuestion, projectsAsking } from '../questions.js';
 import { cssFiles, fileTree, nameFiles } from '../files.js';
 import { jobDuration, jobStats, type JobStats } from '../calls.js';
@@ -553,36 +553,44 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     });
   });
 
-  /** Also reachable with the MCP token, for decks the MCP account created. */
-  app.get('/api/projects/:id/export', async (req, reply) => {
+  /**
+   * The project (current or past version) a download asks for; also reachable with the MCP token, for
+   * decks the MCP account created. `version` is a version id (web), `versionNo` its number (MCP links).
+   */
+  function downloadable(req: FastifyRequest) {
     let mcp: ServiceUser | undefined;
     if (!req.user && req.headers.authorization) mcp = requireMcpCaller(db, req);
     else requireUser(req);
     const p = mustProject(db, (req.params as any).id);
     if (mcp && p.created_by !== mcp.id) throw new HttpError(404, '项目不存在');
-    const { format = 'html', version } = req.query as { format?: string; version?: string };
-    const doc = version ? versionDoc(p.id, Number(version)) : projectDoc(p);
-    if (!doc || !doc.pages.length) throw new HttpError(400, '项目尚无可导出的内容');
-    const resolver = makeAssetResolver(db);
-    const base = `${p.name}${version ? `-v${version}` : ''}`;
-    if (format === 'html') {
-      return sendFile(reply, assembleHtml(doc, { presenter: true, assetResolver: resolver }), 'text/html; charset=utf-8', `${base}.html`);
+    const { version, versionNo } = req.query as { version?: string; versionNo?: string };
+    const doc = versionNo ? versionDocByNo(db, p.id, Number(versionNo)) : version ? versionDoc(p.id, Number(version)) : projectDoc(p);
+    if (!doc) throw new HttpError(versionNo ? 404 : 400, versionNo ? '版本不存在' : '项目尚无可导出的内容');
+    if (!doc.pages.length) throw new HttpError(400, '项目尚无可导出的内容');
+    const tag = versionNo || version;
+    return { doc: withReadme(p, doc), base: `${p.name}${tag ? `-v${tag}` : ''}` };
+  }
+
+  app.get('/api/projects/:id/export', async (req, reply) => {
+    const { doc, base } = downloadable(req);
+    const { format = 'html' } = req.query as { format?: string };
+    if (!(EXPORT_FORMATS as readonly string[]).includes(format)) throw new HttpError(400, '不支持的导出格式');
+    const out = await exportDeck(db, doc, format as ExportFormat, base);
+    return sendFile(reply, out.buf, out.mime, out.filename);
+  });
+
+  /** One file of the source ZIP by its path (README.md, styles/…, pages/…, assets/…); without a path, the ZIP. */
+  app.get('/api/projects/:id/source', async (req, reply) => {
+    const { doc, base } = downloadable(req);
+    const { path: want } = req.query as { path?: string };
+    if (!want) {
+      const out = await exportDeck(db, doc, 'zip', base);
+      return sendFile(reply, out.buf, out.mime, out.filename);
     }
-    if (format === 'pdf') return sendFile(reply, await renderPdf(doc, resolver), 'application/pdf', `${base}.pdf`);
-    if (format === 'pdf-image') return sendFile(reply, await renderImagePdf(doc, resolver), 'application/pdf', `${base}.pdf`);
-    if (format === 'zip') {
-      const full = withReadme(p, doc);
-      return sendFile(reply, await exportBundle(db, full, full.readme ?? ''), 'application/zip', `${base}.zip`);
-    }
-    if (format === 'pptx') {
-      return sendFile(
-        reply,
-        await renderPptx(doc, resolver),
-        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        `${base}.pptx`,
-      );
-    }
-    throw new HttpError(400, '不支持的导出格式');
+    const f = sourceFiles(db, doc).find((x) => x.path === want.replace(/^\.?\//, ''));
+    if (!f) throw new HttpError(404, '文件不存在');
+    if (f.mimeType === 'image/svg+xml') reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+    return sendFile(reply, f.content, isTextFile(f) ? `${f.mimeType}; charset=utf-8` : f.mimeType, f.path.split('/').pop()!);
   });
 
   app.get('/api/assets/:assetId', async (req, reply) => {
