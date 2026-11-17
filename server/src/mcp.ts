@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -15,12 +16,14 @@ import {
   projectDoc,
   renameProject,
   startEdit,
+  versionDocByNo,
   withReadme,
   type JobRow,
   type ProjectRow,
 } from './projects.js';
 import { nameFiles, readmeBody } from './files.js';
 import { renderPageImages } from './render.js';
+import { EXPORT_FORMATS, exportDeck, isTextFile, sourceFiles, type ExportFormat, type SourceFile } from './exports.js';
 import { versionInfo } from './system.js';
 
 /** Newest first. Clients on newer revisions fall back to the initialize handshake when `server/discover` is unknown. */
@@ -68,12 +71,17 @@ const DOC_EXT: Record<string, string> = {
 };
 const PLAIN_TEXT_EXT = new Set(['html', 'htm', 'txt', 'md', 'csv', 'json', 'xml', 'yaml', 'yml']);
 const SUPPORTED = [...Object.keys(IMAGE_EXT), ...Object.keys(DOC_EXT)].join(', ');
-const EXPORT_FORMATS = ['html', 'pdf', 'pdf-image', 'pptx', 'zip'] as const;
+/** Text returned per get_roadshow_file call; longer files are read in parts with offset. */
+const FILE_CHUNK = 100_000;
+/** Larger downloads are only linked, not embedded in the tool result. */
+const MAX_EMBED_BYTES = 20 * 1024 * 1024;
+const DOWNLOAD_AUTH = 'Send the same "Authorization: Bearer <token>" header used for MCP.';
 
 const INSTRUCTIONS = `Creates roadshow slide decks (路演材料: HTML slides, exportable to PDF and PPTX) with HTTP 路演生成器.
 1. Call list_roadshow_templates and pick a templateId.
 2. Call create_roadshow_slides with everything the deck must show: the full test data and results (raw numbers and statistics in data; the server picks and draws the charts), and screenshots or existing charts as images. When the deck should show results but the user has not given the numbers, ask the user for the raw data first.
 3. Call get_roadshow_slides_status until status is "ready" (generation takes a few minutes), then share editorUrl or download the exports with the same bearer token.
+4. To verify the result: list_roadshow_files lists the deck's source files (README.md, styles, pages, images and charts), get_roadshow_file reads one (optionally with a screenshot of the page), and download_roadshow_slides returns the source ZIP or an HTML/PDF/PPTX export.
 To change a deck made earlier: call list_roadshow_slides to find it (title, dates, author, change history), get_roadshow_slides for its original request, files and full history, then update_roadshow_slides with the new data or changes (and get_roadshow_slides_status until it is "ready" again), or delete_roadshow_slides to remove it.`;
 
 class RpcError extends Error {
@@ -89,7 +97,10 @@ class RpcError extends Error {
 class ToolError extends Error {}
 
 type Args = Record<string, unknown>;
-type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
+type Content =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'resource'; resource: { uri: string; mimeType: string; blob: string } };
 interface ToolResult {
   content: Content[];
   structuredContent?: Record<string, unknown>;
@@ -195,6 +206,11 @@ const fileItemSchema = {
 };
 
 const projectIdSchema = { type: 'string', description: 'projectId from list_roadshow_slides or create_roadshow_slides.' };
+const versionSchema = {
+  type: 'integer',
+  minimum: 1,
+  description: 'A version from the history in get_roadshow_slides. Omit for the current deck.',
+};
 
 const dataSchema = (charts: boolean) => ({
   type: 'string',
@@ -280,7 +296,7 @@ The deck can only show what you send, and the generator does not make up numbers
       name: 'get_roadshow_slides_status',
       title: 'Get roadshow slides status',
       description:
-        'Progress and result of a deck started with create_roadshow_slides or changed with update_roadshow_slides. Waits up to waitSeconds while it is still "generating" or "updating". When status is "ready" it returns the page list, the editor link and download links (html, pdf, pdf-image, pptx, zip; send the same Authorization header); when "error" it returns the reason. lastRequest is the latest create or update made through MCP: if an update failed, status is "ready" with the deck unchanged and lastRequest.error says why.',
+        'Progress and result of a deck started with create_roadshow_slides or changed with update_roadshow_slides. Waits up to waitSeconds while it is still "generating" or "updating". When status is "ready" it returns the page list, the editor link and download links (html, pdf, pdf-image, pptx, zip; send the same Authorization header, or use download_roadshow_slides and list_roadshow_files to check the result); when "error" it returns the reason. lastRequest is the latest create or update made through MCP: if an update failed, status is "ready" with the deck unchanged and lastRequest.error says why.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -319,7 +335,7 @@ The deck can only show what you send, and the generator does not make up numbers
       name: 'get_roadshow_slides',
       title: 'Get roadshow slides',
       description:
-        'Everything about one deck created through MCP: the original request it was created from (originalRequest: templateId, name, content, purpose, audience, pageCount, notes, the same fields create_roadshow_slides takes), its uploaded files, the full change history with each request (who, when, what), failed requests, the page list, and the editor and download links. Use it to see what a deck already says before update_roadshow_slides.',
+        'Everything about one deck created through MCP: the original request it was created from (originalRequest: templateId, name, content, purpose, audience, pageCount, notes, the same fields create_roadshow_slides takes), its uploaded files, the full change history with each request (who, when, what), failed requests, the page list, and the editor and download links. Use it to see what a deck already says before update_roadshow_slides; list_roadshow_files and get_roadshow_file show the generated files themselves.',
       inputSchema: {
         type: 'object',
         properties: { projectId: projectIdSchema },
@@ -375,6 +391,53 @@ Send the new data in full, as for create_roadshow_slides: new or corrected numbe
         additionalProperties: false,
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: 'list_roadshow_files',
+      title: 'List roadshow files',
+      description:
+        'The source files of a deck created through MCP, exactly as in its source ZIP: README.md (the deck plan), styles/*.css, index.html (all pages), pages/*.html (one per page, with page number and title) and assets/* (the images and drawn charts the pages use), each with its size and a download link; plus the ZIP link, the export links and the uploaded files. Use it to verify what was generated, then get_roadshow_file to read a file or download_roadshow_slides to get the ZIP.',
+      inputSchema: {
+        type: 'object',
+        properties: { projectId: projectIdSchema, version: versionSchema },
+        required: ['projectId'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    {
+      name: 'get_roadshow_file',
+      title: 'Get roadshow file',
+      description: `Read one source file of a deck by its path from list_roadshow_files, e.g. "README.md", "styles/main.css", "pages/02-results.html" or "assets/<id>.png". Text files (Markdown, CSS, HTML, SVG charts) come back as text, at most ${FILE_CHUNK} characters per call (read on with offset = nextOffset); images come back as images. For a page, includeImage also returns a screenshot of how it renders.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: projectIdSchema,
+          path: { type: 'string', description: 'File path from list_roadshow_files.' },
+          version: versionSchema,
+          offset: { type: 'integer', minimum: 0, default: 0, description: 'Text files: the character to start from (nextOffset of the previous call).' },
+          includeImage: { type: 'boolean', default: false, description: 'Pages (pages/*.html) only: also return a screenshot of the rendered page.' },
+        },
+        required: ['projectId', 'path'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    {
+      name: 'download_roadshow_slides',
+      title: 'Download roadshow slides',
+      description: `Download a deck created through MCP as a file: "zip" (default) is the source ZIP with README.md, styles, pages and images; "html" a single presentable HTML file; "pdf" a PDF with selectable text; "pdf-image" a PDF of page images; "pptx" PowerPoint. The file comes back embedded (base64) with its name, size and SHA-256 when it is at most ${MAX_EMBED_BYTES / 1024 / 1024} MB, otherwise as a link to fetch with the same Authorization header. PDF and PPTX take a while to render.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: projectIdSchema,
+          format: { type: 'string', enum: [...EXPORT_FORMATS], default: 'zip', description: 'File format.' },
+          version: versionSchema,
+        },
+        required: ['projectId'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
   ];
 }
@@ -514,7 +577,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     return p;
   }
 
-  const downloadLinks = (base: string, id: string) => Object.fromEntries(EXPORT_FORMATS.map((f) => [f, `${base}/api/projects/${id}/export?format=${f}`]));
+  const downloadLinks = (base: string, id: string, query = '') =>
+    Object.fromEntries(EXPORT_FORMATS.map((f) => [f, `${base}/api/projects/${id}/export?format=${f}${query ? `&${query}` : ''}`])) as Record<ExportFormat, string>;
 
   async function listTemplates(req: FastifyRequest, args: Args): Promise<ToolResult> {
     const withPreviews = args.includePreviews === true;
@@ -640,7 +704,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       const done = mcpJob?.status === 'done' ? mcpJob : job;
       result.durationSeconds = done?.finished_at ? Math.round((done.finished_at - done.created_at) / 1000) : undefined;
       result.downloads = downloadLinks(base, project.id);
-      result.downloadAuth = 'Send the same "Authorization: Bearer <token>" header used for MCP.';
+      result.downloadAuth = DOWNLOAD_AUTH;
+      result.verify = 'list_roadshow_files lists the source files to check, get_roadshow_file reads one, download_roadshow_slides returns the ZIP.';
     }
     const content: Content[] = [{ type: 'text', text: json(result) }];
     if (args.includePreviews === true && result.status === 'ready' && doc) {
@@ -750,7 +815,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       ...(mcpJob ? { lastRequest: publicJob(db, mcpJob, names) } : {}),
       ...(hasPages ? { pageCount: doc!.pages.length, pages: pageList(doc!) } : {}),
       editorUrl: `${base}/p/${p.id}`,
-      ...(hasPages ? { downloads: downloadLinks(base, p.id), downloadAuth: 'Send the same "Authorization: Bearer <token>" header used for MCP.' } : {}),
+      ...(hasPages ? { downloads: downloadLinks(base, p.id), downloadAuth: DOWNLOAD_AUTH } : {}),
     };
     return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
   }
@@ -823,6 +888,129 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
   }
 
+  /** The deck as it is now or at `version`, with its README, for the file tools. */
+  function deckAt(svc: ServiceUser, args: Args) {
+    const p = myDeck(svc, textArg(args, 'projectId', { required: true })!.trim());
+    const asked = intArg(args, 'version', 1, 1_000_000);
+    const version = asked && Number(asked) !== p.version_no ? Number(asked) : undefined;
+    const doc = version ? versionDocByNo(db, p.id, version) : projectDoc(p);
+    if (version && !doc) throw new ToolError(`Deck "${p.id}" has no version ${version}; its versions are 1 to ${p.version_no} (see history in get_roadshow_slides).`);
+    if (!doc?.pages.length) {
+      throw new ToolError(
+        p.status === 'generating'
+          ? `Deck "${p.id}" is still being generated. Wait with get_roadshow_slides_status until it is "ready".`
+          : `Deck "${p.id}" has no pages${p.status === 'error' ? ` because its generation failed (${p.error ?? 'unknown error'})` : ''}.`,
+      );
+    }
+    const query = version ? `versionNo=${version}` : '';
+    return { p, doc: withReadme(p, doc), version: version ?? p.version_no, query, base: `${p.name}${version ? `-v${version}` : ''}` };
+  }
+
+  const sourceUrl = (base: string, id: string, query: string, file?: string) => {
+    const q = [file ? `path=${encodeURIComponent(file)}` : '', query].filter(Boolean).join('&');
+    return `${base}/api/projects/${id}/source${q ? `?${q}` : ''}`;
+  };
+
+  function findFile(files: SourceFile[], asked: string): SourceFile {
+    const want = asked.trim().replace(/\\/g, '/').replace(/^\.?\//, '');
+    const f = files.find((x) => x.path === want);
+    if (!f) throw new ToolError(`No file "${asked}" in this deck. Its files: ${files.map((x) => x.path).join(', ')}`);
+    return f;
+  }
+
+  async function listFiles(req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const { p, doc, version, query } = deckAt(svc, args);
+    const base = baseUrl(req);
+    const titles = new Map(pageList(doc).map((x) => [x.file, x.title]));
+    const files = sourceFiles(db, doc);
+    const result = {
+      projectId: p.id,
+      name: p.name,
+      version,
+      current: version === p.version_no,
+      pageCount: doc.pages.length,
+      fileCount: files.length,
+      totalBytes: files.reduce((n, f) => n + f.bytes, 0),
+      files: files.map((f) => ({
+        path: f.path,
+        kind: f.kind,
+        mimeType: f.mimeType,
+        bytes: f.bytes,
+        ...(f.page ? { page: f.page, title: titles.get(f.path) } : {}),
+        url: sourceUrl(base, p.id, query, f.path),
+      })),
+      zipUrl: sourceUrl(base, p.id, query),
+      downloads: downloadLinks(base, p.id, query),
+      uploads: projectAssets(db, p.id).map((a) => ({ ...publicAsset(db, a), url: `${base}/api/assets/${a.id}` })),
+      downloadAuth: DOWNLOAD_AUTH,
+      next: 'Read a file with get_roadshow_file (path from files), or get the whole ZIP with download_roadshow_slides.',
+    };
+    return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
+  }
+
+  async function getFile(req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const { p, doc, version, query } = deckAt(svc, args);
+    const f = findFile(sourceFiles(db, doc), textArg(args, 'path', { required: true })!);
+    const offset = Number(intArg(args, 'offset', 0, Number.MAX_SAFE_INTEGER) ?? 0);
+    const meta: Record<string, unknown> = {
+      projectId: p.id,
+      version,
+      path: f.path,
+      kind: f.kind,
+      mimeType: f.mimeType,
+      bytes: f.bytes,
+      ...(f.page ? { page: f.page } : {}),
+      url: sourceUrl(baseUrl(req), p.id, query, f.path),
+    };
+    const content: Content[] = [];
+    if (isTextFile(f)) {
+      const text = typeof f.content === 'string' ? f.content : f.content.toString('utf8');
+      if (offset > text.length) throw new ToolError(`"offset" is past the end of the file (${text.length} characters)`);
+      const part = text.slice(offset, offset + FILE_CHUNK);
+      const end = offset + part.length;
+      Object.assign(meta, { totalChars: text.length, offset, ...(end < text.length ? { nextOffset: end } : {}) });
+      content.push({ type: 'text', text: json(meta) }, { type: 'text', text: part });
+      meta.text = part;
+    } else {
+      content.push({ type: 'text', text: json(meta) });
+      if (f.bytes <= MAX_EMBED_BYTES) content.push({ type: 'image', data: (f.content as Buffer).toString('base64'), mimeType: f.mimeType });
+      else meta.note = `Too large to return here; download it from url. ${DOWNLOAD_AUTH}`;
+    }
+    if (args.includeImage === true) {
+      if (!f.page) throw new ToolError('includeImage only works for pages (pages/*.html)');
+      const [shot] = await renderPageImages(doc, makeAssetResolver(db), { pageIds: [doc.pages[f.page - 1].id], scale: 0.6, type: 'jpeg' });
+      if (shot) content.push({ type: 'text', text: `Page ${f.page} as rendered` }, { type: 'image', data: shot.image.toString('base64'), mimeType: 'image/jpeg' });
+    }
+    return { content, structuredContent: meta };
+  }
+
+  async function downloadSlides(req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const { p, doc, version, query, base: filename } = deckAt(svc, args);
+    const format = (textArg(args, 'format') ?? 'zip').trim() as ExportFormat;
+    if (!EXPORT_FORMATS.includes(format)) throw new ToolError(`"format" must be one of: ${EXPORT_FORMATS.join(', ')}`);
+    const base = baseUrl(req);
+    const url = format === 'zip' ? sourceUrl(base, p.id, query) : downloadLinks(base, p.id, query)[format];
+    const out = await exportDeck(db, doc, format, filename);
+    const embed = out.buf.length <= MAX_EMBED_BYTES;
+    const result = {
+      projectId: p.id,
+      version,
+      format,
+      filename: out.filename,
+      mimeType: out.mime.split(';')[0],
+      bytes: out.buf.length,
+      sha256: createHash('sha256').update(out.buf).digest('hex'),
+      url,
+      embedded: embed,
+      ...(format === 'zip' ? { files: sourceFiles(db, doc).map((f) => f.path) } : {}),
+      ...(embed ? {} : { note: `Larger than ${MAX_EMBED_BYTES / 1024 / 1024} MB; download it from url. ${DOWNLOAD_AUTH}` }),
+    };
+    req.log.info({ projectId: p.id, format, bytes: out.buf.length }, 'mcp download_roadshow_slides');
+    const content: Content[] = [{ type: 'text', text: json(result) }];
+    if (embed) content.push({ type: 'resource', resource: { uri: url, mimeType: result.mimeType, blob: out.buf.toString('base64') } });
+    return { content, structuredContent: result };
+  }
+
   async function callTool(req: FastifyRequest, svc: ServiceUser, params: Args): Promise<ToolResult> {
     const name = params.name;
     const args = (params.arguments ?? {}) as Args;
@@ -835,6 +1023,9 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       get_roadshow_slides: () => getSlides(req, svc, args),
       update_roadshow_slides: () => updateSlides(req, svc, args),
       delete_roadshow_slides: () => deleteSlides(req, svc, args),
+      list_roadshow_files: () => listFiles(req, svc, args),
+      get_roadshow_file: () => getFile(req, svc, args),
+      download_roadshow_slides: () => downloadSlides(req, svc, args),
     };
     if (typeof name !== 'string' || !Object.hasOwn(tools, name)) throw new RpcError(-32602, `Unknown tool: ${String(name)}`);
     try {
