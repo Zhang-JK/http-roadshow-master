@@ -347,7 +347,7 @@ The deck can only show what you send, and the generator does not make up numbers
     {
       name: 'update_roadshow_slides',
       title: 'Update roadshow slides',
-      description: `Change a deck created through MCP, the same as the 修改 box in the web editor: the generator edits the current deck according to instructions and saves the result as a new version (earlier versions stay in the history and can be restored on the web page). Returns at once; then call get_roadshow_slides_status until status is "ready" again and check lastRequest.
+      description: `Change a deck created through MCP, the same as the 修改 box in the web editor: the generator edits the current deck according to instructions and saves the result as a new version (earlier versions stay in the history and can be restored on the web page). A change to the whole deck that rewrites many pages is split into groups of pages that sub-agents rewrite at the same time, then checked as a whole. Returns at once; then call get_roadshow_slides_status until status is "ready" again and check lastRequest.
 
 Send the new data in full, as for create_roadshow_slides: new or corrected numbers with units as Markdown tables, what changed since the last version, and which pages or sections they replace or extend. New charts and data files go in files; name each in instructions and say where it belongs.${
         charts ? ' New raw numbers go in data: the generator redraws the affected charts or adds new ones; ask the user for the figures when the change is about results they have not given yet.' : ''

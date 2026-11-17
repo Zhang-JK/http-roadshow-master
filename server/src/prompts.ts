@@ -195,7 +195,11 @@ const SIMILAR_GUIDE = (scope: EditScope, explicitAll: boolean) => `
 }开放后再用工具修改这些页面（共享样式也会开放，改一条共享规则即可影响所有页面）；未开放就只保留局部修改，并在总结中提一句。
 4. 没有同类内容就直接结束。`;
 
-const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false) => `【修改方式】
+/** Whole-deck edits when edit_pages_in_parallel is offered. */
+const PARALLEL_LINE =
+  '- 要逐页改写很多页时（例如按新数据更新多页、翻译或统一改写全部文案、重做多页版式或图表），用 edit_pages_in_parallel 把页面分成几组，交给多个子任务同时修改：先自己完成影响所有页面的部分（README、共享样式、增删或调整页面），再分组派出，每组写清楚这些页面要怎么改；子任务完成后检查结果（render_pages / check_project），自己补上遗漏或不一致之处。只改少数几处时直接用上面的工具\n';
+
+const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false, parallel = false) => `【修改方式】
 草稿已载入为当前内容（项目文件见 read_draft），请用工具直接修改，只改与要求相关的部分，不要重新输出整份 HTML：
 - 修改要符合 README.md 中记录的需求与风格约定
 - 改文字、样式、属性，增删元素：edit_elements（用 data-eid 精确指定${scope === 'element' ? '，选中元素见上' : ''}，也可用 selector / contains；一次可改多个元素）
@@ -212,7 +216,7 @@ const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false) => `【�
 - 增删、拆分或改名页面后，README 的「页面规划」要与实际的 pages/*.html 一致
 - 不要写 JavaScript（<script>、onclick 等会被移除）；动效用 CSS，图表用内联 SVG
 - 修改后可用 render_pages 查看效果；结束前系统会做交付检查（组装 index.html、检查 README 与各文件），也可以自己先调用 check_project
-${ask ? ASK_LINE : ''}${scope === 'global' ? '' : `${SIMILAR_GUIDE(scope, explicitAll)}\n`}全部完成后用一两句话说明做了哪些修改。`;
+${scope === 'global' && parallel ? PARALLEL_LINE : ''}${ask ? ASK_LINE : ''}${scope === 'global' ? '' : `${SIMILAR_GUIDE(scope, explicitAll)}\n`}全部完成后用一两句话说明做了哪些修改。`;
 
 /** Generation: the model may clarify the brief before writing anything. */
 export const ASK_NOTE =
@@ -372,6 +376,8 @@ export interface EditRequest {
   ask?: boolean;
   /** The request already asks for every similar occurrence ("全部", "统一"…). */
   explicitAll?: boolean;
+  /** Whole-deck tool edits: edit_pages_in_parallel is offered. */
+  parallel?: boolean;
 }
 
 export function buildEditPrompt(
@@ -403,7 +409,7 @@ ${docBlock(doc, tools)}
 【可用素材】
 ${assetsBlock(assets)}
 
-${tools ? TOOL_GUIDE('global', req.ask) : `${REWRITE_FILES_GUIDE}${req.ask ? `\n${ASK_LINE}` : ''}`}${toolsNote([...assets, ...attachments], tools ? '修改完成后用一两句话说明。' : '最终回答按上面的格式输出文件。')}`;
+${tools ? TOOL_GUIDE('global', req.ask, false, req.parallel) : `${REWRITE_FILES_GUIDE}${req.ask ? `\n${ASK_LINE}` : ''}`}${toolsNote([...assets, ...attachments], tools ? '修改完成后用一两句话说明。' : '最终回答按上面的格式输出文件。')}`;
   } else {
     const n = req.pageIndex! + 1;
     const target =
@@ -688,6 +694,73 @@ ${batch.map((b) => `- 第 ${plan.indexOf(b) + 1} 页：${b.line}`).join('\n')}
   return [
     { role: 'system', content: SYSTEM(doc, 'files') },
     { role: 'user', content: [{ type: 'text', text }, ...imageParts(assets, images)] },
+  ];
+}
+
+export interface GroupTask {
+  /** The user's request for the whole edit. */
+  request: string;
+  /** What the coordinating model asks of this group. */
+  instructions: string;
+  /** This group's page files, in deck order. */
+  files: string[];
+  /** Pages the other groups are changing at the same time. */
+  others: string[];
+  group: number;
+  groups: number;
+}
+
+/**
+ * One group of a whole-deck edit that the editing model split up (edit_pages_in_parallel): the
+ * README and styles as the contract, this group's pages in full, and only these pages to change.
+ */
+export function buildGroupEditPrompt(doc: DeckDoc, kind: 'template' | 'deck', task: GroupTask, assets: AssetRef[]): ChatMessage[] {
+  const what = kind === 'template' ? '路演模板' : '路演材料';
+  const pages = nameFiles(doc.pages);
+  const mine = new Set(task.files);
+  const others = new Set(task.others);
+  const list = pages
+    .map((p, i) => `${i + 1}. ${p.file}${mine.has(p.file!) ? '［本组］' : others.has(p.file!) ? '［其他组同时修改］' : ''}：${pageText(p).split('\n')[0]?.slice(0, 40) ?? ''}`)
+    .join('\n');
+  const css =
+    doc.css.length > SHARED_CSS_INLINE
+      ? `（样式文件较长，这里只列出文件名：${cssFiles(doc.css).map((f) => f.path).join('、')}；页面只使用 README 风格约定中的 class 与 CSS 变量）`
+      : cssFiles(doc.css)
+          .map((f) => `<file path="${f.path}">\n${f.css}\n</file>`)
+          .join('\n\n');
+  const text = `【并行子任务】这份${what}（共 ${doc.pages.length} 页）的整份修改被拆成 ${task.groups} 组页面，由多个子任务同时完成；你负责第 ${task.group} 组，只修改本组页面。其他页面由其他子任务或负责整体的模型处理，共享样式与 README 也由它负责。
+
+【修改要求】
+${task.request}
+
+【本组任务】
+${task.instructions}
+
+${readmeBlock(doc)}
+
+【样式文件（共享，只读）】
+${css}
+
+【全部页面】
+${list}
+
+【本组页面当前内容】
+${pages
+  .filter((p) => mine.has(p.file!))
+  .map((p) => `<file path="${p.file}">\n${p.html}\n</file>`)
+  .join('\n\n')}
+
+【可用素材】
+${assetsBlock(assets)}
+
+【输出格式】
+- 输出本组中需要修改的页面文件，每个完整输出并用 <file path="pages/…"> … </file> 包裹，路径不变；内容是一个 <section class="slide">，原样保留已有的 data-page-id 与 data-eid；不需要修改的页面不要输出
+- 本组需要新增页面时，用新的文件名输出 pages/名称.html，会依次插在本组最后一页之后
+- 共享样式只读；本组确实需要新规则时输出 <file path="${ADDITIONS_CSS}">，只写新增规则（会追加到该文件末尾），不要改写已有规则
+- 不要输出 README.md、styles/ 下的其他文件或其他组的页面；页面中不要写 <style> 与 <script>${toolsNote(assets, '最终回答只输出本组文件。', kind === 'template')}`;
+  return [
+    { role: 'system', content: SYSTEM(doc, 'files') },
+    { role: 'user', content: text },
   ];
 }
 

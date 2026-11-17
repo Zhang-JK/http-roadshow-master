@@ -30,6 +30,7 @@ import {
 import { logEdit, plannedPages, readmeFromBrief } from './files.js';
 import { checkProject } from './projectCheck.js';
 import { describeGenerateState, generateFiles, type GenerateState, type PageLook } from './generate.js';
+import { createParallelEditTools, PARALLEL_EDIT_TOOL, type ParallelEditContext } from './parallelEdit.js';
 import { assetPath, assetsByIds, isChart, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { chartsAvailable, createChartTools } from './charts.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
@@ -226,7 +227,8 @@ interface JobCheckpoint {
   /** A long reply being continued (single-call generation, rewrite edits). */
   write?: WriteState;
   /** Edits: the document as the job found it and the prompt built from it. */
-  edit?: { snapshot: DeckDoc; messages: ChatMessage[]; mode: EditMode };
+  /** `parallel`: groups edit_pages_in_parallel may run at once (offered only to whole-deck tool edits). */
+  edit?: { snapshot: DeckDoc; messages: ChatMessage[]; mode: EditMode; parallel?: number };
   /** A tool edit under way. */
   tools?: { draft: DraftState; loop: ToolLoopState };
   /** The draft is written and under review. */
@@ -355,7 +357,50 @@ const toolStage = (name: string, args: Record<string, unknown>, phase = '自检'
     ? '等待用户回答问题'
     : name === 'make_chart'
       ? `绘制图表：${String(args.title || args.type || '').slice(0, 30)}`
-      : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+      : name === PARALLEL_EDIT_TOOL
+        ? `并行修改：派出 ${Array.isArray(args.groups) ? args.groups.length : 0} 组子任务`
+        : `${DRAFT_TOOL_NAMES.has(name) ? phase : '读取参考文件'}：${describeTool(name, args)}`;
+
+/**
+ * Progress of model calls running side by side for one job: one alone shows its own progress,
+ * several show the overall stage with their characters added up.
+ */
+function sharedProgress(jobId: string) {
+  const running = new Map<string, JobProgress>();
+  let overall = '';
+  const show = () => {
+    const all = [...running.values()];
+    jobProgress.set(jobId, all.length === 1 ? all[0] : { chars: all.reduce((n, p) => n + p.chars, 0), stage: overall });
+  };
+  return {
+    report: (stage: string) => (p: JobProgress) => {
+      running.set(stage, p);
+      show();
+    },
+    done: (stage: string) => running.delete(stage),
+    setStage: (stage: string) => {
+      overall = stage;
+      if (running.size) show();
+    },
+  };
+}
+
+/** Page batches and edit groups written at once: the setting, within what the endpoints take together. */
+const parallelLimit = (db: DB) => Math.min(Number(getSettings(db).genParallel) || 4, parallelCapacity(db));
+
+/** edit_pages_in_parallel for a whole-deck tool edit: its groups go to sub-agents with the reference and chart tools. */
+function groupEditTools(db: DB, jobId: string, userId: number, draft: Draft, ctx: ParallelEditContext, tools: FileTools | undefined, parallel: number): FileTools {
+  const progress = sharedProgress(jobId);
+  const charts = tools?.defs.some((t) => t.function.name === 'make_chart');
+  return createParallelEditTools(draft, ctx, {
+    call: (messages, stage) =>
+      runStep(db, jobId, userId, charts ? withNote(messages, CHART_NOTE) : messages, tools, stage, true, progress.report(stage)).finally(() => progress.done(stage)),
+    lookAt: getSettings(db).pageReview === false ? undefined : (d) => lookAtPages(db, d),
+    onStage: progress.setStage,
+    parallel,
+    retryDelayMs: config.pageRetryDelayMs,
+  });
+}
 
 /** Screenshots (about 1000 px on the long side) and layout findings of pages a batch just wrote. */
 async function lookAtPages(db: DB, doc: DeckDoc): Promise<PageLook[]> {
@@ -642,14 +687,7 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
         reviewContext = cp.review.prompt;
       } else {
         if (cp.gen || (!cp.write && settings.generateMode !== 'single')) {
-          // Page batches written side by side: one alone shows its own progress, several show the
-          // overall stage with their characters added up.
-          const batches = new Map<string, JobProgress>();
-          let pagesStage = '';
-          const showPages = () => {
-            const all = [...batches.values()];
-            jobProgress.set(job.id, all.length === 1 ? all[0] : { chars: all.reduce((n, p) => n + p.chars, 0), stage: pagesStage });
-          };
+          const progress = sharedProgress(job.id);
           const doc = await generateFiles(
             { base, kind: project.type, brief: meta.brief, template, assets },
             {
@@ -660,10 +698,6 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
                     ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
                     : runStep(db, job.id, userId, messages, ft?.tools, stage, true);
                 }
-                const report = (p: JobProgress) => {
-                  batches.set(stage, p);
-                  showPages();
-                };
                 return runStep(
                   db,
                   job.id,
@@ -672,16 +706,13 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
                   combineTools(ft?.tools, charts),
                   stage,
                   true,
-                  report,
-                ).finally(() => batches.delete(stage));
+                  progress.report(stage),
+                ).finally(() => progress.done(stage));
               },
-              onStage: (stage) => {
-                pagesStage = stage;
-                if (batches.size) showPages();
-              },
+              onStage: progress.setStage,
               lookAt: settings.pageReview === false ? undefined : (d) => lookAtPages(db, d),
               pagesPerCall: Number(settings.genPagesPerCall) || 3,
-              parallel: Math.min(Number(settings.genParallel) || 4, parallelCapacity(db)),
+              parallel: parallelLimit(db),
               retryDelayMs: config.pageRetryDelayMs,
               resume: cp.gen,
               onCheckpoint: (gen) => save({ gen }),
@@ -791,8 +822,9 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
       const otherRows = projectAssets(db, projectId).filter((a) => !attachmentIds.includes(a.id));
       const ft = fileToolsFor(db, [...otherRows, ...attachedRows]);
       const ctx = cp.edit ? { edit: cp.edit } : await prepareEdit(db, job, input, ft?.ids);
-      const { snapshot, messages, mode } = ctx.edit;
-      const charts = chartToolsFor(db, getProject(db, projectId)!, userId);
+      const { snapshot, messages, mode, parallel } = ctx.edit;
+      const project = getProject(db, projectId)!;
+      const charts = chartToolsFor(db, project, userId);
       const prompt = charts ? withNote(messages, CHART_NOTE) : messages;
       let draft: Draft;
       if (cp.review) draft = Draft.restore(cp.review.draft);
@@ -801,7 +833,11 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
           const d = cp.tools ? Draft.restore(cp.tools.draft) : scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
           draft = d;
           const fileTools = charts ? combineTools(ft?.tools, charts) : ft?.tools;
-          await editWithTools(db, job.id, userId, d, prompt, fileTools, askToolsFor(db, job, { draft: d, prompt: input.prompt }), {
+          const groups =
+            parallel && scope === 'global'
+              ? groupEditTools(db, job.id, userId, d, { request: input.prompt, kind: project.type, assets: toAssetRefs(db, projectAssets(db, projectId), false, ft?.ids) }, fileTools, parallel)
+              : undefined;
+          await editWithTools(db, job.id, userId, d, prompt, fileTools, combineTools(askToolsFor(db, job, { draft: d, prompt: input.prompt }), groups), {
             resume: cp.tools?.loop,
             save: (loop) => save({ ...ctx, tools: { draft: d.save(), loop } }),
           });
@@ -902,6 +938,7 @@ async function prepareEdit(db: DB, job: JobRow, input: EditInput, fileIds?: Map<
     }
   }
   const mode: EditMode = settings.editMode === 'rewrite' ? 'rewrite' : 'tools';
+  const parallel = scope === 'global' && mode === 'tools' && snapshot.pages.length > 1 ? parallelLimit(db) : 1;
   const messages = buildEditPrompt(
     snapshot,
     {
@@ -914,12 +951,13 @@ async function prepareEdit(db: DB, job: JobRow, input: EditInput, fileIds?: Map<
       attachments,
       ask: canAsk(db, job),
       explicitAll: asksForAll(input.prompt),
+      parallel: parallel > 1,
     },
     assets,
     project.type,
     mode,
   );
-  return { edit: { snapshot, messages, mode } };
+  return { edit: { snapshot, messages, mode, ...(parallel > 1 ? { parallel } : {}) } };
 }
 
 /** Runs a failed request again as a new job of `userId`; each failed job is retried at most once. */
