@@ -196,8 +196,14 @@ const SIMILAR_GUIDE = (scope: EditScope, explicitAll: boolean) => `
 4. 没有同类内容就直接结束。`;
 
 /** Whole-deck edits when edit_pages_in_parallel is offered. */
-const PARALLEL_LINE =
-  '- 要逐页改写很多页时（例如按新数据更新多页、翻译或统一改写全部文案、重做多页版式或图表），用 edit_pages_in_parallel 把页面分成几组，交给多个子任务同时修改：先自己完成影响所有页面的部分（README、共享样式、增删或调整页面），再分组派出，每组写清楚这些页面要怎么改；子任务完成后检查结果（render_pages / check_project），自己补上遗漏或不一致之处。只改少数几处时直接用上面的工具\n';
+const PARALLEL_LINE = `
+【工作流程：你负责规划与审阅，页面交给子任务并行修改】
+1. 规划：先读 README，确定要改哪些页面、每页怎么改。需求、风格或页面规划有变化时先更新 README（「页面规划」写清每页的新内容要点，这是子任务的依据）；共享样式、页面的增删与排序也由你直接完成
+2. 分派：要改写页面内容的修改，用 edit_pages_in_parallel 把这些页面分组（每组 1–6 页、各组不重复）交给子任务同时修改，每组写清每页的具体要求和要与其他页面保持一致的地方
+3. 审阅：工具返回各组的结果、本轮改过的页面缩略图与布局检查，逐页审阅全部结果（细节用 render_pages）
+4. 下一轮：仍有页面要返工或有遗漏时，再派一轮 edit_pages_in_parallel（只派这些页面，写清问题和改法）；零散的小问题直接用工具修改。全部满意后再总结；之后系统还会做自检与交付检查
+只改一两处文字或样式这类很小的修改，直接用上面的工具完成即可，不必分派
+`;
 
 const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false, parallel = false) => `【修改方式】
 草稿已载入为当前内容（项目文件见 read_draft），请用工具直接修改，只改与要求相关的部分，不要重新输出整份 HTML：
