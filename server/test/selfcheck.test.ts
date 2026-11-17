@@ -162,10 +162,11 @@ describe('self-check agent loop', () => {
     expect(first.text).not.toContain('<section class="slide" data-layout'); // the draft HTML is not resent
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
       [
-        'check_layout', 'check_project', 'delete_file', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'find_css', 'find_elements',
-        'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page', 'write_file',
+        'check_layout', 'check_project', 'delete_file', 'delete_page', 'duplicate_page', 'edit_css', 'edit_elements', 'edit_pages_in_parallel', 'find_css',
+        'find_elements', 'insert_page', 'move_page', 'read_draft', 'render_pages', 'replace_in_draft', 'rewrite_page', 'write_file',
       ],
     );
+    expect(first.text).toContain('【分派修复】');
 
     const results = toolResults(calls[2]);
     expect(results[1]).toContain('pages/content-1.html — 第 2 页［可修改］');
