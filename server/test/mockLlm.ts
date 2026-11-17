@@ -258,6 +258,16 @@ function mockEditRound(text: string, messages: any[]): { name: string; args: Rec
     return null;
   }
   if (done) return null;
+  // PARALLEL: change the shared colour, then send every page to a group of its own
+  // (PARALLEL_FAIL: the group of page 2 never gets an answer; PARALLEL_FLAKY: it fails once).
+  if (request.includes('PARALLEL') && text.includes('edit_pages_in_parallel')) {
+    const files = [...text.matchAll(/^(pages\/[\w.-]+\.html) — 第 (\d+) 页/gm)].map((m) => m[1]);
+    const marker = request.includes('PARALLEL_FAIL') ? ' GROUP_DOWN' : request.includes('PARALLEL_FLAKY') ? ' GROUP_FLAKY' : '';
+    return [
+      { name: 'edit_css', args: { selector: ':root', set: { '--brand': '#0f766e' } } },
+      { name: 'edit_pages_in_parallel', args: { groups: files.map((f, i) => ({ pages: [f], instructions: `GROUP-${i + 1} 更新本页数据${i === 1 ? marker : ''}` })) } },
+    ];
+  }
   const overflow = text.includes('FIX_DRAFT') ? [{ name: 'edit_elements', args: { selector: 'section', insert: { position: 'append', html: OVERFLOW } } }] : [];
   const eids = text.match(/选中元素的 data-eid：([^（]+)（/)?.[1].split('、');
   if (eids) {
@@ -331,6 +341,9 @@ export async function startMockLlm(opts: MockOptions = {}) {
   /** Page batches being answered right now, and the most at once (MANY_PAGES replies take a moment). */
   let pagesNow = 0;
   let pagesMax = 0;
+  /** Groups of a parallel edit answered at once. */
+  let groupsNow = 0;
+  let groupsMax = 0;
   const setOnline = () => {
     offline = false;
     for (const k of page5Down) page5Healed.add(k);
@@ -398,6 +411,14 @@ export async function startMockLlm(opts: MockOptions = {}) {
     if (editRequest.includes('FAIL_ONCE') && !failedOnce.has(`${body.model}|${editRequest}`)) {
       failedOnce.add(`${body.model}|${editRequest}`);
       res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model overloaded (FAIL_ONCE)' } }));
+      return;
+    }
+    // A group of a parallel edit: GROUP_DOWN always fails, GROUP_FLAKY fails on its first try.
+    const groupTask = text.includes('【并行子任务】') ? (text.match(/【本组任务】\n([^\n]*)/)?.[1] ?? '') : '';
+    const flaky = groupTask.includes('GROUP_FLAKY') && !failedOnce.has(`group|${groupTask}`);
+    if (flaky) failedOnce.add(`group|${groupTask}`);
+    if (!lastUserStr.includes('【页面自检】') && (groupTask.includes('GROUP_DOWN') || flaky)) {
+      res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'model offline (GROUP)' } }));
       return;
     }
     if (text.startsWith('Parallel test:')) {
@@ -495,6 +516,16 @@ export async function startMockLlm(opts: MockOptions = {}) {
     } else if (planStep) {
       const answers = toolMsgs.map((m: any) => String(m.content)).filter((c: string) => /用户|回答/.test(c)).join(' ');
       reply = PLAN_REPLY(title, text.includes('MANY_PAGES') ? 7 : 3, `${(text.match(/【其他要求】(.*)/)?.[1] ?? '').trim()}${answers ? ` ASK-RESULT ${answers}` : ''}`);
+    } else if (groupTask) {
+      groupsMax = Math.max(groupsMax, ++groupsNow);
+      await new Promise((r) => setTimeout(r, 150));
+      groupsNow--;
+      const files = [...text.slice(text.indexOf('【本组页面当前内容】')).matchAll(/<file path="(pages\/[\w.-]+\.html)">\n([\s\S]*?)\n<\/file>/g)];
+      const tag = groupTask.split(' ')[0];
+      reply = files.map(([, path, html]) => `<file path="${path}">\n${html.replace(/<\/section>\s*$/, `<p class="body">${tag}-EDITED</p></section>`)}\n</file>`).join('\n\n');
+      if (editRequest.includes('PARALLEL_NEW_PAGE') && tag === 'GROUP-1') {
+        reply += `\n\n<file path="pages/group-extra.html">\n<section class="slide" data-layout="content"><h1 class="title">GROUP-NEW-PAGE</h1></section>\n</file>\n\n<file path="${'styles/additions.css'}">\n.group-note{color:#0f766e}\n</file>`;
+      }
     } else if (pageStep) {
       if (text.includes('MANY_PAGES')) {
         pagesMax = Math.max(pagesMax, ++pagesNow);
@@ -575,6 +606,9 @@ export async function startMockLlm(opts: MockOptions = {}) {
     },
     get pagesAtOnce() {
       return pagesMax;
+    },
+    get groupsAtOnce() {
+      return groupsMax;
     },
     setOnline,
     close: () => new Promise<void>((r) => server.close(() => r())),
