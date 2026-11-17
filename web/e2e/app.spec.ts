@@ -142,7 +142,8 @@ test('generation settings default to staged multi-file output within a 200K cont
   await expect(page.locator('[data-testid=context-tokens]')).toHaveValue('200000');
   await page.selectOption('[data-testid=generate-mode]', 'single');
   await expect(page.locator('[data-testid=pages-per-call]')).toHaveCount(0);
-  await expect(page.locator('[data-testid=gen-parallel]')).toHaveCount(0);
+  // Whole-deck edits run their page groups in parallel too, so the limit stays.
+  await expect(page.locator('[data-testid=gen-parallel]')).toHaveValue('4');
   await page.selectOption('[data-testid=generate-mode]', 'files');
   await expect(page.locator('[data-testid=pages-per-call]')).toBeVisible();
   const s = await page.evaluate(() => fetch('/api/settings').then((r) => r.json()));

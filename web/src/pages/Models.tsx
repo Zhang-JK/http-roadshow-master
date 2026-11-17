@@ -464,18 +464,17 @@ export function ModelsPage() {
                 <input type="number" min="1" max="10" defaultValue={settings.genPagesPerCall} onBlur={(e) => saveSettings({ genPagesPerCall: Number(e.target.value) })} data-testid="pages-per-call" />
               </label>
             )}
-            {settings.generateMode !== 'single' && (
-              <label className="field inline" title="规划好 README、样式与每页内容后，同时生成的页面批次数（1 = 逐批生成）；实际并行数不超过所有接入点的并发上限之和">
-                <span>并行生成批次</span>
-                <input type="number" min="1" max="16" defaultValue={settings.genParallel} onBlur={(e) => saveSettings({ genParallel: Number(e.target.value) })} data-testid="gen-parallel" />
-              </label>
-            )}
-            {settings.generateMode !== 'single' && (
-              <label className="switch">
-                <input type="checkbox" checked={settings.pageReview} onChange={(e) => saveSettings({ pageReview: e.target.checked })} data-testid="page-review-toggle" />
-                <span>逐批渲染自检：每批页面写完后，在无头浏览器中渲染这几页，把截图和布局检查结果交回写这批页面的模型，由它检查并修正（最多 2 轮），各批互不影响</span>
-              </label>
-            )}
+            <label
+              className="field inline"
+              title="分步生成时：规划好 README、样式与每页内容后同时生成的页面批次数。整份修改时：AI 把要逐页改写的页面分组，同时交给多少个子任务修改。1 = 逐批进行；实际并行数不超过所有接入点的并发上限之和"
+            >
+              <span>并行批次（生成与修改）</span>
+              <input type="number" min="1" max="16" defaultValue={settings.genParallel} onBlur={(e) => saveSettings({ genParallel: Number(e.target.value) })} data-testid="gen-parallel" />
+            </label>
+            <label className="switch">
+              <input type="checkbox" checked={settings.pageReview} onChange={(e) => saveSettings({ pageReview: e.target.checked })} data-testid="page-review-toggle" />
+              <span>逐批渲染自检：每批页面（分步生成的批次、整份修改时并行修改的每组页面）写完后，在无头浏览器中渲染这几页，把截图和布局检查结果交回写这批页面的模型，由它检查并修正（最多 2 轮），各批互不影响</span>
+            </label>
             <label className="field inline" title="工具修改：模型用结构化工具只改动相关元素和样式，输出量小、速度快；整页重写：模型重新输出整页（或整份）HTML，适合不擅长调用工具的模型">
               <span>AI 修改方式</span>
               <select value={settings.editMode} onChange={(e) => saveSettings({ editMode: e.target.value as 'tools' | 'rewrite' })} data-testid="edit-mode">
