@@ -1444,3 +1444,145 @@ test('share a deck: anyone with the link views it without signing in; signing in
 
   for (const p of [owner, anon, stranger]) await p.context().close();
 });
+
+test('decks go in folders: create folders and decks inside them, move decks by dialog or drag, delete a folder', async ({ browser }) => {
+  const p = await (await browser.newContext()).newPage();
+  p.on('dialog', (d) => d.accept());
+  await p.goto('/login');
+  await signIn(p, 'admin', 'admin123');
+  await p.goto('/decks');
+  const crumbs = p.locator('[data-testid=crumbs]');
+  await expect(crumbs).toHaveText('全部材料');
+  const folderCard = (name: string) => p.locator('[data-testid=folder-card]', { hasText: name });
+
+  await p.click('[data-testid=new-folder-btn]');
+  await p.fill('[data-testid=folder-name]', 'E2E 文件夹');
+  await p.click('[data-testid=folder-save]');
+  await expect(folderCard('E2E 文件夹')).toContainText('0 份材料');
+  await p.click('[data-testid=new-folder-btn]');
+  await p.fill('[data-testid=folder-name]', 'e2e 文件夹');
+  await p.click('[data-testid=folder-save]');
+  await expect(p.locator('.toast-error').last()).toContainText('已有名为');
+  await p.keyboard.press('Escape');
+
+  await folderCard('E2E 文件夹').click();
+  await expect(p).toHaveURL(/\/decks\?folder=/);
+  const folderUrl = p.url();
+  await expect(crumbs).toContainText('全部材料/E2E 文件夹');
+  await expect(p.locator('.empty')).toContainText('这个文件夹还是空的');
+  await p.click('[data-testid=new-folder-btn]');
+  await p.fill('[data-testid=folder-name]', '子文件夹');
+  await p.click('[data-testid=folder-save]');
+  await expect(folderCard('子文件夹')).toBeVisible();
+
+  // A deck made inside the folder is saved there; the editor's back button returns to it.
+  await p.click('[data-testid=create-btn]');
+  await p.locator('[data-testid=template-option]', { hasText: 'E2E 模板 · 改名' }).click();
+  await p.click('[data-testid=next-step]');
+  await expect(p.locator('[data-testid=create-folder] option:checked')).toContainText('E2E 文件夹');
+  await p.fill('input[name=name]', 'E2E 文件夹里的材料');
+  await p.fill('textarea[name=content]', '季度回顾');
+  await p.click('[data-testid=submit-create]');
+  await expect(p).toHaveURL(/\/p\//);
+  await expect(p.locator('[data-testid=page-thumb]')).toHaveCount(3, { timeout: 30_000 });
+  await p.click('a:has-text("← 返回")');
+  await expect(p).toHaveURL(folderUrl);
+  const deck = p.locator('[data-testid=project-card]', { hasText: 'E2E 文件夹里的材料' });
+  await expect(deck).toBeVisible();
+
+  // Not at the top level, but search looks in every folder and says where the deck is.
+  await crumbs.locator('button:has-text("全部材料")').click();
+  await expect(folderCard('E2E 文件夹')).toContainText('1 份材料 · 1 个文件夹');
+  await expect(deck).toHaveCount(0);
+  await p.fill('.search', '文件夹里的');
+  await expect(deck.locator('[data-testid=card-folder]')).toHaveText('📁 E2E 文件夹');
+  await p.fill('.search', '');
+
+  // Move to the top level with the dialog, then drag it onto the subfolder.
+  await p.goto(folderUrl);
+  await deck.hover();
+  await deck.locator('[data-testid=card-move]').click();
+  await p.selectOption('[data-testid=move-target]', '');
+  await p.click('[data-testid=move-save]');
+  await expect(p.locator('.toast-success').last()).toContainText('已移到「全部材料」');
+  await expect(deck).toHaveCount(0);
+  await crumbs.locator('button:has-text("全部材料")').click();
+  await expect(deck).toBeVisible();
+  await deck.dragTo(folderCard('E2E 文件夹'));
+  await expect(p.locator('.toast-success').last()).toContainText('已移到「E2E 文件夹」');
+  await expect(deck).toHaveCount(0);
+  await folderCard('E2E 文件夹').click();
+  await deck.dragTo(folderCard('子文件夹'));
+  await expect(p.locator('.toast-success').last()).toContainText('已移到「E2E 文件夹 / 子文件夹」');
+  await folderCard('子文件夹').click();
+  await expect(crumbs).toContainText('全部材料/E2E 文件夹/子文件夹');
+  await expect(deck).toBeVisible();
+  // Dropping on a crumb moves it up.
+  await deck.dragTo(crumbs.locator('button:has-text("E2E 文件夹")'));
+  await expect(p.locator('.toast-success').last()).toContainText('已移到「E2E 文件夹」');
+
+  // Deleting a folder keeps what it held, one level up.
+  await crumbs.locator('button:has-text("E2E 文件夹")').click();
+  await expect(deck).toBeVisible();
+  await p.click('[data-testid=delete-current-folder]');
+  await expect(p.locator('.toast-success').last()).toContainText('已删除文件夹');
+  await expect(p).toHaveURL(/\/decks$/);
+  await expect(deck).toBeVisible();
+  await expect(folderCard('子文件夹')).toBeVisible();
+  await folderCard('子文件夹').locator('[data-testid=folder-rename]').click();
+  await p.fill('[data-testid=folder-name]', '改名的文件夹');
+  await p.click('[data-testid=folder-save]');
+  await expect(folderCard('改名的文件夹')).toBeVisible();
+  await p.context().close();
+});
+
+test('archive decks and templates: they wait in a collapsed card, and archived templates are not offered for new decks', async ({ browser }) => {
+  const p = await (await browser.newContext()).newPage();
+  p.on('dialog', (d) => d.accept());
+  await p.goto('/login');
+  await signIn(p, 'admin', 'admin123');
+  await p.goto('/decks');
+  const section = p.locator('[data-testid=archived-section]');
+  await expect(section).toHaveCount(0);
+  const deck = p.locator('.page > .card-grid > [data-testid=project-card]', { hasText: 'E2E 文件夹里的材料' });
+  await deck.hover();
+  await deck.locator('[data-testid=card-archive]').click();
+  await expect(p.locator('.toast-success').last()).toContainText('已归档');
+  await expect(section).toContainText('已归档 1');
+  // Collapsed until opened.
+  const archivedCard = section.locator('[data-testid=project-card]', { hasText: 'E2E 文件夹里的材料' });
+  await expect(archivedCard).toBeHidden();
+  await section.locator('summary').click();
+  await expect(archivedCard).toBeVisible();
+  await expect(archivedCard).toContainText('管理员 归档于');
+  await archivedCard.click();
+  await expect(p.locator('[data-testid=archived-badge]')).toBeVisible();
+  await p.goBack();
+  await section.locator('summary').click();
+  await archivedCard.hover();
+  await archivedCard.locator('[data-testid=card-unarchive]').click();
+  await expect(section).toHaveCount(0);
+  await expect(deck).toBeVisible();
+
+  await p.goto('/templates');
+  const tpl = p.locator('.page > .card-grid > [data-testid=project-card]', { hasText: 'E2E 模板 · 改名' });
+  await tpl.hover();
+  await tpl.locator('[data-testid=card-archive]').click();
+  await expect(tpl).toHaveCount(0);
+  await expect(section).toContainText('归档的模板不会出现在新建路演材料的模板列表中');
+  await p.goto('/decks');
+  await p.click('[data-testid=create-btn]');
+  await expect(p.locator('[data-testid=template-option]').first()).toBeVisible();
+  await expect(p.locator('[data-testid=template-option]', { hasText: 'E2E 模板 · 改名' })).toHaveCount(0);
+  await p.keyboard.press('Escape');
+  await p.goto('/templates');
+  await section.locator('summary').click();
+  const archivedTpl = section.locator('[data-testid=project-card]', { hasText: 'E2E 模板 · 改名' });
+  await archivedTpl.hover();
+  await archivedTpl.locator('[data-testid=card-unarchive]').click();
+  await expect(tpl).toBeVisible();
+  await p.goto('/decks');
+  await p.click('[data-testid=create-btn]');
+  await expect(p.locator('[data-testid=template-option]', { hasText: 'E2E 模板 · 改名' })).toHaveCount(1);
+  await p.context().close();
+});
