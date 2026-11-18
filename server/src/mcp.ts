@@ -25,6 +25,20 @@ import { nameFiles, readmeBody } from './files.js';
 import { renderPageImages } from './render.js';
 import { EXPORT_FORMATS, exportDeck, isTextFile, sourceFiles, type ExportFormat, type SourceFile } from './exports.js';
 import { versionInfo } from './system.js';
+import {
+  MAX_FOLDER_DEPTH,
+  MAX_FOLDER_NAME,
+  cleanFolderName,
+  createFolder,
+  findFolder,
+  folderChain,
+  folderPath,
+  getFolder,
+  listFolders,
+  moveToFolder,
+  setArchived,
+  type FolderRow,
+} from './folders.js';
 
 /** Newest first. Clients on newer revisions fall back to the initialize handshake when `server/discover` is unknown. */
 export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -82,7 +96,8 @@ const INSTRUCTIONS = `Creates roadshow slide decks (路演材料: HTML slides, e
 2. Call create_roadshow_slides with everything the deck must show: the full test data and results (raw numbers and statistics in data; the server picks and draws the charts), and screenshots or existing charts as images. When the deck should show results but the user has not given the numbers, ask the user for the raw data first.
 3. Call get_roadshow_slides_status until status is "ready" (generation takes a few minutes), then share editorUrl or download the exports with the same bearer token.
 4. To verify the result: list_roadshow_files lists the deck's source files (README.md, styles, pages, images and charts), get_roadshow_file reads one (optionally with a screenshot of the page), and download_roadshow_slides returns the source ZIP or an HTML/PDF/PPTX export.
-To change a deck made earlier: call list_roadshow_slides to find it (title, dates, author, change history), get_roadshow_slides for its original request, files and full history, then update_roadshow_slides with the new data or changes (and get_roadshow_slides_status until it is "ready" again), or delete_roadshow_slides to remove it.`;
+To change a deck made earlier: call list_roadshow_slides to find it (title, dates, author, folder, change history), get_roadshow_slides for its original request, files and full history, then update_roadshow_slides with the new data or changes (and get_roadshow_slides_status until it is "ready" again), or delete_roadshow_slides to remove it.
+Folders (文件夹) organise decks on the web page: list_roadshow_folders shows them, create_roadshow_folder makes one (inside another with parentFolderId), create_roadshow_slides takes a folderId, and update_roadshow_slides moves a deck (folderId) or archives it (archived: listed apart on the web page, still usable).`;
 
 class RpcError extends Error {
   constructor(
@@ -184,7 +199,9 @@ function pageTitle(html: string): string | undefined {
 const pageList = (doc: DeckDoc) => nameFiles(doc.pages).map((p, i) => ({ page: i + 1, file: p.file!, title: pageTitle(p.html) }));
 
 function readyTemplates(db: DB): ProjectRow[] {
-  const rows = db.prepare(`SELECT * FROM projects WHERE type = 'template' AND status = 'ready' ORDER BY updated_at DESC`).all() as ProjectRow[];
+  const rows = db
+    .prepare(`SELECT * FROM projects WHERE type = 'template' AND status = 'ready' AND archived_at IS NULL ORDER BY updated_at DESC`)
+    .all() as ProjectRow[];
   return rows.filter((p) => projectDoc(p)?.pages.length);
 }
 
@@ -206,6 +223,10 @@ const fileItemSchema = {
 };
 
 const projectIdSchema = { type: 'string', description: 'projectId from list_roadshow_slides or create_roadshow_slides.' };
+const folderIdSchema = (what: string) => ({
+  type: 'string',
+  description: `${what}: a folderId from list_roadshow_folders or create_roadshow_folder; "" is the top level (全部材料).`,
+});
 const versionSchema = {
   type: 'integer',
   minimum: 1,
@@ -286,6 +307,7 @@ The deck can only show what you send, and the generator does not make up numbers
             description: `Supporting files (支持材料与参考), at most ${MAX_UPLOAD_FILES}, 100 MB each. Binary files go base64-encoded in data; text files may use text instead. PPT/PDF/HTML pages are converted to images and their text extracted.`,
             items: fileItemSchema,
           },
+          folderId: folderIdSchema('The folder to create the deck in (omit for the top level)'),
         },
         required: ['templateId', 'name', 'content'],
         additionalProperties: false,
@@ -324,6 +346,8 @@ The deck can only show what you send, and the generator does not make up numbers
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Only decks whose title, content, purpose or audience contains this text (case-insensitive).' },
+          folderId: folderIdSchema('Only decks directly in this folder'),
+          archived: { type: 'boolean', description: 'true: only archived decks; false: only decks not archived. Omit for both.' },
           limit: { type: 'integer', minimum: 1, maximum: MAX_LIST_LIMIT, default: DEFAULT_LIST_LIMIT, description: 'Most decks to return.' },
           offset: { type: 'integer', minimum: 0, default: 0, description: 'Decks to skip, for paging.' },
         },
@@ -351,7 +375,7 @@ The deck can only show what you send, and the generator does not make up numbers
 
 Send the new data in full, as for create_roadshow_slides: new or corrected numbers with units as Markdown tables, what changed since the last version, and which pages or sections they replace or extend. New charts and data files go in files; name each in instructions and say where it belongs.${
         charts ? ' New raw numbers go in data: the generator redraws the affected charts or adds new ones; ask the user for the figures when the change is about results they have not given yet.' : ''
-      } name alone renames the deck without the generator.`,
+      } name, folderId and archived alone (rename, move to a folder, archive or unarchive) take effect at once without the generator.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -373,6 +397,11 @@ Send the new data in full, as for create_roadshow_slides: new or corrected numbe
             description: `New supporting files for this change, at most ${MAX_UPLOAD_FILES}, 100 MB each, in the same form as for create_roadshow_slides. They are added to the deck's files.`,
             items: fileItemSchema,
           },
+          folderId: folderIdSchema('Move the deck to this folder'),
+          archived: {
+            type: 'boolean',
+            description: 'true archives the deck (归档: listed apart on the web page, collapsed; it still opens, exports and updates), false brings it back.',
+          },
         },
         required: ['projectId'],
         additionalProperties: false,
@@ -391,6 +420,34 @@ Send the new data in full, as for create_roadshow_slides: new or corrected numbe
         additionalProperties: false,
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: 'list_roadshow_folders',
+      title: 'List roadshow folders',
+      description:
+        'The folders (文件夹) decks are organised in on the web page, shared by everyone who uses it: folderId, name, full path (e.g. "QA / 2026"), parent folder, subfolder count and how many of the decks created through MCP are directly in each. Pass a folderId to create_roadshow_slides or update_roadshow_slides to put a deck there.',
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'Only folders whose path contains this text (case-insensitive).' } },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    {
+      name: 'create_roadshow_folder',
+      title: 'Create roadshow folder',
+      description:
+        'Create a folder (文件夹) for decks, at the top level or inside parentFolderId, the same as 新建文件夹 on the web page. If the parent already has a folder of that name (ignoring case) it is returned instead (created: false), so calling it again is safe. Folders hold decks only; templates are not put in folders.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: `Folder name, at most ${MAX_FOLDER_NAME} characters, without "/".` },
+          parentFolderId: folderIdSchema('The folder to create it in (omit for the top level)'),
+        },
+        required: ['name'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     {
       name: 'list_roadshow_files',
@@ -577,6 +634,20 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     return p;
   }
 
+  /** A folderId argument: undefined when absent, null for the top level, else an existing folder. */
+  function folderIdArg(args: Args, key: string): string | null | undefined {
+    const v = args[key];
+    if (v === undefined) return undefined;
+    if (v === null) return null;
+    if (typeof v !== 'string') throw new ToolError(`"${key}" must be a string`);
+    const id = v.trim();
+    if (!id) return null;
+    if (!getFolder(db, id)) throw new ToolError(`No folder "${id}". Call list_roadshow_folders to find the folderId, or create_roadshow_folder to make one.`);
+    return id;
+  }
+
+  const folderOf = (id: string | null) => (id ? { folderId: id, path: folderPath(db, id) } : null);
+
   const downloadLinks = (base: string, id: string, query = '') =>
     Object.fromEntries(EXPORT_FORMATS.map((f) => [f, `${base}/api/projects/${id}/export?format=${f}${query ? `&${query}` : ''}`])) as Record<ExportFormat, string>;
 
@@ -635,6 +706,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       aspect: textArg(args, 'aspect') ?? 'template',
       width: intArg(args, 'width', 320, 4000),
       height: intArg(args, 'height', 320, 4000),
+      folderId: folderIdArg(args, 'folderId') ?? undefined,
     };
     if (fields.aspect !== 'template' && fields.aspect !== 'custom' && !ASPECTS[fields.aspect!]) {
       throw new ToolError(`"aspect" must be one of: template, ${Object.keys(ASPECTS).join(', ')}, custom`);
@@ -649,6 +721,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       name: project.name,
       status: 'generating',
       template: getProject(db, fields.templateId!)?.name,
+      folder: folderOf(project.folder_id),
       size: `${projectDoc(project)?.width}×${projectDoc(project)?.height}`,
       files: assets,
       editorUrl: `${baseUrl(req)}/p/${project.id}`,
@@ -721,19 +794,23 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     const query = asked?.toLowerCase();
     const limit = Number(intArg(args, 'limit', 1, MAX_LIST_LIMIT) ?? DEFAULT_LIST_LIMIT);
     const offset = Number(intArg(args, 'offset', 0, 1_000_000) ?? 0);
+    const inFolder = folderIdArg(args, 'folderId');
+    if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new ToolError('"archived" must be true or false');
+    const archived = args.archived as boolean | undefined;
     const rows = db
       .prepare(
-        `SELECT id, name, meta, template_id, status, error, version_no, created_by, updated_by, created_at, updated_at,
+        `SELECT id, name, meta, template_id, folder_id, archived_at, status, error, version_no, created_by, updated_by, created_at, updated_at,
                 json_array_length(doc, '$.pages') AS page_count, json_extract(doc, '$.width') AS width, json_extract(doc, '$.height') AS height
          FROM projects WHERE type = 'deck' AND created_by = ? ORDER BY updated_at DESC, rowid DESC`,
       )
       .all(svc.id) as (Omit<ProjectRow, 'doc'> & { page_count: number | null; width: number | null; height: number | null })[];
-    const matched = query
-      ? rows.filter((r) => {
-          const b = briefOf(r);
-          return [r.name, b.name, b.content, b.purpose, b.audience].some((v) => typeof v === 'string' && v.toLowerCase().includes(query));
-        })
-      : rows;
+    const matched = rows.filter((r) => {
+      if (inFolder !== undefined && r.folder_id !== inFolder) return false;
+      if (archived !== undefined && !!r.archived_at !== archived) return false;
+      if (!query) return true;
+      const b = briefOf(r);
+      return [r.name, b.name, b.content, b.purpose, b.audience].some((v) => typeof v === 'string' && v.toLowerCase().includes(query));
+    });
     const names = userNames(db);
     const templateName = (tid: string | null) => (tid ? (db.prepare('SELECT name FROM projects WHERE id = ?').get(tid) as { name: string } | undefined)?.name : undefined);
     const base = baseUrl(req);
@@ -750,6 +827,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
         pageCount: r.page_count ?? 0,
         size: r.width && r.height ? `${r.width}×${r.height}` : undefined,
         template: r.template_id ? { templateId: r.template_id, name: templateName(r.template_id) ?? null } : null,
+        folder: folderOf(r.folder_id),
+        archived: !!r.archived_at,
         purpose: str(b.purpose),
         audience: str(b.audience),
         contentPreview: content ? clip(content, LIST_TEXT_LIMIT) : undefined,
@@ -770,8 +849,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     };
     const empty = !rows.length
       ? 'No deck has been created through MCP yet. Use create_roadshow_slides to make one.'
-      : !decks.length
-        ? `No deck${asked ? ` matches "${asked}"` : ' at this offset'} (${rows.length} created through MCP in all).`
+        : !decks.length
+        ? `No deck${asked ? ` matches "${asked}"` : inFolder !== undefined || archived !== undefined ? ' matches these filters' : ' at this offset'} (${rows.length} created through MCP in all).`
         : undefined;
     return { content: [{ type: 'text', text: empty ?? json(result) }], structuredContent: result };
   }
@@ -799,6 +878,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       updatedAt: iso(p.updated_at),
       updatedBy: p.updated_by ? names.get(p.updated_by) ?? null : null,
       template: p.template_id ? { templateId: p.template_id, name: template?.name ?? null } : null,
+      folder: folderOf(p.folder_id),
+      archived: !!p.archived_at,
       size: doc ? `${doc.width}×${doc.height}` : undefined,
       originalRequest: {
         templateId: p.template_id ?? undefined,
@@ -828,7 +909,12 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     if (rawName !== undefined && !name) throw new ToolError('"name" must not be empty');
     const pageNo = intArg(args, 'page', 1, 10_000);
     const files = decodeFiles(args);
-    if (!instructions && !name) throw new ToolError('Give instructions (what to change, with the new data), a new name, or both');
+    const folderId = folderIdArg(args, 'folderId');
+    if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new ToolError('"archived" must be true or false');
+    const archived = args.archived as boolean | undefined;
+    if (!instructions && !name && folderId === undefined && archived === undefined) {
+      throw new ToolError('Give instructions (what to change, with the new data), a new name, a folderId to move the deck, archived, or several of them');
+    }
     if (!instructions && (files.length || pageNo)) throw new ToolError('files and page go with instructions: say what to change and how to use the files');
     let pageId: string | undefined;
     if (instructions) {
@@ -846,6 +932,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
         throw new ToolError(`An update of deck "${p.id}" is still running (jobId ${running!.id}). Wait with get_roadshow_slides_status until it is "ready", then send the next change.`);
       }
     }
+    if (folderId !== undefined) moveToFolder(db, p, folderId);
+    if (archived !== undefined && archived !== !!p.archived_at) setArchived(db, p.id, svc.id, archived);
     if (name && name !== p.name) await renameProject(db, p.id, svc.id, name);
     let job: JobRow | undefined;
     let saved: AssetRow[] = [];
@@ -864,18 +952,21 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
         throw new ToolError((e as Error).message);
       }
     }
-    req.log.info({ projectId: p.id, jobId: job?.id, renamed: !!name, files: saved.length }, 'mcp update_roadshow_slides');
+    req.log.info({ projectId: p.id, jobId: job?.id, renamed: !!name, folderId, archived, files: saved.length }, 'mcp update_roadshow_slides');
     const project = getProject(db, p.id)!;
+    const done = [name && 'renamed', folderId !== undefined && 'moved', archived === true && 'archived', archived === false && 'unarchived'].filter(Boolean).join(', ');
     const result = {
       projectId: project.id,
       name: project.name,
       status: job ? 'updating' : project.status,
       version: project.version_no,
+      folder: folderOf(project.folder_id),
+      archived: !!project.archived_at,
       ...(job ? { jobId: job.id, scope: pageNo ? `page ${pageNo}` : 'deck', files: saved.map((a) => publicAsset(db, a)) } : {}),
       editorUrl: `${baseUrl(req)}/p/${project.id}`,
       next: job
         ? `The change takes a few minutes. Call get_roadshow_slides_status with projectId "${project.id}" until status is "ready", then check lastRequest.`
-        : 'Renamed; no generation needed.',
+        : `${done.charAt(0).toUpperCase()}${done.slice(1)}; no generation needed.`,
     };
     return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
   }
@@ -885,6 +976,54 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
     deleteProject(db, p.id);
     req.log.info({ projectId: p.id }, 'mcp delete_roadshow_slides');
     const result = { projectId: p.id, name: p.name, deleted: true };
+    return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
+  }
+
+  const mcpFolder = (f: FolderRow, decks: Map<string, number>, subfolders: Map<string, number>) => ({
+    folderId: f.id,
+    name: f.name,
+    path: folderPath(db, f.id),
+    parentFolderId: f.parent_id,
+    subfolders: subfolders.get(f.id) ?? 0,
+    mcpDecks: decks.get(f.id) ?? 0,
+  });
+
+  function folderTallies(svc: ServiceUser) {
+    const decks = db
+      .prepare(`SELECT folder_id AS id, COUNT(*) AS c FROM projects WHERE type = 'deck' AND created_by = ? AND folder_id IS NOT NULL GROUP BY folder_id`)
+      .all(svc.id) as { id: string; c: number }[];
+    const subs = db.prepare('SELECT parent_id AS id, COUNT(*) AS c FROM folders WHERE parent_id IS NOT NULL GROUP BY parent_id').all() as { id: string; c: number }[];
+    return { decks: new Map(decks.map((r) => [r.id, r.c])), subfolders: new Map(subs.map((r) => [r.id, r.c])) };
+  }
+
+  async function listFoldersTool(_req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const query = textArg(args, 'query', { max: 500 })?.trim().toLowerCase();
+    const { decks, subfolders } = folderTallies(svc);
+    const folders = listFolders(db)
+      .map((f) => mcpFolder(f, decks, subfolders))
+      .filter((f) => !query || f.path.toLowerCase().includes(query))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const result = { total: folders.length, folders };
+    const empty = !folders.length ? (query ? `No folder path contains "${query}".` : 'There are no folders yet. create_roadshow_folder makes one.') : undefined;
+    return { content: [{ type: 'text', text: empty ?? json(result) }], structuredContent: result };
+  }
+
+  async function createFolderTool(req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const raw = textArg(args, 'name', { required: true })!;
+    const parentId = folderIdArg(args, 'parentFolderId') ?? null;
+    if (raw.trim().length > MAX_FOLDER_NAME) throw new ToolError(`"name" is longer than ${MAX_FOLDER_NAME} characters`);
+    if (!raw.replace(/[/\\\s]/g, '')) throw new ToolError('"name" must contain more than slashes and spaces');
+    const name = cleanFolderName(raw);
+    const existing = findFolder(db, parentId, name);
+    if (!existing && parentId && folderChain(db, parentId).length >= MAX_FOLDER_DEPTH) throw new ToolError(`Folders nest at most ${MAX_FOLDER_DEPTH} levels deep`);
+    const folder = existing ?? createFolder(db, svc.id, name, parentId);
+    req.log.info({ folderId: folder.id, created: !existing }, 'mcp create_roadshow_folder');
+    const { decks, subfolders } = folderTallies(svc);
+    const result = {
+      ...mcpFolder(folder, decks, subfolders),
+      created: !existing,
+      next: `Pass folderId "${folder.id}" to create_roadshow_slides, or to update_roadshow_slides to move a deck here.`,
+    };
     return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
   }
 
@@ -1023,6 +1162,8 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       get_roadshow_slides: () => getSlides(req, svc, args),
       update_roadshow_slides: () => updateSlides(req, svc, args),
       delete_roadshow_slides: () => deleteSlides(req, svc, args),
+      list_roadshow_folders: () => listFoldersTool(req, svc, args),
+      create_roadshow_folder: () => createFolderTool(req, svc, args),
       list_roadshow_files: () => listFiles(req, svc, args),
       get_roadshow_file: () => getFile(req, svc, args),
       download_roadshow_slides: () => downloadSlides(req, svc, args),

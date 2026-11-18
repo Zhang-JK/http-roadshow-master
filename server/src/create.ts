@@ -2,6 +2,7 @@ import type { DB } from './db.js';
 import { HttpError } from './auth.js';
 import { ASPECTS } from './deck.js';
 import { saveAsset, type AssetRole } from './assets.js';
+import { folderArg } from './folders.js';
 import { createProject, getProject, projectDoc, startGeneration, type GenerationOptions, type JobRow, type ProjectRow } from './projects.js';
 
 export const MAX_UPLOAD_FILES = 12;
@@ -39,6 +40,7 @@ export async function createFromForm(
   const pageCount = fields.pageCount ? Math.max(1, Math.min(40, Number(fields.pageCount) || 0)) || undefined : undefined;
   let brief: Record<string, unknown>;
   let templateId: string | null = null;
+  const folderId = type === 'deck' ? folderArg(db, fields.folderId) : null;
   if (type === 'template') {
     if (!String(fields.style ?? '').trim() && !String(fields.purpose ?? '').trim()) throw new HttpError(400, '请至少填写设计风格或计划用途');
     brief = {
@@ -55,6 +57,7 @@ export async function createFromForm(
     if (!templateId) throw new HttpError(400, '请先选择一个模板');
     const tpl = getProject(db, templateId);
     if (!tpl || tpl.type !== 'template') throw new HttpError(400, '所选模板不存在');
+    if (tpl.archived_at) throw new HttpError(400, '所选模板已归档，请选择其他模板或先取消归档');
     if (tpl.status !== 'ready' || !projectDoc(tpl)?.pages.length) throw new HttpError(400, '所选模板尚未生成完成');
     if (!String(fields.content ?? '').trim()) throw new HttpError(400, '请详细说明需要添加的内容');
     const tdoc = projectDoc(tpl)!;
@@ -78,6 +81,7 @@ export async function createFromForm(
     height,
     aspect: fields.aspect === 'custom' ? `${width}x${height}` : aspectKey,
     templateId,
+    folderId,
     brief: brief as any,
   });
   const defaultRole: AssetRole = type === 'template' ? 'reference' : 'embed';
