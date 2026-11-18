@@ -69,6 +69,7 @@ const TOOL_NAMES = [
   'list_roadshow_slides',
   'get_roadshow_slides',
   'update_roadshow_slides',
+  'retry_roadshow_slides',
   'delete_roadshow_slides',
   'list_roadshow_folders',
   'create_roadshow_folder',
@@ -550,6 +551,80 @@ describe('mcp tools through the SDK client', () => {
     expect(second.result.isError).toBe(true);
     expect(second.result.content[0].text).toMatch(new RegExp(`still running \\(jobId ${first.result.structuredContent.jobId}\\)`));
     expect(await untilSettled(projectId)).toMatchObject({ status: 'ready', version: 7, lastRequest: { status: 'done', request: '第一个修改' } });
+  });
+
+  it('retry_roadshow_slides continues a failed generation or update, or runs it again from scratch', async () => {
+    const bad = async (args: Record<string, unknown>) => {
+      const r = await call('retry_roadshow_slides', args);
+      expect(r.isError).toBe(true);
+      return textOf(r);
+    };
+    // The model goes away at the second batch of pages; the plan is kept.
+    const created = await call('create_roadshow_slides', { templateId, name: '断线重试', content: '重试测试', notes: 'MANY_PAGES OFFLINE_AT_PAGES' });
+    const id = created.structuredContent.projectId;
+    const failed = await untilSettled(id);
+    expect(failed).toMatchObject({
+      status: 'error',
+      lastRequest: { kind: 'create', status: 'error', canRetry: true, canResume: true, savedProgress: expect.stringContaining('规划') },
+    });
+    expect(failed.next).toMatch(/^Generation failed\. Call retry_roadshow_slides to continue from the saved progress/);
+    expect(textOf(await call('update_roadshow_slides', { projectId: id, instructions: 'x' }))).toMatch(/retry_roadshow_slides/);
+    mock.setOnline();
+    expect(await bad({ projectId: id, mode: 'again' })).toMatch(/"mode" must be one of: auto, resume, restart/);
+    expect(await bad({ projectId: id, jobId: 'missing' })).toMatch(/has no request "missing"/);
+    expect(await bad({ projectId: aliceDeck })).toMatch(/No deck .* created through MCP/);
+    const resumed = await call('retry_roadshow_slides', { projectId: id });
+    expect(resumed.isError).toBeFalsy();
+    expect(resumed.structuredContent).toMatchObject({
+      projectId: id,
+      status: 'generating',
+      mode: 'resume',
+      kind: 'create',
+      jobId: failed.lastRequest.jobId,
+      continuedFrom: failed.lastRequest.savedProgress,
+    });
+    expect(await bad({ projectId: id })).toMatch(/still generating/);
+    const generated = await untilSettled(id);
+    expect(generated).toMatchObject({ status: 'ready', version: 1, lastRequest: { jobId: failed.lastRequest.jobId, status: 'done', resumed: 1 } });
+    expect(generated.lastRequest.canRetry).toBeUndefined();
+    expect(await bad({ projectId: id })).toMatch(/did not fail \(status "done"\)/);
+
+    // An update that fails in its second round keeps its progress and continues as the same request.
+    const edit = (await call('update_roadshow_slides', { projectId: id, instructions: '改主色 OFFLINE_IN_EDIT' })).structuredContent;
+    let s = await untilSettled(id);
+    expect(s).toMatchObject({ status: 'ready', version: 1, lastRequest: { jobId: edit.jobId, status: 'error', canResume: true } });
+    expect(s.next).toMatch(/deck is unchanged \(version 1\).*continue from the saved progress/);
+    mock.setOnline();
+    const r = await call('retry_roadshow_slides', { projectId: id, mode: 'resume' });
+    expect(r.structuredContent).toMatchObject({ status: 'updating', mode: 'resume', kind: 'update', jobId: edit.jobId, request: '改主色 OFFLINE_IN_EDIT' });
+    s = await untilSettled(id);
+    expect(s).toMatchObject({ status: 'ready', version: 2, lastRequest: { jobId: edit.jobId, status: 'done', resumed: 1, resultVersion: 2 } });
+
+    // An update that failed at once has no progress: it runs again from scratch as a new request that still never asks.
+    const once = (await call('update_roadshow_slides', { projectId: id, instructions: '补充结论 FAIL_ONCE' })).structuredContent;
+    s = await untilSettled(id);
+    expect(s.lastRequest).toMatchObject({ jobId: once.jobId, status: 'error', canRetry: true, canResume: false });
+    expect(s.next).toMatch(/run it again from scratch/);
+    expect(await bad({ projectId: id, mode: 'resume' })).toMatch(/no saved progress.*mode "restart"/);
+    const again = (await call('retry_roadshow_slides', { projectId: id })).structuredContent;
+    expect(again).toMatchObject({ status: 'updating', mode: 'restart', kind: 'update', retryOf: once.jobId, request: '补充结论 FAIL_ONCE' });
+    expect(again.jobId).not.toBe(once.jobId);
+    s = await untilSettled(id);
+    expect(s).toMatchObject({ status: 'ready', version: 3, lastRequest: { jobId: again.jobId, status: 'done', retryOf: once.jobId, request: '补充结论 FAIL_ONCE' } });
+    expect((await req('GET', `/api/jobs/${again.jobId}`, admin)).json.job.request).toMatchObject({ askUser: false, scope: 'global' });
+    expect(await bad({ projectId: id, jobId: once.jobId })).toMatch(new RegExp(`already retried as "${again.jobId}"`));
+
+    // Requests made on the web page are listed but retried there.
+    const web = await req('POST', `/api/projects/${id}/edit`, alice, { prompt: 'NO_CHANGE 网页上的修改', scope: 'global' });
+    expect((await waitJob(web.json.job.id)).status).toBe('error');
+    expect(await bad({ projectId: id, jobId: web.json.job.id })).toMatch(/made on the web page/);
+    const d = (await call('get_roadshow_slides', { projectId: id })).structuredContent;
+    expect(d.failedRequests).toEqual([
+      expect.objectContaining({ jobId: web.json.job.id, status: 'error' }),
+      expect.objectContaining({ jobId: once.jobId, retriedBy: again.jobId }),
+    ]);
+    expect(d.failedRequests[0].canRetry).toBeUndefined();
+    expect((await call('delete_roadshow_slides', { projectId: id })).isError).toBeFalsy();
   });
 
   const auth = () => ({ authorization: `Bearer ${token}` });
