@@ -4,6 +4,7 @@ import type { Endpoint, ParallelTestResult, TestResult } from '../types';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import { duration, fullTime, num, speed } from '../lib/format';
+import { UsageCharts, type DailyUsage } from '../components/UsageCharts';
 
 interface Form {
   id?: number;
@@ -76,11 +77,68 @@ interface ModelStats {
   maxConcurrency: number;
 }
 
+interface UsageResponse {
+  usage: Usage[];
+  models: ModelStats[];
+  recent?: { days: number; since: number; usage: Usage[]; models: ModelStats[] };
+  daily?: DailyUsage[];
+}
+
+const CHART_RANGES = [7, 14, 30];
+
+const totalCost = (usage: Usage[]) => usage.reduce((s, u) => s + (u.cost ?? 0), 0);
+
+/** Totals per model and per user; `id` tells the all-time tables from the recent ones. */
+function UsageTables({ models, usage, id }: { models: ModelStats[]; usage: Usage[]; id: string }) {
+  return (
+    <>
+      <table className="table compact" data-testid={id === 'all' ? 'model-stats' : `${id}-model-stats`}>
+        <thead>
+          <tr><th>接入点</th><th>模型</th><th>调用</th><th>失败</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>平均首 token</th><th>平均排队</th><th>当前并发</th></tr>
+        </thead>
+        <tbody>
+          {models.length === 0 && <tr><td colSpan={9} className="muted center-text">暂无调用记录</td></tr>}
+          {models.map((m) => (
+            <tr key={m.endpointId} data-testid="model-stats-row">
+              <td><strong>{m.endpoint}</strong></td>
+              <td><code>{m.model}</code></td>
+              <td>{num(m.calls)}</td>
+              <td className={m.failedCalls ? 'err-text' : ''}>{num(m.failedCalls)}</td>
+              <td>{num(m.promptTokens)} / {num(m.completionTokens)}</td>
+              <td data-testid="model-speed"><strong>{speed(m.tokensPerSec)}</strong></td>
+              <td>{m.firstTokenMs != null ? duration(m.firstTokenMs) : '—'}</td>
+              <td>{m.queuedMs ? duration(m.queuedMs) : '—'}</td>
+              <td>{m.inflight} / {m.maxConcurrency || '不限'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <h4>按用户</h4>
+      <table className="table compact" data-testid={id === 'all' ? 'user-usage' : `${id}-user-usage`}>
+        <thead><tr><th>用户</th><th>接入点</th><th>任务</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>费用</th></tr></thead>
+        <tbody>
+          {usage.length === 0 && <tr><td colSpan={6} className="muted center-text">暂无任务</td></tr>}
+          {usage.map((u, i) => (
+            <tr key={i} data-testid="user-usage-row">
+              <td>{u.username ?? '—'}</td>
+              <td>{u.endpoint ?? '（已删除）'}</td>
+              <td>{u.calls}</td>
+              <td>{num(u.promptTokens)} / {num(u.completionTokens)}</td>
+              <td>{speed(u.tokensPerSec)}</td>
+              <td>{u.cost != null ? `$${u.cost.toFixed(4)}` : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
 export function ModelsPage() {
   const toast = useToast();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
-  const [usage, setUsage] = useState<Usage[]>([]);
-  const [models, setModels] = useState<ModelStats[]>([]);
+  const [stats, setStats] = useState<UsageResponse>({ usage: [], models: [] });
+  const [chartDays, setChartDays] = useState(14);
   const [settings, setSettings] = useState<{
     attachScreenshots: boolean;
     selfCheck: boolean;
@@ -114,6 +172,13 @@ export function ModelsPage() {
   /** Endpoint whose drag handle gets the focus back after a keyboard move re-renders the rows. */
   const refocus = useRef<number | null>(null);
 
+  const loadUsage = useCallback(() => {
+    api
+      .get<UsageResponse>(`/api/llm/usage?tzOffset=${new Date().getTimezoneOffset()}&days=${chartDays}`)
+      .then(setStats)
+      .catch((e) => toast(e.message, 'error'));
+  }, [toast, chartDays]);
+
   const load = useCallback(() => {
     api
       .get<{ endpoints: Endpoint[]; systemProxy: string | null }>('/api/llm/endpoints')
@@ -122,12 +187,9 @@ export function ModelsPage() {
         setSystemProxy(r.systemProxy);
       })
       .catch((e) => toast(e.message, 'error'));
-    api.get<{ usage: Usage[]; models: ModelStats[] }>('/api/llm/usage').then((r) => {
-      setUsage(r.usage);
-      setModels(r.models ?? []);
-    });
+    loadUsage();
     api.get<{ settings: typeof settings }>('/api/settings').then((r) => setSettings(r.settings));
-  }, [toast]);
+  }, [toast, loadUsage]);
   useEffect(load, [load]);
 
   useEffect(() => {
@@ -140,7 +202,8 @@ export function ModelsPage() {
     const byId = new Map(endpoints.map((e) => [e.id, e]));
     const rank = new Map(ids.map((id, i) => [id, i]));
     setEndpoints(ids.map((id) => byId.get(id)!));
-    setModels((ms) => [...ms].sort((a, b) => (rank.get(a.endpointId) ?? 0) - (rank.get(b.endpointId) ?? 0)));
+    const byRank = (ms: ModelStats[]) => [...ms].sort((a, b) => (rank.get(a.endpointId) ?? 0) - (rank.get(b.endpointId) ?? 0));
+    setStats((s) => ({ ...s, models: byRank(s.models), ...(s.recent ? { recent: { ...s.recent, models: byRank(s.recent.models) } } : {}) }));
     orderSaves.current = orderSaves.current
       .then(() => api.put('/api/llm/endpoints/order', { ids }))
       .then(
@@ -270,8 +333,6 @@ export function ModelsPage() {
     }
   };
 
-  const totalCost = usage.reduce((a, u) => a + (u.cost ?? 0), 0);
-
   return (
     <div className="page">
       <div className="page-head">
@@ -388,45 +449,32 @@ export function ModelsPage() {
       </div>
 
       <div className="panel-card usage-card" data-testid="usage-card">
-        <h3>用量统计 <span className="muted small">合计 ${totalCost.toFixed(4)}</span></h3>
+        <h3>用量统计</h3>
         <p className="muted small">输出速度 = 输出 tokens ÷（最后一个 token − 第一个 token 的时间），不含排队与模型读取输入的时间；首 token 延迟包含模型读取输入的时间。</p>
-        <table className="table compact" data-testid="model-stats">
-          <thead>
-            <tr><th>接入点</th><th>模型</th><th>调用</th><th>失败</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>平均首 token</th><th>平均排队</th><th>当前并发</th></tr>
-          </thead>
-          <tbody>
-            {models.length === 0 && <tr><td colSpan={9} className="muted center-text">暂无调用记录</td></tr>}
-            {models.map((m) => (
-              <tr key={m.endpointId} data-testid="model-stats-row">
-                <td><strong>{m.endpoint}</strong></td>
-                <td><code>{m.model}</code></td>
-                <td>{num(m.calls)}</td>
-                <td className={m.failedCalls ? 'err-text' : ''}>{num(m.failedCalls)}</td>
-                <td>{num(m.promptTokens)} / {num(m.completionTokens)}</td>
-                <td data-testid="model-speed"><strong>{speed(m.tokensPerSec)}</strong></td>
-                <td>{m.firstTokenMs != null ? duration(m.firstTokenMs) : '—'}</td>
-                <td>{m.queuedMs ? duration(m.queuedMs) : '—'}</td>
-                <td>{m.inflight} / {m.maxConcurrency || '不限'}</td>
-              </tr>
+        <div className="usage-section-head">
+          <h4 className="usage-title">每日趋势</h4>
+          <span className="seg seg-xs" data-testid="chart-range">
+            {CHART_RANGES.map((d) => (
+              <button key={d} className={chartDays === d ? 'on' : ''} onClick={() => setChartDays(d)}>{d} 天</button>
             ))}
-          </tbody>
-        </table>
-        <h4>按用户</h4>
-        <table className="table compact">
-          <thead><tr><th>用户</th><th>接入点</th><th>任务</th><th>输入/输出 tokens</th><th>平均输出速度</th><th>费用</th></tr></thead>
-          <tbody>
-            {usage.map((u, i) => (
-              <tr key={i}>
-                <td>{u.username ?? '—'}</td>
-                <td>{u.endpoint ?? '（已删除）'}</td>
-                <td>{u.calls}</td>
-                <td>{num(u.promptTokens)} / {num(u.completionTokens)}</td>
-                <td>{speed(u.tokensPerSec)}</td>
-                <td>{u.cost != null ? `$${u.cost.toFixed(4)}` : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          </span>
+        </div>
+        <UsageCharts daily={stats.daily ?? []} />
+        {stats.recent && (
+          <section data-testid="usage-recent">
+            <h4 className="usage-title">
+              最近 {stats.recent.days} 天{' '}
+              <span className="muted small">
+                {new Date(stats.recent.since).getMonth() + 1} 月 {new Date(stats.recent.since).getDate()} 日 0 点起（含今天） · 合计 ${totalCost(stats.recent.usage).toFixed(4)}
+              </span>
+            </h4>
+            <UsageTables id="recent" models={stats.recent.models} usage={stats.recent.usage} />
+          </section>
+        )}
+        <section data-testid="usage-all">
+          <h4 className="usage-title">全部时间 <span className="muted small">合计 ${totalCost(stats.usage).toFixed(4)}</span></h4>
+          <UsageTables id="all" models={stats.models} usage={stats.usage} />
+        </section>
       </div>
 
       <div className="panel-card settings-card">
