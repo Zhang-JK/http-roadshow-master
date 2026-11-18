@@ -988,10 +988,12 @@ export function retryJob(db: DB, failed: JobRow, userId: number): JobRow {
   const project = getProject(db, failed.project_id);
   if (!project) throw new Error('项目不存在');
   let job: JobRow;
+  // A request that could not ask (MCP) must not start asking when run again.
+  const noAsk = JSON.parse(failed.request || '{}').askUser === false;
   if (failed.kind === 'create') {
     if (project.version_no > 0) throw new Error('项目已生成，请通过修改对话框进行调整');
     if (project.status === 'generating') throw new Error('正在生成中');
-    job = startGeneration(db, project.id, userId);
+    job = startGeneration(db, project.id, userId, noAsk ? { askUser: false } : {});
   } else {
     const req = JSON.parse(failed.request || '{}') as EditInput;
     job = startEdit(db, project.id, userId, {
@@ -1000,6 +1002,7 @@ export function retryJob(db: DB, failed: JobRow, userId: number): JobRow {
       pageId: req.pageId,
       elementIds: req.elementIds ?? [],
       attachmentIds: req.attachmentIds ?? [],
+      ...(noAsk ? { askUser: false } : {}),
     });
   }
   db.prepare('UPDATE jobs SET retry_of = ? WHERE id = ?').run(failed.id, job.id);

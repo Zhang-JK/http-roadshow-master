@@ -15,6 +15,8 @@ import {
   jobProgress,
   projectDoc,
   renameProject,
+  resumeJob,
+  retryJob,
   startEdit,
   versionDocByNo,
   withReadme,
@@ -25,6 +27,7 @@ import { nameFiles, readmeBody } from './files.js';
 import { renderPageImages } from './render.js';
 import { EXPORT_FORMATS, exportDeck, isTextFile, sourceFiles, type ExportFormat, type SourceFile } from './exports.js';
 import { versionInfo } from './system.js';
+import { resumableJobs } from './checkpoint.js';
 import {
   MAX_FOLDER_DEPTH,
   MAX_FOLDER_NAME,
@@ -97,6 +100,7 @@ const INSTRUCTIONS = `Creates roadshow slide decks (路演材料: HTML slides, e
 3. Call get_roadshow_slides_status until status is "ready" (generation takes a few minutes), then share editorUrl or download the exports with the same bearer token.
 4. To verify the result: list_roadshow_files lists the deck's source files (README.md, styles, pages, images and charts), get_roadshow_file reads one (optionally with a screenshot of the page), and download_roadshow_slides returns the source ZIP or an HTML/PDF/PPTX export.
 To change a deck made earlier: call list_roadshow_slides to find it (title, dates, author, folder, change history), get_roadshow_slides for its original request, files and full history, then update_roadshow_slides with the new data or changes (and get_roadshow_slides_status until it is "ready" again), or delete_roadshow_slides to remove it.
+If a generation or update fails (status "error", or lastRequest.status "error"), call retry_roadshow_slides: mode "resume" continues from the progress saved before the failure (when lastRequest.canResume), "restart" runs the same request again from scratch.
 Folders (文件夹) organise decks on the web page: list_roadshow_folders shows them, create_roadshow_folder makes one (inside another with parentFolderId), create_roadshow_slides takes a folderId, and update_roadshow_slides moves a deck (folderId) or archives it (archived: listed apart on the web page, still usable).`;
 
 class RpcError extends Error {
@@ -409,6 +413,31 @@ Send the new data in full, as for create_roadshow_slides: new or corrected numbe
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     {
+      name: 'retry_roadshow_slides',
+      title: 'Retry roadshow slides',
+      description:
+        'Run a failed generation or update made through MCP again, the same as 重试 on the web page. mode "resume" (断点续跑) continues the failed request from the progress saved before it failed (the plan and the pages already done are kept), so it is faster; only the latest request of a deck keeps its progress, see lastRequest.canResume and savedProgress in get_roadshow_slides_status. mode "restart" (从头重试) runs the same request again from scratch as a new request. mode "auto" (default) resumes when it can and restarts otherwise. Returns at once; then call get_roadshow_slides_status until status is "ready". To change what was asked instead, use update_roadshow_slides.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: projectIdSchema,
+          mode: {
+            type: 'string',
+            enum: ['auto', 'resume', 'restart'],
+            default: 'auto',
+            description: '"resume": continue from the saved progress; "restart": start over; "auto": resume if possible, else restart.',
+          },
+          jobId: {
+            type: 'string',
+            description: 'The failed request to retry (jobId from lastRequest or failedRequests). Omit for the latest request made through MCP.',
+          },
+        },
+        required: ['projectId'],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
       name: 'delete_roadshow_slides',
       title: 'Delete roadshow slides',
       description:
@@ -579,7 +608,16 @@ function history(db: DB, projectId: string, names: Map<number, string>, textLimi
 
 const JOB_STATUS: Record<JobRow['status'], string> = { pending: 'queued', running: 'running', done: 'done', error: 'error' };
 
-function publicJob(db: DB, j: JobRow, names: Map<number, string>) {
+/** How a failed request can run again; `own` is false for requests made on the web page, which MCP cannot retry. */
+function retryInfo(db: DB, j: JobRow, own: boolean) {
+  if (j.status !== 'error') return {};
+  if (j.retried_by) return { retriedBy: j.retried_by };
+  if (!own) return {};
+  const cp = resumableJobs(db, [j.id]).get(j.id);
+  return { canRetry: true, canResume: !!cp, ...(cp ? { savedProgress: cp.label } : {}) };
+}
+
+function publicJob(db: DB, j: JobRow, names: Map<number, string>, own = true) {
   const req = JSON.parse(j.request || '{}') as { prompt?: string; scope?: string; pageId?: string };
   const version = j.version_id
     ? (db.prepare('SELECT version_no FROM project_versions WHERE id = ?').get(j.version_id) as { version_no: number } | undefined)?.version_no
@@ -594,6 +632,9 @@ function publicJob(db: DB, j: JobRow, names: Map<number, string>) {
     ...(j.kind === 'edit' ? { request: req.prompt, scope: req.scope === 'global' ? 'deck' : 'page' } : {}),
     ...(version ? { resultVersion: version } : {}),
     ...(j.status === 'error' ? { error: j.error ?? 'unknown error' } : {}),
+    ...(j.resume_count ? { resumed: j.resume_count } : {}),
+    ...(j.retry_of ? { retryOf: j.retry_of } : {}),
+    ...retryInfo(db, j, own),
   };
 }
 
@@ -765,8 +806,9 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
         : {}),
       ...(project.status === 'error' ? { error: project.error ?? job?.error ?? 'unknown error' } : {}),
       ...(mcpJob ? { lastRequest: publicJob(db, mcpJob, userNames(db)) } : {}),
+      ...(project.status === 'error' && mcpJob?.kind === 'create' && mcpJob.status === 'error' ? { next: `Generation failed. ${retryHint(mcpJob)}` } : {}),
       ...(failedUpdate && project.status === 'ready'
-        ? { next: `The last update failed and the deck is unchanged (version ${project.version_no}): ${mcpJob.error ?? 'unknown error'}. Call update_roadshow_slides again if the change is still wanted.` }
+        ? { next: `The last update failed and the deck is unchanged (version ${project.version_no}): ${mcpJob.error ?? 'unknown error'}. ${retryHint(mcpJob)}` }
         : {}),
       editorUrl: `${base}/p/${project.id}`,
     };
@@ -892,7 +934,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       },
       files: projectAssets(db, p.id).map((a) => ({ ...publicAsset(db, a), uploadedAt: iso(a.created_at), uploadedBy: a.created_by ? names.get(a.created_by) ?? null : null })),
       history: history(db, p.id, names),
-      ...(failed.length ? { failedRequests: failed.map((j) => publicJob(db, j, names)) } : {}),
+      ...(failed.length ? { failedRequests: failed.map((j) => publicJob(db, j, names, j.user_id === svc.id)) } : {}),
       ...(mcpJob ? { lastRequest: publicJob(db, mcpJob, names) } : {}),
       ...(hasPages ? { pageCount: doc!.pages.length, pages: pageList(doc!) } : {}),
       editorUrl: `${base}/p/${p.id}`,
@@ -921,7 +963,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       if (p.status === 'generating') throw new ToolError(`Deck "${p.id}" is still being generated. Wait with get_roadshow_slides_status until it is "ready".`);
       const doc = projectDoc(p);
       if (!doc?.pages.length) {
-        throw new ToolError(`Deck "${p.id}" has no pages to update because its generation failed (${p.error ?? 'unknown error'}). Delete it and create it again.`);
+        throw new ToolError(`Deck "${p.id}" has no pages to update because its generation failed (${p.error ?? 'unknown error'}). Generate it again with retry_roadshow_slides, or delete it.`);
       }
       if (pageNo) {
         if (Number(pageNo) > doc.pages.length) throw new ToolError(`"page" must be from 1 to ${doc.pages.length}`);
@@ -967,6 +1009,65 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       next: job
         ? `The change takes a few minutes. Call get_roadshow_slides_status with projectId "${project.id}" until status is "ready", then check lastRequest.`
         : `${done.charAt(0).toUpperCase()}${done.slice(1)}; no generation needed.`,
+    };
+    return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
+  }
+
+  function retryHint(j: JobRow): string {
+    const cp = resumableJobs(db, [j.id]).get(j.id);
+    return cp
+      ? `Call retry_roadshow_slides to continue from the saved progress (${cp.label}), or with mode "restart" to start over.`
+      : 'Call retry_roadshow_slides to run it again from scratch.';
+  }
+
+  async function retrySlides(req: FastifyRequest, svc: ServiceUser, args: Args): Promise<ToolResult> {
+    const p = myDeck(svc, textArg(args, 'projectId', { required: true })!.trim());
+    const mode = textArg(args, 'mode')?.trim() || 'auto';
+    if (mode !== 'auto' && mode !== 'resume' && mode !== 'restart') throw new ToolError('"mode" must be one of: auto, resume, restart');
+    const jobId = textArg(args, 'jobId')?.trim();
+    const latest = latestMcpJob(db, p.id, svc.id);
+    if (p.status === 'generating' || isActive(latest)) {
+      throw new ToolError(`Deck "${p.id}" is still ${p.status === 'generating' ? 'generating' : 'updating'}. Wait with get_roadshow_slides_status; retry only after a request failed.`);
+    }
+    let failed = latest;
+    if (jobId) {
+      failed = db.prepare('SELECT * FROM jobs WHERE id = ? AND project_id = ?').get(jobId, p.id) as JobRow | undefined;
+      if (!failed) throw new ToolError(`Deck "${p.id}" has no request "${jobId}"`);
+      if (failed.user_id !== svc.id) throw new ToolError(`Request "${jobId}" was made on the web page; only requests made through MCP can be retried here.`);
+    }
+    if (!failed) throw new ToolError(`Deck "${p.id}" has no request made through MCP to retry`);
+    if (failed.status !== 'error') throw new ToolError(`Request "${failed.id}" did not fail (status "${JOB_STATUS[failed.status]}"); there is nothing to retry.`);
+    if (failed.retried_by) throw new ToolError(`Request "${failed.id}" was already retried as "${failed.retried_by}"; retry that one if it failed too.`);
+    if (failed.kind === 'create' && p.version_no > 0) {
+      throw new ToolError(`Deck "${p.id}" has been generated since this request failed; change it with update_roadshow_slides instead.`);
+    }
+    const saved = resumableJobs(db, [failed.id]).get(failed.id);
+    if (mode === 'resume' && !saved) {
+      throw new ToolError(
+        `Request "${failed.id}" has no saved progress to continue from (only the latest request of a deck keeps it, once it got past planning). Call retry_roadshow_slides with mode "restart" to run it again from scratch.`,
+      );
+    }
+    const resume = mode === 'resume' || (mode === 'auto' && !!saved);
+    let job: JobRow;
+    try {
+      job = resume ? resumeJob(db, failed, svc.id) : retryJob(db, failed, svc.id);
+    } catch (e) {
+      throw new ToolError((e as Error).message);
+    }
+    req.log.info({ projectId: p.id, failedJobId: failed.id, jobId: job.id, mode: resume ? 'resume' : 'restart' }, 'mcp retry_roadshow_slides');
+    const project = getProject(db, p.id)!;
+    const prompt = (JSON.parse(job.request || '{}') as { prompt?: string }).prompt;
+    const result = {
+      projectId: project.id,
+      name: project.name,
+      status: job.kind === 'create' ? 'generating' : 'updating',
+      mode: resume ? 'resume' : 'restart',
+      jobId: job.id,
+      kind: job.kind === 'edit' ? 'update' : 'create',
+      ...(job.kind === 'edit' ? { request: prompt } : {}),
+      ...(resume ? { continuedFrom: saved!.label } : { retryOf: failed.id }),
+      editorUrl: `${baseUrl(req)}/p/${project.id}`,
+      next: `${resume ? 'Continuing from the saved progress' : 'Running the request again from scratch'}. Call get_roadshow_slides_status with projectId "${project.id}" until status is "ready", then check lastRequest.`,
     };
     return { content: [{ type: 'text', text: json(result) }], structuredContent: result };
   }
@@ -1161,6 +1262,7 @@ export async function mcpRoutes(app: FastifyInstance, db: DB) {
       list_roadshow_slides: () => listSlides(req, svc, args),
       get_roadshow_slides: () => getSlides(req, svc, args),
       update_roadshow_slides: () => updateSlides(req, svc, args),
+      retry_roadshow_slides: () => retrySlides(req, svc, args),
       delete_roadshow_slides: () => deleteSlides(req, svc, args),
       list_roadshow_folders: () => listFoldersTool(req, svc, args),
       create_roadshow_folder: () => createFolderTool(req, svc, args),
