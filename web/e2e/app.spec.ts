@@ -896,9 +896,26 @@ test('model access page shows usage with output speed above the generation setti
   const usageTop = (await usage.boundingBox())!.y;
   const settingsTop = (await page.locator('h3:has-text("生成设置")').boundingBox())!.y;
   expect(usageTop).toBeLessThan(settingsTop);
-  await expect(usage.locator('[data-testid=model-stats-row] td:first-child')).toHaveText(['Mock LLM', 'Backup']);
-  await expect(usage.locator('[data-testid=model-stats-row]').first()).toContainText('Mock LLM');
-  await expect(usage.locator('[data-testid=model-speed]', { hasText: 'tok/s' }).first()).toBeVisible();
+  const all = usage.locator('[data-testid=model-stats]');
+  await expect(all.locator('[data-testid=model-stats-row] td:first-child')).toHaveText(['Mock LLM', 'Backup']);
+  await expect(all.locator('[data-testid=model-speed]', { hasText: 'tok/s' }).first()).toBeVisible();
+  // Everything in this run happened today, so the last 3 days match the all-time totals.
+  const recent = usage.locator('[data-testid=usage-recent]');
+  await expect(recent).toContainText('最近 3 天');
+  await expect(recent.locator('[data-testid=recent-model-stats] [data-testid=model-stats-row] td:first-child')).toHaveText(['Mock LLM', 'Backup']);
+  await expect(recent.locator('[data-testid=recent-model-stats] tr').nth(1)).toHaveText(await all.locator('tr').nth(1).innerText());
+  await expect(recent.locator('[data-testid=recent-user-usage] [data-testid=user-usage-row]')).toHaveCount(
+    await usage.locator('[data-testid=user-usage] [data-testid=user-usage-row]').count(),
+  );
+  // The charts show one bar group per day, today last, with its numbers on hover.
+  await expect(usage.locator('[data-testid=chart-tokens-day]')).toHaveCount(14);
+  await usage.locator('[data-testid=chart-tokens-day]').last().hover();
+  await expect(usage.locator('[data-testid=chart-tokens-tip]')).toContainText(/输入 [\d,]+/);
+  await expect(usage.locator('[data-testid=chart-tokens-tip]')).toContainText(/任务 [1-9]/);
+  await usage.locator('[data-testid=chart-speed-day]').last().hover();
+  await expect(usage.locator('[data-testid=chart-speed-tip]')).toContainText('tok/s');
+  await usage.locator('[data-testid=chart-range] button', { hasText: '7 天' }).click();
+  await expect(usage.locator('[data-testid=chart-speed-day]')).toHaveCount(7);
   const row = page.locator('[data-testid=endpoint-row]').first();
   await expect(row.locator('[data-testid=endpoint-concurrency]')).toHaveText('0 / 不限');
   await row.locator('button:has-text("编辑")').click();

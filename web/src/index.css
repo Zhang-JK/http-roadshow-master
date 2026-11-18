@@ -251,6 +251,25 @@ textarea { resize: vertical; min-height: 40px; }
 .table.compact td, .table.compact th { padding: 6px 8px; font-size: 13px; }
 .usage-card { margin-top: 20px; overflow: auto; }
 .usage-card h4 { font-size: 13px; margin: 16px 0 4px; color: #3a4055; }
+.usage-card h4.usage-title { font-size: 14px; margin: 22px 0 8px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--text); }
+.usage-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 22px 0 8px; padding-top: 14px; border-top: 1px solid var(--border); }
+.usage-section-head h4.usage-title { margin: 0; padding: 0; border: 0; }
+.usage-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.chart-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 6px; background: #fcfcfe; min-width: 0; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.usage-card .chart-head h4 { margin: 0; }
+.chart-legend { display: inline-flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.chart-legend i.line { height: 3px; width: 14px; border-radius: 2px; }
+.chart-wrap { position: relative; }
+.chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart-grid { stroke: #eceef3; stroke-dasharray: 3 3; }
+.chart-axis { stroke: var(--border-strong); }
+.chart-tick { font-size: 10px; fill: var(--muted); }
+.chart-empty { font-size: 12px; fill: #9aa1b4; }
+.chart-hover { fill: var(--primary-50); }
+.chart-tip { position: absolute; top: 4px; display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; font-size: 12px; white-space: nowrap; background: rgba(28, 32, 48, 0.92); color: #fff; border-radius: 8px; pointer-events: none; box-shadow: var(--shadow); z-index: 2; }
 .settings-card { margin-top: 20px; }
 .settings-card .settings-form { max-width: 820px; }
 .prio-cell { width: 1%; white-space: nowrap; }
