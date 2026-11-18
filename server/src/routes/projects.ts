@@ -33,6 +33,7 @@ import { jobDuration, jobStats, type JobStats } from '../calls.js';
 import { resumableJobs, type CheckpointInfo } from '../checkpoint.js';
 import { MAX_UPLOAD_FILES, createFromForm, type UploadFile } from '../create.js';
 import { shareInfo } from './share.js';
+import { folderArg, moveToFolder, setArchived } from '../folders.js';
 
 const MAX_README = 50_000;
 
@@ -73,6 +74,9 @@ function publicProject(p: ProjectRow, names: Map<number, string>, withDoc: boole
     createdAt: p.created_at,
     updatedAt: p.updated_at,
     share: shareInfo(p, names),
+    folderId: p.folder_id ?? null,
+    archivedAt: p.archived_at ?? null,
+    archivedBy: p.archived_by ? names.get(p.archived_by) ?? null : null,
     ...(withDoc ? { doc } : {}),
   };
 }
@@ -207,10 +211,14 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
   app.patch('/api/projects/:id', async (req) => {
     const user = requireUser(req);
     const p = mustProject(db, (req.params as any).id);
-    const { name } = (req.body ?? {}) as { name?: string };
-    const newName = String(name ?? '').trim();
-    if (!newName) throw new HttpError(400, '名称不能为空');
-    await renameProject(db, p.id, user.id, newName);
+    const body = (req.body ?? {}) as { name?: string; folderId?: string | null; archived?: boolean };
+    if (body.name === undefined && body.folderId === undefined && body.archived === undefined) throw new HttpError(400, '没有要修改的内容');
+    if (body.archived !== undefined && typeof body.archived !== 'boolean') throw new HttpError(400, 'archived 必须是 true 或 false');
+    const newName = body.name === undefined ? undefined : String(body.name).trim();
+    if (newName === '') throw new HttpError(400, '名称不能为空');
+    if (body.folderId !== undefined) moveToFolder(db, p, folderArg(db, body.folderId));
+    if (body.archived !== undefined && body.archived !== !!p.archived_at) setArchived(db, p.id, user.id, body.archived);
+    if (newName && newName !== p.name) await renameProject(db, p.id, user.id, newName);
     return { project: publicProject(getProject(db, p.id)!, userNames(db), false) };
   });
 
@@ -219,7 +227,7 @@ export function projectRoutes(app: FastifyInstance, db: DB) {
     const p = mustProject(db, (req.params as any).id);
     if (p.type === 'template') {
       const used = db.prepare('SELECT COUNT(*) AS c FROM projects WHERE template_id = ?').get(p.id) as { c: number };
-      if (used.c > 0) throw new HttpError(409, `该模板已被 ${used.c} 份路演材料使用，无法删除`);
+      if (used.c > 0) throw new HttpError(409, `该模板已被 ${used.c} 份路演材料使用，无法删除；不再使用时可以归档`);
     }
     deleteProject(db, p.id);
     return { ok: true };

@@ -182,6 +182,22 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN shared_at INTEGER;
   CREATE UNIQUE INDEX idx_projects_share ON projects(share_token) WHERE share_token IS NOT NULL;
   `,
+  // Folders for decks (nested), and archiving of templates and decks (folders.ts).
+  `
+  CREATE TABLE folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX idx_folders_parent ON folders(parent_id);
+  ALTER TABLE projects ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
+  ALTER TABLE projects ADD COLUMN archived_at INTEGER;
+  ALTER TABLE projects ADD COLUMN archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+  CREATE INDEX idx_projects_folder ON projects(folder_id);
+  `,
 ];
 
 /** Service account the MCP endpoint acts as; it has a token instead of a password. */

@@ -67,6 +67,10 @@ export interface ProjectRow {
   share_token: string | null;
   shared_by: number | null;
   shared_at: number | null;
+  /** Decks only; null is the top level. */
+  folder_id: string | null;
+  archived_at: number | null;
+  archived_by: number | null;
 }
 
 export interface JobRow {
@@ -628,6 +632,7 @@ export interface CreateInput {
   height: number;
   aspect: string;
   templateId?: string | null;
+  folderId?: string | null;
   brief: TemplateBrief | DeckBrief;
 }
 
@@ -636,14 +641,15 @@ export function createProject(db: DB, userId: number, input: CreateInput): Proje
   const id = nanoid(12);
   const doc = emptyDoc(input.name, input.width, input.height);
   db.prepare(
-    `INSERT INTO projects (id, type, name, meta, template_id, doc, status, created_by, updated_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'generating', ?, ?, ?, ?)`,
+    `INSERT INTO projects (id, type, name, meta, template_id, folder_id, doc, status, created_by, updated_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'generating', ?, ?, ?, ?)`,
   ).run(
     id,
     input.type,
     input.name,
     JSON.stringify({ aspect: input.aspect, brief: input.brief }),
     input.templateId ?? null,
+    input.folderId ?? null,
     JSON.stringify(doc),
     userId,
     userId,

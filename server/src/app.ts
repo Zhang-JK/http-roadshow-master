@@ -10,6 +10,7 @@ import { HttpError, SESSION_COOKIE, userFromToken } from './auth.js';
 import { authRoutes } from './routes/auth.js';
 import { llmRoutes } from './routes/llm.js';
 import { projectRoutes } from './routes/projects.js';
+import { folderRoutes } from './routes/folders.js';
 import { sessionRoutes } from './routes/sessions.js';
 import { shareRoutes } from './routes/share.js';
 import { systemRoutes } from './routes/system.js';
@@ -35,6 +36,7 @@ export async function buildApp(db: DB, opts: { logger?: boolean; serveWeb?: bool
   authRoutes(app, db);
   llmRoutes(app, db);
   projectRoutes(app, db);
+  folderRoutes(app, db);
   sessionRoutes(app, db);
   shareRoutes(app, db);
   systemRoutes(app);
