@@ -903,7 +903,7 @@ test('model access page shows usage with output speed above the generation setti
   const recent = usage.locator('[data-testid=usage-recent]');
   await expect(recent).toContainText('最近 3 天');
   await expect(recent.locator('[data-testid=recent-model-stats] [data-testid=model-stats-row] td:first-child')).toHaveText(['Mock LLM', 'Backup']);
-  await expect(recent.locator('[data-testid=recent-model-stats] tr').nth(1)).toHaveText(await all.locator('tr').nth(1).innerText());
+  await expect(recent.locator('[data-testid=recent-model-stats] tr').nth(1)).toHaveText((await all.locator('tr').nth(1).textContent())!);
   await expect(recent.locator('[data-testid=recent-user-usage] [data-testid=user-usage-row]')).toHaveCount(
     await usage.locator('[data-testid=user-usage] [data-testid=user-usage-row]').count(),
   );

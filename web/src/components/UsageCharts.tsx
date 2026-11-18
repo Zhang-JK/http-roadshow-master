@@ -19,13 +19,14 @@ const PLOT_W = W - PAD.left - PAD.right;
 const PLOT_H = H - PAD.top - PAD.bottom;
 const DIVISIONS = 4;
 
-/** A round step (1, 2 or 5 × 10ⁿ) so that DIVISIONS of it cover `max`. */
+/** A round step (1, 2, 2.5 or 5 × 10ⁿ; 3 instead of 2.5 for counts) so that DIVISIONS of it cover `max`. */
 function niceStep(max: number, integer = false): number {
   const raw = max / DIVISIONS;
   if (raw <= 0) return 1;
   const exp = 10 ** Math.floor(Math.log10(raw));
   const f = raw / exp;
-  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * exp;
+  const steps = integer ? [1, 2, 3, 5, 10] : [1, 2, 2.5, 5, 10];
+  const step = steps.find((s) => f <= s)! * exp;
   return integer ? Math.max(1, Math.round(step)) : step;
 }
 
