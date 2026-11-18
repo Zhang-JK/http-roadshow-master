@@ -70,6 +70,8 @@ const TOOL_NAMES = [
   'get_roadshow_slides',
   'update_roadshow_slides',
   'delete_roadshow_slides',
+  'list_roadshow_folders',
+  'create_roadshow_folder',
   'list_roadshow_files',
   'get_roadshow_file',
   'download_roadshow_slides',
