@@ -3,8 +3,11 @@ import type { DB } from '../db.js';
 import { getSettings, setSettings } from '../db.js';
 import { HttpError, requireAdmin, requireUser } from '../auth.js';
 import { callTimeouts, inflightCount, testEndpoint, testParallel, type Endpoint } from '../llm.js';
-import { SPEED_SQL, tokensPerSec } from '../calls.js';
 import { activeProxy } from '../proxy.js';
+import { dailyUsage, dayStart, usageTables } from '../usage.js';
+
+const RECENT_DAYS = 3;
+const MAX_DAILY_DAYS = 90;
 
 const maskKey = (k: string) => (k.length <= 10 ? '****' : `${k.slice(0, 6)}…${k.slice(-4)}`);
 
@@ -182,52 +185,23 @@ export function llmRoutes(app: FastifyInstance, db: DB) {
     return { result: await testEndpoint(ep, callTimeouts(db).idleTimeoutMs) };
   });
 
+  /**
+   * All-time totals, the same totals for the last RECENT_DAYS days (today included) and a per-day series
+   * of the last `days` days. Days are the viewer's: `tzOffset` is their Date.getTimezoneOffset().
+   */
   app.get('/api/llm/usage', async (req) => {
     requireAdmin(req);
-    const rows = db
-      .prepare(
-        `SELECT u.username, e.name AS endpoint, COUNT(*) AS calls, SUM(j.prompt_tokens) AS promptTokens,
-                SUM(j.completion_tokens) AS completionTokens, SUM(j.cost) AS cost
-         FROM jobs j LEFT JOIN users u ON u.id = j.user_id LEFT JOIN llm_endpoints e ON e.id = j.endpoint_id
-         WHERE j.endpoint_id IS NOT NULL GROUP BY j.user_id, j.endpoint_id ORDER BY cost DESC`,
-      )
-      .all() as any[];
-    // Output speed comes from the recorded model calls (jobs from before the calls were recorded have none).
-    const speedRows = db
-      .prepare(
-        `SELECT u.username, e.name AS endpoint, ${SPEED_SQL}
-         FROM llm_calls c LEFT JOIN users u ON u.id = c.user_id LEFT JOIN llm_endpoints e ON e.id = c.endpoint_id
-         GROUP BY c.user_id, c.endpoint_id`,
-      )
-      .all() as any[];
-    const speed = new Map(speedRows.map((r) => [`${r.username}\u0000${r.endpoint}`, tokensPerSec(r.speed_tokens, r.speed_ms)]));
-    const models = (
-      db
-        .prepare(
-          `SELECT e.id, e.name, e.model, e.max_concurrency, COUNT(c.id) AS calls, SUM(c.status = 'error') AS failed,
-                  SUM(c.prompt_tokens) AS promptTokens, SUM(c.completion_tokens) AS completionTokens,
-                  AVG(CASE WHEN c.first_token_at IS NOT NULL THEN c.first_token_at - c.started_at END) AS firstTokenMs,
-                  AVG(c.queued_ms) AS queuedMs, ${SPEED_SQL}
-           FROM llm_endpoints e LEFT JOIN llm_calls c ON c.endpoint_id = e.id GROUP BY e.id ORDER BY e.priority, e.id`,
-        )
-        .all() as any[]
-    ).map((r) => ({
-      endpointId: r.id,
-      endpoint: r.name,
-      model: r.model,
-      calls: r.calls,
-      failedCalls: r.failed ?? 0,
-      promptTokens: r.promptTokens ?? 0,
-      completionTokens: r.completionTokens ?? 0,
-      tokensPerSec: tokensPerSec(r.speed_tokens, r.speed_ms),
-      firstTokenMs: r.firstTokenMs === null ? null : Math.round(r.firstTokenMs),
-      queuedMs: r.queuedMs === null ? null : Math.round(r.queuedMs),
-      inflight: inflightCount(r.id),
-      maxConcurrency: r.max_concurrency ?? 0,
-    }));
+    const q = req.query as { tzOffset?: string; days?: string };
+    const tz = Number(q.tzOffset ?? 0);
+    const tzOffset = Number.isInteger(tz) && Math.abs(tz) <= 14 * 60 ? tz : 0;
+    const d = Number(q.days ?? 14);
+    const days = Number.isInteger(d) && d >= 1 && d <= MAX_DAILY_DAYS ? d : 14;
+    const now = Date.now();
+    const since = dayStart(now, tzOffset, RECENT_DAYS - 1);
     return {
-      usage: rows.map((r) => ({ ...r, tokensPerSec: speed.get(`${r.username}\u0000${r.endpoint}`) ?? null })),
-      models,
+      ...usageTables(db),
+      recent: { days: RECENT_DAYS, since, ...usageTables(db, since) },
+      daily: dailyUsage(db, days, tzOffset, now),
     };
   });
 

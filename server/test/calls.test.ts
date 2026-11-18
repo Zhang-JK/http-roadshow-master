@@ -290,6 +290,57 @@ describe('job history, retry and sessions', () => {
     expect('tokensPerSec' in usage.json.usage[0]).toBe(true);
   });
 
+  it('usage also covers the last 3 days and each recent day', async () => {
+    const { dayStart } = await import('../src/usage.js');
+    const hk = -480;
+    const now = Date.now();
+    const old = dayStart(now, hk, 10) + 3_600_000;
+    const owner = (apiDb.prepare('SELECT user_id FROM jobs WHERE project_id = ? LIMIT 1').get(projectId) as { user_id: number }).user_id;
+    apiDb
+      .prepare(
+        `INSERT INTO jobs (id, project_id, user_id, kind, status, endpoint_id, prompt_tokens, completion_tokens, cost, created_at, updated_at, finished_at)
+         VALUES ('old-job', ?, ?, 'edit', 'error', ?, 1000, 500, 0, ?, ?, ?)`,
+      )
+      .run(projectId, owner, epId, old, old, old);
+    apiDb
+      .prepare(
+        `INSERT INTO llm_calls (job_id, user_id, endpoint_id, model, stage, started_at, first_token_at, ended_at, prompt_tokens, completion_tokens, status)
+         VALUES ('old-job', ?, ?, 'mock', 'edit', ?, ?, ?, 1000, 500, 'ok')`,
+      )
+      .run(owner, epId, old, old + 1000, old + 3000);
+    try {
+      const u = (await req('GET', `/api/llm/usage?tzOffset=${hk}&days=14`, admin)).json;
+      const sum = (rows: any[], k: string) => rows.reduce((s, r) => s + (r[k] ?? 0), 0);
+      expect(u.recent).toMatchObject({ days: 3, since: dayStart(now, hk, 2) });
+      expect(sum(u.usage, 'promptTokens') - sum(u.recent.usage, 'promptTokens')).toBe(1000);
+      expect(sum(u.models, 'calls') - sum(u.recent.models, 'calls')).toBe(1);
+      expect(u.recent.models.map((m: any) => m.endpoint)).toEqual(u.models.map((m: any) => m.endpoint));
+
+      expect(u.daily).toHaveLength(14);
+      const date = (ms: number) => new Date(ms - hk * 60_000).toISOString().slice(0, 10);
+      expect(u.daily[13].date).toBe(date(now));
+      expect(u.daily[13].tasks).toBeGreaterThan(0);
+      expect(u.daily[3]).toEqual({ date: date(old), tasks: 1, failedTasks: 1, calls: 1, promptTokens: 1000, completionTokens: 500, tokensPerSec: 250 });
+      expect(u.daily[4]).toMatchObject({ tasks: 0, calls: 0, promptTokens: 0, tokensPerSec: null });
+
+      expect((await req('GET', '/api/llm/usage?days=abc&tzOffset=9999', admin)).json.daily).toHaveLength(14);
+      expect((await req('GET', '/api/llm/usage?days=30', admin)).json.daily).toHaveLength(30);
+      expect((await req('GET', '/api/llm/usage', alice)).status).toBe(403);
+    } finally {
+      apiDb.prepare(`DELETE FROM jobs WHERE id = 'old-job'`).run();
+    }
+  });
+
+  it('days start at the viewer’s midnight', async () => {
+    const { dayStart } = await import('../src/usage.js');
+    // 2026-11-17 20:00 UTC is 04:00 on the 18th in Hong Kong.
+    const t = Date.UTC(2026, 10, 17, 20);
+    expect(dayStart(t, -480)).toBe(Date.UTC(2026, 10, 17, 16));
+    expect(dayStart(t, -480, 2)).toBe(Date.UTC(2026, 10, 15, 16));
+    expect(dayStart(t, 0)).toBe(Date.UTC(2026, 10, 17));
+    expect(dayStart(t, 300)).toBe(Date.UTC(2026, 10, 17, 5));
+  });
+
   it('the dashboard marks projects with a running job', async () => {
     const e = await req('POST', `/api/projects/${projectId}/edit`, alice, { prompt: '再改一下', scope: 'global' });
     const list = await req('GET', '/api/projects', alice);
