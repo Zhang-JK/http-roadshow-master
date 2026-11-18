@@ -52,7 +52,25 @@ export interface Project {
   updatedAt: number;
   /** Set while anyone with the link may view the project without signing in. */
   share?: ShareInfo | null;
+  /** Decks only: the folder it is in, null at the top level. */
+  folderId?: string | null;
+  /** Set while archived: listed apart, and an archived template starts no new decks. */
+  archivedAt?: number | null;
+  archivedBy?: string | null;
   doc?: DeckDoc;
+}
+
+export interface Folder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  /** Decks directly inside, not archived. */
+  deckCount: number;
+  archivedCount: number;
+  folderCount: number;
+  createdBy: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ShareInfo {

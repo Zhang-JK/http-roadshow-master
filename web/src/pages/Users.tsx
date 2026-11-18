@@ -90,7 +90,7 @@ function McpCard({ user, onChange }: { user: User; onChange: (u: User) => void }
         <span>
           <code>list_roadshow_templates</code> 列出模板 · <code>create_roadshow_slides</code> 创建路演材料 · <code>get_roadshow_slides_status</code> 查询进度与下载链接 ·{' '}
           <code>list_roadshow_slides</code> 查找已创建的材料 · <code>get_roadshow_slides</code> 原始需求、文件与修改历史 · <code>update_roadshow_slides</code> 提交新数据修改 ·{' '}
-          <code>delete_roadshow_slides</code> 删除材料
+          <code>delete_roadshow_slides</code> 删除材料 · <code>list_roadshow_folders</code> / <code>create_roadshow_folder</code> 列出与新建文件夹
         </span>
       </div>
       <h4 className="mcp-sub">Cursor / Claude Desktop（mcp.json）</h4>

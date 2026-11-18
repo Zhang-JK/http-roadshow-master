@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { Project, ProjectType } from '../types';
+import type { Folder, Project, ProjectType } from '../types';
+import { FolderSelect } from './FolderDialogs';
 import { Modal } from './Modal';
 import { SlideFrame } from './SlideFrame';
 import { useToast } from './Toast';
@@ -21,6 +22,8 @@ const ASPECT_OPTIONS = [
 
 interface Props {
   type: ProjectType;
+  /** Decks: the folder to create it in at first (null: the top level). */
+  folderId?: string | null;
   onClose: () => void;
   onCreated: (id: string) => void;
 }
@@ -64,11 +67,13 @@ function FilePicker({ files, setFiles, accept, hint, defaultRole }: { files: Ref
   );
 }
 
-export function CreateDialog({ type, onClose, onCreated }: Props) {
+export function CreateDialog({ type, folderId, onClose, onCreated }: Props) {
   const toast = useToast();
   const [step, setStep] = useState(type === 'deck' ? 0 : 1);
   const [templates, setTemplates] = useState<Project[] | null>(null);
   const [templateId, setTemplateId] = useState('');
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folder, setFolder] = useState(folderId ?? '');
   const [f, setF] = useState({
     name: '',
     style: '',
@@ -90,7 +95,11 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
     if (type !== 'deck') return;
     api
       .get<{ projects: Project[] }>('/api/projects?type=template')
-      .then((r) => setTemplates(r.projects.filter((p) => p.status === 'ready' && p.pageCount > 0)))
+      .then((r) => setTemplates(r.projects.filter((p) => p.status === 'ready' && p.pageCount > 0 && !p.archivedAt)))
+      .catch((e) => toast(e.message, 'error'));
+    api
+      .get<{ folders: Folder[] }>('/api/folders')
+      .then((r) => setFolders(r.folders))
       .catch((e) => toast(e.message, 'error'));
   }, [type, toast]);
 
@@ -105,7 +114,10 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
       const fd = new FormData();
       fd.append('type', type);
       Object.entries(f).forEach(([k, v]) => fd.append(k, v));
-      if (type === 'deck') fd.append('templateId', templateId);
+      if (type === 'deck') {
+        fd.append('templateId', templateId);
+        fd.append('folderId', folder);
+      }
       fd.append('fileRoles', JSON.stringify(files.map((x) => x.role)));
       files.forEach((x) => fd.append('files', x.file, x.file.name));
       const r = await api.post<{ project: Project }>('/api/projects', fd);
@@ -138,7 +150,7 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
           <div className="center"><div className="spinner" /></div>
         ) : templates.length === 0 ? (
           <div className="empty small">
-            <p>还没有可用的模板。请先在「模板」页创建一个模板。</p>
+            <p>还没有可用的模板。请先在「模板」页创建一个模板（已归档的模板不会出现在这里）。</p>
           </div>
         ) : (
           <div className="template-pick-grid">
@@ -189,10 +201,16 @@ export function CreateDialog({ type, onClose, onCreated }: Props) {
             </div>
           </div>
         )}
-        <label className="field full">
+        <label className={`field ${type === 'deck' ? '' : 'full'}`}>
           <span>{type === 'template' ? '模板名称' : '材料名称'} *</span>
           <input name="name" value={f.name} onChange={(e) => set('name')(e.target.value)} placeholder={type === 'template' ? '例如：科技蓝 · 融资路演模板' : '例如：XX科技 A 轮融资路演'} />
         </label>
+        {type === 'deck' && (
+          <label className="field">
+            <span>保存到文件夹</span>
+            <FolderSelect folders={folders} value={folder} onChange={setFolder} testId="create-folder" />
+          </label>
+        )}
         {type === 'template' && (
           <div className="field full">
             <span>设计风格 *</span>
