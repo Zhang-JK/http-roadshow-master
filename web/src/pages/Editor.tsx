@@ -397,7 +397,7 @@ export function EditorPage() {
   const initialSelection = useMemo(() => selection.map((s) => s.eid), [doc, frameNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!project) return <div className="center-screen"><div className="spinner" /></div>;
-  const backTo = project.type === 'template' ? '/templates' : '/decks';
+  const backTo = project.type === 'template' ? '/templates' : project.folderId ? `/decks?folder=${encodeURIComponent(project.folderId)}` : '/decks';
   const hasContent = !!liveDoc?.pages.length;
 
   return (
@@ -420,6 +420,15 @@ export function EditorPage() {
           </h1>
         )}
         <span className="muted small">v{project.versionNo} · {liveDoc?.width}×{liveDoc?.height}</span>
+        {project.archivedAt && (
+          <span
+            className="badge badge-archived"
+            title={project.type === 'template' ? '已归档：不会出现在新建路演材料的模板列表中' : '已归档：在列表的「已归档」中'}
+            data-testid="archived-badge"
+          >
+            已归档
+          </span>
+        )}
         {data?.template && (
           <Link className="muted small link" to={`/p/${data.template.id}`}>模板：{data.template.name}</Link>
         )}
