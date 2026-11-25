@@ -22,6 +22,9 @@ import {
   ASK_NOTE,
   CHART_NOTE,
   CHART_PLAN_NOTE,
+  DECK_REVIEW_POINTS,
+  LOGO_NOTE,
+  LOGO_PLAN_NOTE,
   withNote,
   type EditMode,
   type EditScope,
@@ -33,6 +36,7 @@ import { describeGenerateState, generateFiles, type GenerateState, type PageLook
 import { createParallelEditTools, PARALLEL_EDIT_TOOL, type ParallelEditContext } from './parallelEdit.js';
 import { assetPath, assetsByIds, isChart, makeAssetResolver, projectAssets, toAssetRefs, type AssetRow } from './assets.js';
 import { chartsAvailable, createChartTools } from './charts.js';
+import { createLogoTools } from './logos.js';
 import { assignFileIds, createFileTools, type FileTools } from './fileTools.js';
 import { inspectLayout, renderPageImages } from './render.js';
 import { askQuestion, asksForAll, cancelQuestion, createAskTools, type QaEntry } from './questions.js';
@@ -398,10 +402,9 @@ const GENERATION_REQUEST = '按 README.md 的需求、风格约定与页面规�
 /** edit_pages_in_parallel for a whole-deck tool edit or the review of a whole draft: its groups go to sub-agents with the reference and chart tools. */
 function groupEditTools(db: DB, jobId: string, userId: number, draft: Draft, ctx: ParallelEditContext, tools: FileTools | undefined, parallel: number): FileTools {
   const progress = sharedProgress(jobId);
-  const charts = tools?.defs.some((t) => t.function.name === 'make_chart');
   return createParallelEditTools(draft, ctx, {
     call: (messages, stage) =>
-      runStep(db, jobId, userId, charts ? withNote(messages, CHART_NOTE) : messages, tools, stage, true, progress.report(stage)).finally(() => progress.done(stage)),
+      runStep(db, jobId, userId, withToolNotes(messages, tools, 'write'), tools, stage, true, progress.report(stage)).finally(() => progress.done(stage)),
     lookAt: getSettings(db).pageReview === false ? undefined : (d) => lookAtPages(db, d),
     resolver: makeAssetResolver(db),
     onStage: progress.setStage,
@@ -424,6 +427,29 @@ async function lookAtPages(db: DB, doc: DeckDoc): Promise<PageLook[]> {
 /** make_chart for decks when the server can draw (templates keep placeholder charts in inline SVG). */
 function chartToolsFor(db: DB, project: ProjectRow, userId: number): FileTools | undefined {
   return project.type === 'deck' && chartsAvailable() ? createChartTools(db, project.id, userId) : undefined;
+}
+
+/** find_logo / use_logo for decks (templates only get a Logo placeholder), unless switched off. */
+function logoToolsFor(db: DB, project: ProjectRow, userId: number): FileTools | undefined {
+  return project.type === 'deck' && config.logoSearch ? createLogoTools(db, project.id, userId) : undefined;
+}
+
+/** The tools that make new material for a deck (charts, logos), or undefined when there are none. */
+function mediaToolsFor(db: DB, project: ProjectRow, userId: number, logos = logoToolsFor(db, project, userId)): FileTools | undefined {
+  const sets = [chartToolsFor(db, project, userId), logos].filter((t): t is FileTools => !!t);
+  return sets.length ? combineTools(...sets) : undefined;
+}
+
+/** The messages with the usage notes of the media tools offered: planning, writing pages, or both. */
+function withToolNotes(messages: ChatMessage[], tools: FileTools | undefined, stage: 'plan' | 'write' | 'both'): ChatMessage[] {
+  const has = (name: string) => !!tools?.defs.some((t) => t.function.name === name);
+  const notes = [
+    stage !== 'write' && has('make_chart') ? CHART_PLAN_NOTE : '',
+    stage !== 'write' && has('find_logo') ? LOGO_PLAN_NOTE : '',
+    stage !== 'plan' && has('make_chart') ? CHART_NOTE : '',
+    stage !== 'plan' && has('find_logo') ? LOGO_NOTE : '',
+  ].filter(Boolean);
+  return notes.length ? withNote(messages, notes.join('\n\n')) : messages;
 }
 
 /** Whether the job may pause for an answer: asking is on in the settings and the requester can answer. */
@@ -487,7 +513,7 @@ async function selfReview(
   fileTools?: FileTools,
   skipIfClean = false,
   before?: DeckDoc,
-  progress: Progress<ReviewState> & { delegate?: FileTools } = {},
+  progress: Progress<ReviewState> & { delegate?: FileTools; media?: FileTools; checks?: string } = {},
 ): Promise<ReviewLog> {
   const settings = getSettings(db);
   const log = await reviewDraft(db, userId, {
@@ -495,6 +521,8 @@ async function selfReview(
     resolver: makeAssetResolver(db),
     prompt,
     fileTools,
+    mediaTools: progress.media,
+    checks: progress.checks,
     delegate: progress.delegate,
     maxRounds: Number(settings.selfCheckRounds) || 10,
     maxTokens: Number(settings.maxTokens) || undefined,
@@ -688,7 +716,8 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
       const assets = toAssetRefs(db, rows, true, ft?.ids);
       const settings = getSettings(db);
       const ask = askToolsFor(db, job);
-      const charts = chartToolsFor(db, project, userId);
+      const logos = logoToolsFor(db, project, userId);
+      const media = mediaToolsFor(db, project, userId, logos);
       const tplRow = project.type === 'deck' && project.template_id ? getProject(db, project.template_id) : undefined;
       const template = tplRow ? projectDoc(tplRow) : null;
       let draft: Draft;
@@ -704,17 +733,16 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
             {
               call: (messages, stage, step) => {
                 if (step === 'plan') {
-                  if (charts) messages = withNote(messages, CHART_PLAN_NOTE);
-                  return ask
-                    ? runStep(db, job.id, userId, withNote(messages, ASK_NOTE), combineTools(ft?.tools, ask), stage, true)
-                    : runStep(db, job.id, userId, messages, ft?.tools, stage, true);
+                  messages = withToolNotes(messages, media, 'plan');
+                  if (ask) messages = withNote(messages, ASK_NOTE);
+                  return runStep(db, job.id, userId, messages, ask || logos ? combineTools(ft?.tools, logos, ask) : ft?.tools, stage, true);
                 }
                 return runStep(
                   db,
                   job.id,
                   userId,
-                  charts ? withNote(messages, CHART_NOTE) : messages,
-                  combineTools(ft?.tools, charts),
+                  withToolNotes(messages, media, 'write'),
+                  combineTools(ft?.tools, media),
                   stage,
                   true,
                   progress.report(stage),
@@ -735,9 +763,9 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
         } else {
           reviewContext =
             project.type === 'template' ? buildTemplatePrompt(base, meta.brief, assets) : buildDeckPrompt(base, template, meta.brief, assets);
-          let messages = charts ? withNote(reviewContext, `${CHART_PLAN_NOTE}\n\n${CHART_NOTE}`) : reviewContext;
+          let messages = withToolNotes(reviewContext, media, 'both');
           if (ask) messages = withNote(messages, ASK_NOTE);
-          const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, charts, ask), {
+          const text = await runLlm(db, job.id, userId, messages, combineTools(ft?.tools, media, ask), {
             resume: cp.write,
             save: (write) => save({ write }),
           });
@@ -760,8 +788,10 @@ function runGeneration(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = 
       await selfReview(db, job.id, userId, draft, reviewContext, ft?.tools, false, undefined, {
         delegate:
           reviewParallel > 1
-            ? groupEditTools(db, job.id, userId, draft, { request: GENERATION_REQUEST, kind: project.type, assets }, combineTools(ft?.tools, charts), reviewParallel)
+            ? groupEditTools(db, job.id, userId, draft, { request: GENERATION_REQUEST, kind: project.type, assets }, combineTools(ft?.tools, media), reviewParallel)
             : undefined,
+        media,
+        checks: project.type === 'deck' ? DECK_REVIEW_POINTS : undefined,
         resume: cp.review?.state,
         save: (state) => save({ review: { draft: draft.save(), prompt: reviewContext, state } }),
       });
@@ -840,15 +870,15 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
       const ctx = cp.edit ? { edit: cp.edit } : await prepareEdit(db, job, input, ft?.ids);
       const { snapshot, messages, mode, parallel } = ctx.edit;
       const project = getProject(db, projectId)!;
-      const charts = chartToolsFor(db, project, userId);
-      const prompt = charts ? withNote(messages, CHART_NOTE) : messages;
+      const media = mediaToolsFor(db, project, userId);
+      const prompt = withToolNotes(messages, media, 'write');
       let draft: Draft;
       if (cp.review) draft = Draft.restore(cp.review.draft);
       else {
         if (mode === 'tools') {
           const d = cp.tools ? Draft.restore(cp.tools.draft) : scope === 'global' ? Draft.ofDocument(snapshot) : Draft.ofPage(snapshot, input.pageId!);
           draft = d;
-          const fileTools = charts ? combineTools(ft?.tools, charts) : ft?.tools;
+          const fileTools = media ? combineTools(ft?.tools, media) : ft?.tools;
           const groups =
             parallel && scope === 'global'
               ? groupEditTools(db, job.id, userId, d, { request: input.prompt, kind: project.type, assets: toAssetRefs(db, projectAssets(db, projectId), false, ft?.ids) }, fileTools, parallel)
@@ -858,7 +888,7 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
             save: (loop) => save({ ...ctx, tools: { draft: d.save(), loop } }),
           });
         } else {
-          const text = await runLlm(db, job.id, userId, prompt, combineTools(ft?.tools, charts, askToolsFor(db, job)), {
+          const text = await runLlm(db, job.id, userId, prompt, combineTools(ft?.tools, media, askToolsFor(db, job)), {
             resume: cp.write,
             save: (write) => save({ ...ctx, write }),
           });
@@ -873,8 +903,10 @@ function runEdit(db: DB, job: JobRow, userId: number, cp: JobCheckpoint = {}) {
       await selfReview(db, job.id, userId, draft, messages, ft?.tools, mode === 'tools', snapshot, {
         delegate:
           reviewParallel > 1
-            ? groupEditTools(db, job.id, userId, draft, { request: input.prompt, kind: project.type, assets: toAssetRefs(db, projectAssets(db, projectId), false, ft?.ids) }, charts ? combineTools(ft?.tools, charts) : ft?.tools, reviewParallel)
+            ? groupEditTools(db, job.id, userId, draft, { request: input.prompt, kind: project.type, assets: toAssetRefs(db, projectAssets(db, projectId), false, ft?.ids) }, media ? combineTools(ft?.tools, media) : ft?.tools, reviewParallel)
             : undefined,
+        media,
+        checks: project.type === 'deck' && scope === 'global' ? DECK_REVIEW_POINTS : undefined,
         resume: cp.review?.state,
         save: (state) => save({ ...ctx, review: { draft: draft.save(), prompt: messages, state } }),
       });

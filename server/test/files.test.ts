@@ -115,6 +115,22 @@ describe('project files', () => {
     expect(plan[0].line).toBe('pages/cover.html ｜ cover ｜ 封面 ｜ 公司名');
   });
 
+  it('takes the page order from the page plan when other sections name pages too', () => {
+    const readme = `# T
+## 同类页面格式
+- 方案页：pages/option-b.html、pages/option-a.html 用同一种格式
+## 页面规划
+共 3 页：背景 → 方案对比 → 结论
+1. pages/cover.html ｜ cover ｜ 封面 ｜ 背景
+2. pages/option-a.html ｜ content ｜ 方案 A
+### 结尾
+3. pages/option-b.html ｜ content ｜ 方案 B
+## 修改记录
+- v2 删除了 pages/old.html`;
+    expect(plannedPages(readme).map((p) => p.path)).toEqual(['pages/cover.html', 'pages/option-a.html', 'pages/option-b.html']);
+    expect(plannedPages('无规划一节\n1. pages/a.html ｜ 封面').map((p) => p.path)).toEqual(['pages/a.html']);
+  });
+
   it('keeps an edit log at the end of the README, capped, and ignores it when diffing', () => {
     let r = '# T\n\n## 需求\n- x\n';
     for (let i = 1; i <= 35; i++) r = logEdit(r, `v${i} 修改 ${i}`);
