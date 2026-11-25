@@ -216,7 +216,7 @@ describe.skipIf(!hasTools)('reference images and PPT uploads', () => {
 
     const first = calls[0];
     expect(first.body.tools.map((t: any) => t.function.name).sort()).toEqual(
-      ['ask_user', 'list_archive', 'list_files', 'read_archive_entry', 'read_raw', 'read_text', 'search_files', 'view_page'],
+      ['ask_user', 'find_logo', 'list_archive', 'list_files', 'read_archive_entry', 'read_raw', 'read_text', 'search_files', 'use_logo', 'view_page'],
     );
     expect(first.text).toContain('［file_id=F2］');
     expect(first.text).toContain('全文共');
