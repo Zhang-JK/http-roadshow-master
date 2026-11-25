@@ -32,6 +32,15 @@ export const config = {
   sessionDays: Number(process.env.SESSION_DAYS ?? 14),
   /** Python with matplotlib, for the charts the model draws (make_chart); without it the tool is not offered. */
   python: process.env.PYTHON || 'python3',
+  /** Looking up company logos online (find_logo); LOGO_SEARCH=off where the server has no internet access. */
+  logoSearch: process.env.LOGO_SEARCH !== 'off',
+  logoSources: {
+    wikidata: process.env.LOGO_WIKIDATA_API ?? 'https://www.wikidata.org/w/api.php',
+    commonsFile: process.env.LOGO_COMMONS_FILE_URL ?? 'https://commons.wikimedia.org/wiki/Special:FilePath/',
+    simpleIcons: process.env.LOGO_SIMPLE_ICONS_URL ?? 'https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/',
+  },
+  /** Tests only: logo lookups may reach this machine and private networks. */
+  logoAllowPrivate: process.env.LOGO_ALLOW_PRIVATE === '1',
   /** First pause before a failed page batch is tried again (doubles after that). */
   pageRetryDelayMs: Number(process.env.PAGE_RETRY_DELAY_MS ?? 5000),
   chromePath: findChrome(),
