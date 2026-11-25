@@ -179,7 +179,7 @@ export function createParallelEditTools(draft: Draft, ctx: ParallelEditContext, 
         return;
       }
       if (round > 1 && !looks.some((l) => l.issues.some((i) => i.severity === 'error'))) return;
-      const parts: ContentPart[] = [{ type: 'text', text: pageReviewNote(pages.map((p, i) => ({ label: p.file!, issues: looks[i]?.issues ?? [] })), round) }];
+      const parts: ContentPart[] = [{ type: 'text', text: pageReviewNote(pages.map((p, i) => ({ label: p.file!, issues: looks[i]?.issues ?? [] })), round, ctx.kind === 'deck') }];
       pages.forEach((p, i) => {
         const image = looks[i]?.image;
         if (image) parts.push({ type: 'text', text: `【${p.file}】` }, { type: 'image_url', image_url: { url: image } });
@@ -279,7 +279,9 @@ export function createParallelEditTools(draft: Draft, ctx: ParallelEditContext, 
     const seen = await overview(touched);
     const failedNote = ok < groups.length ? '失败的组可以再派一次，或自己修改；' : '';
     return {
-      content: `并行修改完成：${groups.length} 组中 ${ok} 组成功。\n${lines.join('\n')}${seen.text}\n各组是分别完成的，请审阅全部结果：是否符合修改要求与 README，各页的风格、用语与数据是否一致，有没有布局问题${
+      content: `并行修改完成：${groups.length} 组中 ${ok} 组成功。\n${lines.join('\n')}${seen.text}\n各组是分别完成的，请审阅全部结果：是否符合修改要求与 README，各页的风格、用语与数据是否一致，${
+        ctx.kind === 'deck' ? '同类页面的格式是否统一、页面之间有没有讲同一件事、有没有自己画的 Logo，' : ''
+      }有没有布局问题${
         seen.images.length ? '' : '（用 render_pages 或 check_project 查看）'
       }。需要返工或还有遗漏的页面，再派下一轮 edit_pages_in_parallel（只派这些页面，写清楚每页的问题和要怎么改）；${failedNote}零散的小问题直接用工具修改。全部满意后用一两句话总结所做的修改。`,
       images: seen.images,

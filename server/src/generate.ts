@@ -316,7 +316,7 @@ export async function generateFiles(input: GenerateInput, deps: GenerateDeps): P
       }
       const errors = looks.flatMap((l) => l.issues).filter((i) => i.severity === 'error').length;
       if (round > 1 && !errors) return;
-      const parts: ContentPart[] = [{ type: 'text', text: pageReviewNote(shown.map((s, i) => ({ label: s.label, issues: looks[i]?.issues ?? [] })), round) }];
+      const parts: ContentPart[] = [{ type: 'text', text: pageReviewNote(shown.map((s, i) => ({ label: s.label, issues: looks[i]?.issues ?? [] })), round, kind === 'deck') }];
       shown.forEach((s, i) => {
         const image = looks[i]?.image;
         if (image) parts.push({ type: 'text', text: `【${s.label}】` }, { type: 'image_url', image_url: { url: image } });

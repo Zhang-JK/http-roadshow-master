@@ -128,6 +128,7 @@ const TEMPLATE_RULES = (pageCount: number, refs: boolean) => `【模板只是模
 - 流程图（步骤 + 箭头）与时间线/里程碑
 - 对比：两栏对比或 2×2 矩阵
 - 团队/组织架构：头像占位 + 姓名 + 职位
+- Logo 位置一律用写着「Logo」的占位框，不要画任何图形 Logo
 - 样式中为这些组件定义可复用的 class（如 .kpi、.chart、.data-table、.flow、.timeline、.compare、.team），后续生成材料时直接套用`;
 
 function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
@@ -150,6 +151,28 @@ function imageParts(assets: AssetRef[], plan: ImagePlan): ContentPart[] {
 
 const hasReferences = (assets: AssetRef[]) => assets.some((a) => a.role === 'reference' || a.slides?.length);
 
+const LOGO_RULE =
+  'Logo：公司、机构、产品与品牌的 Logo 绝不能自己画——不要用 SVG、CSS、艺术字或 emoji 拼出、仿制或“重绘”Logo。只用用户上传的、模板里已有的 Logo 素材，或用 find_logo 在网上找到的官方 Logo（提供该工具时）；都没有时用普通文字写出名称（模板中用写着「Logo」的占位框）。只有示意性的通用图标，或用户明确要求设计 / 绘制 Logo 时，才可以自己画。';
+
+/** Pages that describe the same kind of thing (option 1/2/3, change 1/2/3) share one format. */
+const SAME_KIND_RULE = (readme = true) =>
+  `同类页面统一格式：结构相同、只是对象不同的一组页面（如「方案一 / 二 / 三」「代码改动 1 / 2 / 3」「各产品线」「各季度复盘」）必须使用同一种格式——相同的版式、区块及顺序、标题写法（如「方案 N：名称」）、数据呈现方式和 class，只换内容。${
+    readme ? '在 README 中为每组同类页面写一份统一格式（版式、区块顺序、每个区块写什么、标题格式），并在样式中为它定义共用的 class；页面规划里注明这些页面套用哪份格式。' : '先为这组页面定好一种格式和共用的 class，再逐页套用。'
+  }用户明确为各页分别指定了版式时，按用户的来。`;
+
+/** The page plan: how many pages, what each is for, no two about the same thing. */
+const PLAN_RULE = (readme = true) =>
+  `页面精简、逻辑清楚：${
+    readme ? 'README 的「页面规划」先写明总页数和整条逻辑线' : '动手前先定好总页数和整条逻辑线'
+  }（各部分如何一步步衔接，如「背景 → 问题 → 方案对比 → 结果 → 下一步」），再逐页想清这一页在逻辑线中的作用（回答的一个问题或得出的一个结论）。${
+    readme ? '写完自查' : '自查'
+  }：任意两页不能讲同一个或高度相关的问题——有重叠就合并成一页，或明确分工、各讲一面；去掉可有可无的页面，不为凑页数拆分或重复内容（用户指定了页数时在其左右浮动）。整份材料要紧凑、读者顺着看下去就能懂。`;
+
+/** What a deck's review checks besides the layout: the same three rules, as found in the result. */
+export const DECK_REVIEW_POINTS = `- 页面之间没有重叠：没有两页讲同一个或高度相关的问题，每页在 README 逻辑线中的作用明确且各不相同，顺序读下来逻辑连贯；有重叠就合并或重新分工（同步更新 README 的页面规划）
+- 同类页面（方案一 / 二 / 三、改动 1 / 2 / 3 等）格式统一：版式、区块顺序、标题写法、数据呈现与 class 一致，符合 README 中这组页面的统一格式
+- Logo 都来自用户上传、模板或 find_logo，没有用 SVG / CSS / 艺术字自己画或仿制的 Logo（示意性的通用图标除外）；有的话换成真实 Logo，没有真实 Logo 时改为文字名称`;
+
 const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>, output: 'tools' | 'rewrite' | 'files') => `
 【硬性技术规范 —— 必须严格遵守】
 1. 材料以“页”为单位。每一页是一个 <section class="slide"> 元素，所有页面依次直接放在 <body> 下，不能嵌套。
@@ -163,6 +186,7 @@ const RULES = (doc: Pick<DeckDoc, 'width' | 'height'>, output: 'tools' | 'rewrit
 5. 禁止使用 <script>、<iframe>、外部 JS。图表请用内联 <svg> 或纯 CSS 实现（提供了 make_chart 工具时，有具体数据的图表用它绘制）。
 6. 字体使用系统字体栈，例如 "PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",Arial,sans-serif；如确需网络字体，只能通过 <link rel="stylesheet"> 引入 Google Fonts。
 7. 图片：只能使用用户提供的素材 URL（见素材列表）、make_chart 返回的图表地址，或使用 CSS 渐变、内联 SVG 图形、emoji/图标字符做装饰。禁止编造外部图片链接。
+   ${LOGO_RULE}
 8. 不要使用 position:fixed，不要依赖视口单位（vw/vh），一律使用 px 或 %。材料需要导出为 PDF/PPT，因此不要使用 background-clip:text 渐变文字和 mix-blend-mode（导出时会出现瑕疵），强调文字请用纯色、text-shadow 或色块背景。
 9. 已有元素上的 data-eid 与 data-page-id 属性是系统用于追踪修改历史的标识，修改时必须原样保留在对应元素上；新增元素不需要添加 data-eid。
 10. ${
@@ -198,8 +222,8 @@ const SIMILAR_GUIDE = (scope: EditScope, explicitAll: boolean) => `
 /** Whole-deck edits when edit_pages_in_parallel is offered. */
 const PARALLEL_LINE = `
 【工作流程：你负责规划与审阅，页面交给子任务并行修改】
-1. 规划：先读 README，确定要改哪些页面、每页怎么改。需求、风格或页面规划有变化时先更新 README（「页面规划」写清每页的新内容要点，这是子任务的依据）；共享样式、页面的增删与排序也由你直接完成
-2. 分派：要改写页面内容的修改，用 edit_pages_in_parallel 把这些页面分组（每组 1–6 页、各组不重复）交给子任务同时修改，每组写清每页的具体要求和要与其他页面保持一致的地方
+1. 规划：先读 README，确定要改哪些页面、每页怎么改。需求、风格或页面规划有变化时先更新 README（「页面规划」写清总页数、逻辑线和每页的新内容要点，这是子任务的依据；页面之间不能讲同一个问题，同类页面在「同类页面格式」中有统一格式）；共享样式、页面的增删与排序也由你直接完成
+2. 分派：要改写页面内容的修改，用 edit_pages_in_parallel 把这些页面分组（每组 1–6 页、各组不重复）交给子任务同时修改，每组写清每页的具体要求和要与其他页面保持一致的地方；同一组同类页面尽量交给同一个子任务，必须拆开时在每组的要求里写明它们共用的统一格式
 3. 审阅：工具返回各组的结果、本轮改过的页面缩略图与布局检查，逐页审阅全部结果（细节用 render_pages）
 4. 下一轮：仍有页面要返工或有遗漏时，再派一轮 edit_pages_in_parallel（只派这些页面，写清问题和改法）；零散的小问题直接用工具修改。全部满意后再总结；之后系统还会做自检与交付检查
 只改一两处文字或样式这类很小的修改，直接用上面的工具完成即可，不必分派
@@ -219,7 +243,7 @@ const TOOL_GUIDE = (scope: EditScope, ask = false, explicitAll = false, parallel
     : '本页内容过多时可用 rewrite_page 拆成多页，或用 write_file 新建页面文件（插在本页之后）；'
 }只有需要重新设计整页时才用 rewrite_page 或 write_file 覆盖整页；一次只写一个文件，避免单次输出过长
 - 如果用户的要求改变了 README 记录的需求、受众、风格约定或页面规划（例如换主色、改受众、增删章节），请用 replace_in_draft（path="README.md"）同步更新 README 的相应部分；修改记录由系统自动追加，不用写
-- 增删、拆分或改名页面后，README 的「页面规划」要与实际的 pages/*.html 一致
+- 增删、拆分或改名页面后，README 的「页面规划」要与实际的 pages/*.html 一致；新增的页面属于已有的一组同类页面时，按 README「同类页面格式」中的统一格式来写；不要新增与已有页面讲同一件事的页面（补充到那一页即可）
 - 不要写 JavaScript（<script>、onclick 等会被移除）；动效用 CSS，图表用内联 SVG
 - 修改后可用 render_pages 查看效果；结束前系统会做交付检查（组装 index.html、检查 README 与各文件），也可以自己先调用 check_project
 ${scope === 'global' && parallel ? PARALLEL_LINE : ''}${ask ? ASK_LINE : ''}${scope === 'global' ? '' : `${SIMILAR_GUIDE(scope, explicitAll)}\n`}全部完成后用一两句话说明做了哪些修改。`;
@@ -239,8 +263,18 @@ export const CHART_NOTE = `【图表工具 make_chart】页面要展示具体数
 - 已有的 make_chart 图表要改数据或样式时，重新调用 make_chart，再把 <img> 的 src 换成新地址
 - 示意性的小图形与图标仍可用内联 SVG / CSS；有具体数据的图表优先用 make_chart`;
 
+/** Writing or editing deck pages when find_logo is available. */
+export const LOGO_NOTE = `【Logo 工具 find_logo / use_logo】页面要出现某家公司、机构或产品的 Logo（封面、页脚、客户 / 合作伙伴、竞品对比等），而用户和模板都没有提供时：先用 find_logo 查找（英文名或官方全称更容易找到，知道官网就填 domain），看预览确认是这家公司当前的官方 Logo、在页面背景上清晰可见，再用 use_logo 保存，把返回的 <img> 放进页面。README 或其他页面已经有这个 Logo 的地址时直接复用，不要重复查找。找不到时用文字写出名称，绝不自己画。`;
+
+/** Planning a deck when find_logo is available: logos are found once and recorded for every page. */
+export const LOGO_PLAN_NOTE = `【Logo】材料需要用到的公司、机构或产品 Logo（用户和模板没有提供的），在规划阶段就用 find_logo 查找、确认后用 use_logo 保存，并把返回的地址写进 README 的风格约定（如「Logo：<img src="/api/assets/…">，放在封面左上与每页页脚，高 48px」），之后各批页面直接使用同一个地址。找不到的写明「用文字名称」，不要自己画。`;
+
 /** After a page batch: how its pages rendered, for the model that wrote them to check and correct. */
-export function pageReviewNote(pages: { label: string; issues: { severity: 'error' | 'warning'; message: string }[] }[], round: number): string {
+export function pageReviewNote(
+  pages: { label: string; issues: { severity: 'error' | 'warning'; message: string }[] }[],
+  round: number,
+  deck = false,
+): string {
   const found = pages
     .filter((p) => p.issues.length)
     .map((p) => `${p.label}：\n${p.issues.map((i) => `  ${i.severity === 'error' ? '✗' : '△'} ${i.message}`).join('\n')}`)
@@ -257,7 +291,13 @@ ${report}
 - 文字超出页面、被容器裁切、相互重叠或被遮挡；字号过小、行距过挤；中英文换行是否难看（如单字成行）
 - 图表与图片完整、清晰、比例合适，数据标签与图例可读，没有被拉伸、裁掉或溢出
 - 版面平衡：留白、对齐、信息层级、配色与字体符合 README 的风格约定，页面不空也不过满
-- 内容完整：本页规划的要点都在，没有遗留的占位文字或大片空白
+- 内容完整：本页规划的要点都在，没有遗留的占位文字或大片空白${
+    deck
+      ? `
+- 同类页面与 README「同类页面格式」一致：版式、区块及顺序、标题写法相同，只换内容
+- 公司 / 产品 Logo 是用户、模板或 find_logo 提供的真实图片（或文字名称），不能是自己用 SVG / CSS 画的图形`
+      : ''
+  }
 需要修改的页面，输出修改后的完整页面文件（<file path="pages/…"> … </file>，路径不变；需要补充样式时输出 ${ADDITIONS_CSS}，只写新增或覆盖的规则，会追加在该文件末尾）；没有问题的页面不要输出。全部没有问题时只回复「无需修改」。`;
 }
 
@@ -356,6 +396,8 @@ ${templateBlock}
 【制作要求】
 - 内容组织要有路演逻辑（如：痛点→方案→产品→市场→商业模式→竞争→团队→财务→融资计划），但以用户提供的内容为准，不要编造关键事实数据；缺少数据时用合理的定性表述或明显的占位提示。
 - 每页一个核心观点，标题提炼结论；数据用 KPI 卡片或 SVG 图表可视化。
+- ${PLAN_RULE(false)}
+- ${SAME_KIND_RULE(false)}
 - 用户提供的可嵌入图片素材应在合适的页面中使用。${
     hasReferences(assets)
       ? '\n- 用户上传了参考图片/参考 PPT 页面：请从中提取内容要点、数据和页面结构作为依据（例如沿用其章节顺序和关键信息），视觉样式仍以所选模板为准；不要直接嵌入这些参考截图。'
@@ -545,10 +587,19 @@ const README_SPEC = (kind: 'template' | 'deck') => `<file path="README.md"> —�
     ? '模板的用途、受众、风格与配色要求（只写风格要求，不写任何具体项目的内容或数据）'
     : '用户的要求要点（用途、受众、核心信息、关键数据与事实、其他要求），忠实保留用户给出的事实和数字'
 }
-## 风格约定 —— 配色（CSS 变量名与色值）、字体、字号层级、间距与圆角、装饰元素、页脚与页码规范，以及主要 class 的用途（后续页面只能使用这些 class）
-## 页面规划 —— 每页一行，格式：\`序号. pages/英文名.html ｜ data-layout 值 ｜ 页面标题 ｜ 内容要点\`（文件名用英文小写字母、数字和 -，不能重复）${
+## 风格约定 —— 配色（CSS 变量名与色值）、字体、字号层级、间距与圆角、装饰元素、页脚与页码规范，以及主要 class 的用途（后续页面只能使用这些 class）${
+  kind === 'deck' ? '；用到的 Logo 写明来源与地址（用户上传 / 模板 / find_logo，或「用文字名称」）' : ''
+}${
   kind === 'deck'
-    ? '；内容要点要具体到这一页要放的信息和数据，后续分批生成页面时主要依据它'
+    ? `
+## 同类页面格式 —— 有结构相同、只是对象不同的一组页面（如方案一 / 二 / 三、改动 1 / 2 / 3）时，为每组写一份统一格式：适用的页面（写页面序号，如「第 4–6 页」，不要写文件路径）、版式与 data-layout、区块及顺序、每个区块写什么、标题格式、用到的 class；没有这类页面就写「无」`
+    : ''
+}
+## 页面规划 —— ${
+  kind === 'deck' ? '第一行写「共 N 页」和整条逻辑线（如「背景 → 问题 → 方案对比 → 结果 → 下一步」）；然后' : ''
+}每页一行，格式：\`序号. pages/英文名.html ｜ data-layout 值 ｜ 页面标题 ｜ 内容要点\`（文件名用英文小写字母、数字和 -，不能重复）${
+  kind === 'deck'
+    ? '；内容要点先写这一页在逻辑线中的作用（回答的一个问题或得出的一个结论），再具体到这一页要放的信息和数据，后续分批生成页面时主要依据它；同类页面注明套用哪份统一格式。写完检查：任意两页不讲同一个或高度相关的问题，没有可有可无的页面'
     : '；内容要点写这一页提供的组件与占位内容（例如“KPI 卡片 ×4：XX%、X,XXX 万 + 说明占位”）'
 }`;
 
@@ -594,7 +645,9 @@ ${templateOutline(template)}
 ${TEMPLATE_RULES((brief as TemplateBrief).pageCount || 10, hasReferences(assets))}`
       : `【制作要求】
 - 内容组织要有路演逻辑（如：痛点→方案→产品→市场→商业模式→竞争→团队→财务→融资计划），但以用户提供的内容为准，不要编造关键事实数据；缺少数据时用合理的定性表述或明显的占位提示。
-- 每页一个核心观点，标题提炼结论；数据用 KPI 卡片或 SVG 图表可视化；用户提供的可嵌入图片素材应在合适的页面中使用。${
+- 每页一个核心观点，标题提炼结论；数据用 KPI 卡片或 SVG 图表可视化；用户提供的可嵌入图片素材应在合适的页面中使用。
+- ${PLAN_RULE()}
+- ${SAME_KIND_RULE()}${
           template ? '\n- 规划每页时从模板版式页中选择合适的版式（data-layout 与模板一致），视觉风格以模板为准。' : ''
         }${
           hasReferences(assets)
@@ -692,7 +745,11 @@ ${sample ? `\n【风格参照：已完成的 ${sample.file}】\n${sample.html}\n
   }
 【本批任务】按 README 的页面规划输出下列 ${batch.length} 个页面文件：
 ${batch.map((b) => `- 第 ${plan.indexOf(b) + 1} 页：${b.line}`).join('\n')}
-
+${
+    kind === 'deck'
+      ? '- 属于一组同类页面的，严格套用 README「同类页面格式」中这组的统一格式（版式、区块及顺序、标题写法、class 都相同，只换内容）；同组的其他页面可能由其他批次同时制作，不要自行改变格式\n- 每页只讲规划中写给它的内容，不要重复其他页面的内容\n- Logo 只用 README 中写明的地址或素材列表中的 Logo，不要自己画\n'
+      : ''
+  }
 【输出格式】
 - 每个文件用 <file path="pages/名称.html"> … </file> 包裹（路径与上面一致），内容是一个 <section class="slide" data-layout="…">，页面中不要写 <style>
 - 现有 class 确实无法满足时，可再输出一个 <file path="${ADDITIONS_CSS}">，只写新增规则（会追加到该文件末尾）
@@ -740,7 +797,11 @@ export function buildGroupEditPrompt(doc: DeckDoc, kind: 'template' | 'deck', ta
 ${task.request}
 
 【本组任务】
-${task.instructions}
+${task.instructions}${
+    kind === 'deck'
+      ? '\n（本组页面属于一组同类页面时，按 README「同类页面格式」中的统一格式写，与同组其他页面保持一致；不要写与其他页面内容重叠的内容；Logo 只用已有的 Logo 素材，不要自己画）'
+      : ''
+  }
 
 ${readmeBlock(doc)}
 

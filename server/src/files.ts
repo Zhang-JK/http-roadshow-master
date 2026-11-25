@@ -135,7 +135,12 @@ export function parseFileBlocks(text: string): FileBlock[] {
 export function plannedPages(readme: string): { path: string; line: string }[] {
   const seen = new Set<string>();
   const out: { path: string; line: string }[] = [];
-  for (const line of readme.split('\n')) {
+  // Other sections may name pages too (e.g. which pages share a format); the plan's own order wins.
+  const lines = readme.split('\n');
+  const start = lines.findIndex((l) => /^#{1,3}\s*页面规划/.test(l));
+  const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && /^#{1,2}\s/.test(l));
+  const plan = start < 0 ? lines : lines.slice(start + 1, end < 0 ? undefined : end);
+  for (const line of plan) {
     const m = line.match(/pages\/[A-Za-z0-9][\w.-]*\.html/);
     if (!m || seen.has(m[0])) continue;
     seen.add(m[0]);
